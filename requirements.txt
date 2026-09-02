@@ -1,0 +1,26 @@
+# AMR Cascade Platform
+# Full runtime requirements for the active pipeline on local and HPC environments.
+# Python: 3.12+
+
+setuptools>=68
+wheel>=0.43
+
+numpy>=1.26,<3.0
+pandas>=2.2,<3.0
+pyarrow>=15,<20
+PyYAML>=6,<7
+tqdm>=4.66,<5.0
+
+dask[dataframe]>=2024.8.0,<2026.0
+distributed>=2024.8.0,<2026.0
+
+scipy>=1.12,<2.0
+scikit-learn>=1.4,<2.0
+xgboost>=2.0,<3.0
+
+matplotlib>=3.8,<4.0
+networkx>=3.2,<4.0
+plotly>=5.24,<6.0
+nbformat>=5.10,<6.0
+kaleido>=0.2.1,<1.0
+pycirclize>=1.7,<2.0

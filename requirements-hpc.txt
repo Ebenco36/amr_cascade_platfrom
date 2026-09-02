@@ -1,0 +1,4 @@
+# HPC install target.
+# Mirrors the full runtime requirements used by the production pipeline runners.
+
+-r requirements.txt

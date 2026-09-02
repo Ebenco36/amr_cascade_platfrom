@@ -1,0 +1,47 @@
+sites:
+  armd:
+    cohort: microbiology_cultures_cohort.csv
+    comorbidity: microbiology_cultures_comorbidity.csv
+    microbial_resistance: microbiology_cultures_microbial_resistance.csv
+    demographics: microbiology_cultures_demographics.csv
+    labs: microbiology_cultures_labs.csv
+    vitals: microbiology_cultures_vitals.csv
+    adi_scores: microbiology_cultures_adi_scores.csv
+    ward_info: microbiology_cultures_ward_info.csv
+    nursing_home_visits: microbiology_cultures_nursing_home_visits.csv
+    prior_med: microbiology_cultures_prior_med.csv
+    prior_procedures: microbiology_cultures_priorprocedures.csv
+    prior_infecting_organism: microbiology_culture_prior_infecting_organism.csv
+    antibiotic_class_exposure: microbiology_cultures_antibiotic_class_exposure.csv
+    antibiotic_subtype_exposure: microbiology_cultures_antibiotic_subtype_exposure.csv
+    implied_susceptibility: microbiology_cultures_implied_susceptibility.csv
+    implied_susceptibility_rules: implied_susceptibility_rules.csv
+  armd_ecuh:
+    cohort: 00_microbiology_cultures_cohort.csv
+    adi_scores: 01_microbiology_cultures_adi_scores.csv
+    antibiotic_class_exposure: 02_microbiology_cultures_antibiotic_class_exposure.csv
+    antibiotic_subtype_exposure: 03_microbiology_cultures_antibiotic_subtype_exposure.csv
+    comorbidity: 04_microbiology_cultures_comorbidity.csv
+    demographics: 05_microbiology_cultures_demographics.csv
+    labs: 06_microbiology_cultures_labs.csv
+    microbial_resistance: 07_microbiology_cultures_microbial_resistance.csv
+    nursing_home_visits: 08_microbiology_cultures_nursing_home_visits.csv
+    prior_infecting_organism: 09_microbiology_cultures_prior_infecting_organism.csv
+    prior_med: 010_microbiology_cultures_prior_med.csv
+    prior_procedures: 011_microbiology_cultures_prior_procedures.csv
+    ward_info: 012_microbiology_cultures_ward_info.csv
+    vitals: 013_microbiology_cultures_vitals.csv
+  armd_utsw:
+    cohort: microbiology_cultures_cohort.csv
+    comorbidity: microbiology_cultures_comorbidity.csv
+    microbial_resistance: microbiology_cultures_microbial_resistance.csv
+    demographics: microbiology_cultures_demographics.csv
+    labs: microbiology_cultures_labs.csv
+    adi_scores: microbiology_cultures_adi_scores.csv
+    ward_info: microbiology_cultures_ward_info.csv
+    nursing_home_visits: microbiology_cultures_nursing_home_visits.csv
+    prior_med: microbiology_cultures_prior_med.csv
+    prior_procedures: microbiology_cultures_prior_procedures.csv
+    prior_infecting_organism: microbiology_cultures_prior_infecting_organism.csv
+    antibiotic_class_exposure: microbiology_cultures_antibiotic_class_exposure.csv
+    antibiotic_subtype_exposure: microbiology_cultures_antibiotic_subtype_exposure.csv

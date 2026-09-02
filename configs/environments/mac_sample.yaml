@@ -1,0 +1,6 @@
+environment:
+  name: mac_sample
+  data_root: data_sample_check
+  execution_mode: local
+  default_data_layer: sample
+  allow_raw_processing: false

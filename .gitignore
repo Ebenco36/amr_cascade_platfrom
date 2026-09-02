@@ -1,0 +1,127 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Test, lint, and notebook artifacts
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.ipynb_checkpoints/
+
+# Local tooling and OS files
+.DS_Store
+Thumbs.db
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
+
+# Logs and temporary runtime files
+logs/
+*.log
+tmp/
+temp/
+
+# Matplotlib / local cache
+.cache/
+
+# Generated reports and exported figures
+outputs/figures/
+outputs/tables/
+outputs/reports/
+outputs/logs/
+
+# Local pipeline verification scratch runs
+data_sample_check/
+
+# Derived data layers
+data/sample/
+data/bronze/
+data/silver/
+data/harmonized/
+data/gold/
+data/interim/
+data/features/
+data/artifacts/
+data/metadata/
+
+# Keep raw/reference directory contracts in git
+!data/reference/
+!data/reference/**
+!data/raw/
+!data/raw/**/.gitkeep
+!data/sample/**/.gitkeep
+!data/bronze/**/.gitkeep
+!data/silver/**/.gitkeep
+!data/harmonized/**/.gitkeep
+!data/gold/**/.gitkeep
+!data/interim/**/.gitkeep
+!data/features/**/.gitkeep
+!data/artifacts/**/.gitkeep
+!data/metadata/**/.gitkeep
+
+# Optional local environment files
+.env
+.env.*
+*.tex
+*.key
+*.png
+presentation.md
+methods_doc.txt
+history.txt
+dag_explanation.txt
+cascadeast_impute_framework.txt
+cascade.txt
+references.bib
+sample.csv
+slides.txt
+mmd/
+docs/
+data/raw/
+data/sample/
+data/tutorial_synthetic_raw/
+data/tutorial_synthetic_outputs/
+data/rki_data
+data/rki_processed/
+.ipython_local/
+.jupyter_local/
+cascade.ipynb
+notebooks/
+index.ipynb
+papers/
+/outputs/
+compare.txt
+.claude/
+myCommands.md
+novelty_work.txt
+runbooks/
+cascade.mmd
+tutorial.md
+tutorial_full.md
+tutorial2.md
+latexmkrc
+analysis_paper1
+mini_command.md
+__MACOSX/
+data/processed/
+slide_flow.md
+database/
+relationship_diagram_for_data.mmd
+# scripts/legacy/
+test_dataset/
+test_dataset_large/
+playing.ipynb
+diagnostics/
+paper1_detection_validation/
+paper2_prevalence_surveillance/
+export_archives/

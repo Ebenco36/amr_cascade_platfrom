@@ -1,0 +1,14 @@
+features:
+  combined_output_filename: model_ready_pair_features.parquet
+  metadata_filename: feature_build_summary.json
+  auto_build_comorbidity: true
+  auto_prepare_silver_feature_sources: true
+  comorbidity_output_filename: comorbidity_aggregated.parquet
+  comorbidity_feature_prefix: comorb_
+  baseline_output_filename: baseline_features.parquet
+  acute_output_filename: acute_features.parquet
+  history_output_filename: history_features.parquet
+  history_windows_days:
+    - 30
+    - 90
+    - 365

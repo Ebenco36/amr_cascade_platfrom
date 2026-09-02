@@ -1,0 +1,23 @@
+platform:
+  sites:
+    - armd
+    - armd_ecuh
+    - armd_utsw
+  id_columns:
+    - anon_id
+    - pat_enc_csn_id_coded
+    - order_proc_id_coded
+  missing_tokens:
+    - "Null"
+    - "NULL"
+    - ""
+  time_columns:
+    - order_time_jittered
+    - order_time_jittered_utc
+  reference_files:
+    intrinsic_resistance: intrinsic_resistance.csv
+    supplemental_intrinsic_resistance: supplemental_intrinsic_resistance.csv
+    canonical_table_map: canonical_table_map.yaml
+  optional_tables:
+    - implied_susceptibility
+    - implied_susceptibility_rules

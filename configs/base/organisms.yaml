@@ -1,0 +1,8 @@
+organisms:
+  priority_organisms:
+    - "ESCHERICHIA COLI"
+    - "KLEBSIELLA PNEUMONIAE"
+    - "PSEUDOMONAS AERUGINOSA"
+    - "STAPH AUREUS {MRSA}"
+    - "ENTEROCOCCUS FAECALIS"
+  min_episode_threshold: 500

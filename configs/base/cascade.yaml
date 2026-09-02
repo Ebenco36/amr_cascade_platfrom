@@ -1,0 +1,47 @@
+cascade:
+  primary_observation_layer: observed_ast
+  upstream_result_positive: RESISTANT
+  upstream_result_negative: SUSCEPTIBLE
+  continuity_correction: 0.5
+  min_total_support: 25
+  min_result_support: 5
+  min_total_tested_events_for_retention: 1
+  sensitivity_min_total_supports:
+    - 10
+    - 25
+    - 50
+    - 100
+  sensitivity_min_result_supports:
+    - 1
+    - 5
+    - 10
+  sensitivity_retained_min_escalation_ratios:
+    - 1.0
+    - 1.5
+    - 2.0
+  sensitivity_continuity_corrections:
+    - 0.1
+    - 0.5
+    - 1.0
+  validate_suppression_cascades: true
+  include_acuity_covariates: false
+  pathway_top_n: 30
+  require_downstream_eligible: true
+  filter_symmetric_cotesting: true
+  cotesting_probability_threshold: 0.95
+  retained_min_escalation_ratio: 1.0
+  adjusted_or_positive_threshold: 1.0
+  validation:
+    enabled: true
+    permutation_iterations: 250
+    bootstrap_iterations: 250
+    random_seed: 20260421
+    permutation_p_value_threshold: 0.05
+    bootstrap_sign_stability_threshold: 0.8
+    minimum_replicated_sites: 2
+    minimum_site_direction_agreement_rate: 0.67
+    i_squared_threshold: 50.0
+    between_site_permutation_enabled: true
+  outputs:
+    result_dir: cascade
+    summary_filename: cascade_summary.json

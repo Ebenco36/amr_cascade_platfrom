@@ -1,0 +1,39 @@
+gold:
+  shared_tables:
+    - cohort
+  episode_key_columns:
+    - anon_id
+    - pat_enc_csn_id_coded
+    - order_proc_id_coded
+    - order_time_jittered
+    - organism
+    - source_site
+  culture_episode_columns:
+    - anon_id
+    - pat_enc_csn_id_coded
+    - order_proc_id_coded
+    - order_time_jittered
+    - organism
+    - source_site
+    - ordering_mode
+    - culture_description
+    - was_positive
+  culture_drug_columns:
+    - anon_id
+    - pat_enc_csn_id_coded
+    - order_proc_id_coded
+    - order_time_jittered
+    - organism
+    - source_site
+    - antibiotic
+    - susceptibility
+  testing_matrix_prefix: tested__
+  eligibility:
+    # Options:
+    # - biological: current broad denominator; non-intrinsic organism-drug pairs are eligible.
+    # - operational_site_organism_era: primary denominator; non-intrinsic pairs must also be
+    #   empirically observed in the same source_site + organism + calendar era.
+    denominator: operational_site_organism_era
+    availability_era_years: 5
+    availability_min_observed: 1
+    availability_time_column: order_time_jittered

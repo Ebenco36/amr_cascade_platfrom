@@ -1,0 +1,44 @@
+cleaning:
+  trim_strings: true
+  uppercase_standard_columns:
+    - organism
+    - antibiotic
+    - susceptibility
+    - implied_susceptibility
+  duplicate_resolution:
+    default_strategy: drop_exact
+    per_table:
+      cohort:
+        subset:
+          - anon_id
+          - pat_enc_csn_id_coded
+          - order_proc_id_coded
+          - organism
+          - antibiotic
+          - susceptibility
+      microbial_resistance:
+        subset:
+          - anon_id
+          - pat_enc_csn_id_coded
+          - order_proc_id_coded
+          - organism
+          - antibiotic
+          - resistant_time_to_culturetime
+      comorbidity:
+        subset:
+          - anon_id
+          - pat_enc_csn_id_coded
+          - order_proc_id_coded
+          - comorbidity_component
+      labs:
+        strategy: shard_coalesce
+        subset:
+          - anon_id
+          - pat_enc_csn_id_coded
+          - order_proc_id_coded
+      vitals:
+        strategy: shard_coalesce
+        subset:
+          - anon_id
+          - pat_enc_csn_id_coded
+          - order_proc_id_coded

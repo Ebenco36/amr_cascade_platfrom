@@ -1,0 +1,40 @@
+schema:
+  default_exempt_tables:
+    - implied_susceptibility_rules
+  required_columns:
+    default:
+      - anon_id
+      - pat_enc_csn_id_coded
+      - order_proc_id_coded
+      - source_site
+    cohort:
+      - organism
+      - antibiotic
+      - susceptibility
+    comorbidity:
+      - comorbidity_component
+      - comorbidity_component_start_days_culture
+      - comorbidity_component_end_days_culture
+    microbial_resistance:
+      - organism
+      - antibiotic
+      - resistant_time_to_culturetime
+    implied_susceptibility:
+      - organism
+      - antibiotic
+      - susceptibility
+      - implied_susceptibility
+    implied_susceptibility_rules:
+      - Organism
+      - Antibiotic
+      - Rule
+      - source_site
+  required_non_null_columns:
+    default:
+      - anon_id
+      - pat_enc_csn_id_coded
+      - order_proc_id_coded
+    implied_susceptibility_rules: []
+  allowed_time_columns:
+    - order_time_jittered
+    - order_time_jittered_utc

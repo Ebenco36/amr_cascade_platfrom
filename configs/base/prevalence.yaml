@@ -1,0 +1,19 @@
+prevalence:
+  output_dir: prevalence_shift
+  min_eligible_support: 200
+  min_tested_support: 30
+  min_resistant_support: 5
+  default_top_n: 20
+  delta_curve_points: 41
+  mnar_lambda_grid:
+    - -2.0
+    - -1.0
+    - -0.5
+    - 0.0
+    - 0.5
+    - 1.0
+    - 2.0
+  decision_thresholds:
+    - 0.10
+    - 0.20
+    - 0.30

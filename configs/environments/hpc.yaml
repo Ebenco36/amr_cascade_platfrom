@@ -1,0 +1,15 @@
+environment:
+  name: hpc
+  data_root: data
+  execution_mode: distributed
+  default_data_layer: raw
+  allow_raw_processing: true
+
+features:
+  auto_build_comorbidity: false
+  auto_prepare_silver_feature_sources: false
+
+cascade:
+  validation:
+    permutation_iterations: 1000
+    bootstrap_iterations: 1000

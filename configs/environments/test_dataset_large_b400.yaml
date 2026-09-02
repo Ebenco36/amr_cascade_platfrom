@@ -1,0 +1,16 @@
+environment:
+  name: test_dataset_large_b400
+  data_root: test_dataset_large
+  execution_mode: local
+  default_data_layer: sample
+  allow_raw_processing: false
+
+cascade:
+  validation:
+    permutation_iterations: 400
+    bootstrap_iterations: 400
+
+reporting:
+  tables_dir: test_dataset_large/outputs/tables
+  figures_dir: test_dataset_large/outputs/figures
+  reports_dir: test_dataset_large/outputs/reports

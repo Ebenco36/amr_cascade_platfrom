@@ -1,0 +1,36 @@
+modeling:
+  task_name: downstream_testing
+  target_column: downstream_tested
+  split_column: source_site
+  default_split_strategy: site
+  train_sites:
+    - armd
+  validation_sites:
+    - armd_ecuh
+  test_sites:
+    - armd_utsw
+  temporal_train_end_year: 2019
+  temporal_validation_end_year: 2021
+  temporal_test_end_year: 2024
+  estimators:
+    - logistic_regression
+    - random_forest
+    - xgboost
+  include_cascade_features: true
+  output_dir: modeling
+  random_state: 42
+  logistic_regression:
+    max_iter: 5000
+    solver: lbfgs
+    class_weight: balanced
+  random_forest:
+    n_estimators: 200
+    max_depth: 12
+    min_samples_leaf: 5
+    class_weight: balanced_subsample
+  xgboost:
+    n_estimators: 150
+    max_depth: 6
+    learning_rate: 0.1
+    subsample: 0.8
+    colsample_bytree: 0.8

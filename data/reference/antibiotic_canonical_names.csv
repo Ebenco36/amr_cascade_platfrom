@@ -1,0 +1,44 @@
+raw_name_lower,canonical_name,drug_class
+5 fluorocytosine,5-fluorocytosine,antifungal
+amikacin iv,amikacin,antibacterial
+amox/clavulanate,amoxicillin/clavulanate,antibacterial
+amoxicillin/clavulanic acid,amoxicillin/clavulanate,antibacterial
+amoxicillin/k clavulanate aug,amoxicillin/clavulanate,antibacterial
+amp/sulbactam,ampicillin/sulbactam,antibacterial
+amphotericin b,amphotericin b,antifungal
+augmentin,amoxicillin/clavulanate,antibacterial
+bedaquilline,bedaquilline,antimycobacterial
+caspofungin,caspofungin,antifungal
+caspofungin acetate,caspofungin,antifungal
+cefotaxime+clavulanic acid,cefotaxime/clavulanate,antibacterial
+cefoxitin screen,cefoxitin screen,phenotypic_test
+ceftazidime+clavulanic acid,ceftazidime/clavulanate,antibacterial
+cephalexin/cephalothin,cephalothin,antibacterial
+ecim,ecim,phenotypic_test
+fluconazole,fluconazole,antifungal
+fluconizole,fluconazole,antifungal
+gent screen,gentamicin screen,phenotypic_test
+gentamicin screen,gentamicin screen,phenotypic_test
+imipenem/ebactam,imipenem/relebactam,antibacterial
+inducible clindamycin,clindamycin,phenotypic_test
+isoniazid,isoniazid,antimycobacterial
+"isoniazid, high",isoniazid,antimycobacterial
+"isoniazid, low",isoniazid,antimycobacterial
+itraconazole,itraconazole,antifungal
+mcim,mcim,phenotypic_test
+micafungin,micafungin,antifungal
+miconazole,miconazole,antifungal
+penicillin,benzylpenicillin,antibacterial
+pip/tazobactam,piperacillin/tazobactam,antibacterial
+polymixin e,colistin,antibacterial
+rifampin,rifampicin,antibacterial
+synercid,quinupristin/dalfopristin,antibacterial
+ticacarcillin/clavulanic acid,ticarcillin/clavulanate,antibacterial
+ticarcil/clavulanate,ticarcillin/clavulanate,antibacterial
+ticarcillin-clavulanic acid,ticarcillin/clavulanate,antibacterial
+ticarillin/clavulanic acid,ticarcillin/clavulanate,antibacterial
+tobramycin rm,tobramycin,antibacterial
+trimeth-sulfamethoxazole,trimethoprim/sulfamethoxazole,antibacterial
+trimeth/sulf,trimethoprim/sulfamethoxazole,antibacterial
+vancomycin rm,vancomycin,antibacterial
+voriconazole,voriconazole,antifungal

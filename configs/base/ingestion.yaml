@@ -1,0 +1,9 @@
+ingestion:
+  csv_read:
+    dask_blocksize: 100MB
+    use_dask_threshold_mb: 25.0
+    encoding: utf-8
+  bronze:
+    write_index: false
+    compression: snappy
+    metadata_subdir: bronze

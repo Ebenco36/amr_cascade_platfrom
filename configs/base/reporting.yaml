@@ -1,0 +1,38 @@
+reporting:
+  tables_dir: outputs/tables
+  figures_dir: outputs/figures
+  reports_dir: outputs/reports
+  forest_top_n: 15
+  sankey_top_n: 30
+  default_figure_formats:
+    - html
+    - png
+    - pdf
+    - svg
+  default_figures:
+    - primary_cascade_forest
+    - validated_primary_cascade_forest
+    - cascade_sankey
+    - cascade_chord
+    - cascade_network
+    - aware_transition_heatmap
+    - prevalence_shift_forest
+    - prevalence_shift_curves
+    - mnar_tipping_point
+    - model_metrics_comparison
+    - model_pr_curve
+    - model_roc_curve
+    - model_calibration
+    - model_threshold_analysis
+    - validation_diagnostics
+    - er_landscape
+    - mnar_prevalence_shift_distribution
+    - validation_funnel
+    - panel_bundling
+    - temporal_stability
+    - cross_site_concordance
+    - consort_diagram
+    # - dataset_characterization   # opt-in: eligible vs. observed space characterisation suite
+  plotly_template: plotly_white
+  image_width: 1600
+  image_height: 900

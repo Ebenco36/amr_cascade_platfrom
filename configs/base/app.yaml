@@ -1,0 +1,3 @@
+app:
+  name: amr_cascade_platform
+  default_environment: mac

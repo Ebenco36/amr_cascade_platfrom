@@ -1,0 +1,234 @@
+harmonization:
+  shared_tables:
+    - cohort
+    - comorbidity
+    - microbial_resistance
+    - demographics
+    - labs
+    - vitals
+    - ward_info
+    - antibiotic_class_exposure
+    - prior_infecting_organism
+    - adi_scores
+    - prior_procedures
+    - antibiotic_subtype_exposure
+    - nursing_home_visits
+  optional_shared_tables:
+    - demographics
+    - labs
+    - vitals
+    - ward_info
+    - antibiotic_class_exposure
+    - prior_infecting_organism
+    - adi_scores
+    - prior_procedures
+    - antibiotic_subtype_exposure
+    - nursing_home_visits
+  rename_columns:
+    order_time_jittered_utc: order_time_jittered
+    prior_infecting_organism_days_to_culutre: prior_infecting_organism_days_to_culture
+    medication_time_to_cultureTime: medication_time_to_culturetime
+  contracts:
+    cohort:
+      columns:
+        - anon_id
+        - pat_enc_csn_id_coded
+        - order_proc_id_coded
+        - order_time_jittered
+        - ordering_mode
+        - culture_description
+        - was_positive
+        - organism
+        - antibiotic
+        - susceptibility
+        - source_site
+    comorbidity:
+      columns:
+        - anon_id
+        - pat_enc_csn_id_coded
+        - order_proc_id_coded
+        - order_time_jittered
+        - comorbidity_component
+        - comorbidity_component_start_days_culture
+        - comorbidity_component_end_days_culture
+        - source_site
+    microbial_resistance:
+      columns:
+        - anon_id
+        - pat_enc_csn_id_coded
+        - order_proc_id_coded
+        - order_time_jittered
+        - organism
+        - antibiotic
+        - resistant_time_to_culturetime
+        - source_site
+    demographics:
+      columns:
+        - anon_id
+        - pat_enc_csn_id_coded
+        - order_proc_id_coded
+        - age
+        - gender
+        - source_site
+    labs:
+      columns:
+        - anon_id
+        - pat_enc_csn_id_coded
+        - order_proc_id_coded
+        - Period_Day
+        - Q75_wbc
+        - Q25_wbc
+        - median_wbc
+        - Q25_neutrophils
+        - Q75_neutrophils
+        - median_neutrophils
+        - Q25_lymphocytes
+        - Q75_lymphocytes
+        - median_lymphocytes
+        - Q25_hgb
+        - Q75_hgb
+        - median_hgb
+        - Q25_plt
+        - Q75_plt
+        - median_plt
+        - Q75_na
+        - Q25_na
+        - median_na
+        - Q75_hco3
+        - Q25_hco3
+        - median_hco3
+        - Q75_bun
+        - Q25_bun
+        - median_bun
+        - Q75_cr
+        - Q25_cr
+        - median_cr
+        - Q75_lactate
+        - Q25_lactate
+        - median_lactate
+        - Q75_procalcitonin
+        - Q25_procalcitonin
+        - median_procalcitonin
+        - first_procalcitonin
+        - last_procalcitonin
+        - first_lactate
+        - last_lactate
+        - first_cr
+        - last_cr
+        - first_bun
+        - last_bun
+        - first_hco3
+        - last_hco3
+        - first_na
+        - last_na
+        - first_plt
+        - last_plt
+        - first_hgb
+        - last_hgb
+        - first_lymphocytes
+        - last_lymphocytes
+        - first_neutrophils
+        - last_neutrophils
+        - first_wbc
+        - last_wbc
+        - source_site
+    vitals:
+      columns:
+        - anon_id
+        - pat_enc_csn_id_coded
+        - order_proc_id_coded
+        - Q25_heartrate
+        - Q75_heartrate
+        - median_heartrate
+        - Q25_resprate
+        - Q75_resprate
+        - median_resprate
+        - Q25_temp
+        - Q75_temp
+        - median_temp
+        - Q25_sysbp
+        - Q75_sysbp
+        - median_sysbp
+        - Q25_diasbp
+        - Q75_diasbp
+        - median_diasbp
+        - first_diasbp
+        - last_diasbp
+        - first_sysbp
+        - last_sysbp
+        - first_temp
+        - last_temp
+        - first_resprate
+        - last_resprate
+        - first_heartrate
+        - last_heartrate
+        - source_site
+    ward_info:
+      columns:
+        - anon_id
+        - pat_enc_csn_id_coded
+        - order_proc_id_coded
+        - order_time_jittered
+        - hosp_ward_IP
+        - hosp_ward_OP
+        - hosp_ward_ER
+        - hosp_ward_ICU
+        - source_site
+    antibiotic_class_exposure:
+      columns:
+        - anon_id
+        - pat_enc_csn_id_coded
+        - order_proc_id_coded
+        - order_time_jittered
+        - medication_category
+        - medication_name
+        - antibiotic_class
+        - time_to_culturetime
+        - source_site
+    prior_infecting_organism:
+      columns:
+        - anon_id
+        - pat_enc_csn_id_coded
+        - order_proc_id_coded
+        - order_time_jittered
+        - prior_organism
+        - prior_infecting_organism_days_to_culture
+        - source_site
+    adi_scores:
+      columns:
+        - anon_id
+        - pat_enc_csn_id_coded
+        - order_proc_id_coded
+        - order_time_jittered
+        - adi_score
+        - adi_state_rank
+        - source_site
+    prior_procedures:
+      columns:
+        - anon_id
+        - pat_enc_csn_id_coded
+        - order_proc_id_coded
+        - order_time_jittered
+        - procedure_description
+        - procedure_time_to_culturetime
+        - source_site
+    antibiotic_subtype_exposure:
+      columns:
+        - anon_id
+        - pat_enc_csn_id_coded
+        - order_proc_id_coded
+        - order_time_jittered
+        - medication_category
+        - medication_name
+        - antibiotic_subtype
+        - antibiotic_subtype_category
+        - medication_time_to_culturetime
+        - source_site
+    nursing_home_visits:
+      columns:
+        - anon_id
+        - pat_enc_csn_id_coded
+        - order_proc_id_coded
+        - order_time_jittered
+        - nursing_home_visit_culture
+        - source_site

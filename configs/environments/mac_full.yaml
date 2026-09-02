@@ -1,0 +1,11 @@
+environment:
+  name: mac_full
+  data_root: data
+  execution_mode: local
+  default_data_layer: raw
+  allow_raw_processing: true
+
+cascade:
+  validation:
+    permutation_iterations: 250
+    bootstrap_iterations: 250

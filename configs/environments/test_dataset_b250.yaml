@@ -1,0 +1,16 @@
+environment:
+  name: test_dataset_b250
+  data_root: test_dataset
+  execution_mode: local
+  default_data_layer: sample
+  allow_raw_processing: false
+
+cascade:
+  validation:
+    permutation_iterations: 250
+    bootstrap_iterations: 250
+
+reporting:
+  tables_dir: test_dataset/outputs/tables
+  figures_dir: test_dataset/outputs/figures
+  reports_dir: test_dataset/outputs/reports

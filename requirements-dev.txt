@@ -1,0 +1,5 @@
+# Development and test requirements for the AMR Cascade Platform.
+
+-r requirements.txt
+
+pytest>=8.0,<9.0
