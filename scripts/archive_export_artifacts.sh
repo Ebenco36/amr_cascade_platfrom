@@ -29,6 +29,19 @@ Options:
   --include-all-data         Include the full data directory. This can be huge.
                              Overrides the default data/artifacts/gold/features
                              selection and ignores other data include flags.
+  --include-logs             Include the top-level logs/ directory (SLURM job
+                             .out/.err files, pipeline event and timeline logs,
+                             and the job-ID file). Not part of the default set
+                             because logs are run-specific, not pipeline
+                             artefacts. Composable with any data mode above,
+                             including --include-all-data.
+  --include-path PATH        Include an additional path, relative to the
+                             project root. Repeatable: pass --include-path
+                             more than once to add several arbitrary paths
+                             without needing a dedicated flag for each.
+                             Existence is checked the same way as every other
+                             include; a missing path is skipped with a warning,
+                             not a failure. Composable with any data mode above.
   --keep-stale-figures       Keep */_stale_figure_archive/* in the archive.
                              Default: exclude stale archived figures.
   --keep-ds-store            Keep .DS_Store files. Default: exclude them.
@@ -40,10 +53,12 @@ Examples:
   bash scripts/archive_export_artifacts.sh --include-test-outputs
   bash scripts/archive_export_artifacts.sh --include-reference --include-intermediate
   bash scripts/archive_export_artifacts.sh --include-raw --name amr_cascade_full_data
+  bash scripts/archive_export_artifacts.sh --include-logs --include-intermediate
+  bash scripts/archive_export_artifacts.sh --include-path configs --include-path notebooks
 
 Recommended HPC usage after production finishes:
   cd /scratch/projekte/FG37_ARS_ZKI_PH5/amr_cascade_platfrom
-  bash scripts/archive_export_artifacts.sh --name amr_cascade_hpc_outputs
+  bash scripts/archive_export_artifacts.sh --include-logs --include-intermediate --name amr_cascade_hpc_outputs
 
 Recommended Mac usage:
   cd /Users/awotoroebenezer/Desktop/amr_cascade_platform
@@ -77,6 +92,8 @@ INCLUDE_REFERENCE=0
 INCLUDE_INTERMEDIATE=0
 INCLUDE_RAW=0
 INCLUDE_ALL_DATA=0
+INCLUDE_LOGS=0
+EXTRA_PATHS=()
 KEEP_STALE_FIGURES=0
 KEEP_DS_STORE=0
 DRY_RUN=0
@@ -117,6 +134,15 @@ while [[ $# -gt 0 ]]; do
       INCLUDE_ALL_DATA=1
       shift
       ;;
+    --include-logs)
+      INCLUDE_LOGS=1
+      shift
+      ;;
+    --include-path)
+      [[ $# -ge 2 ]] || die "--include-path requires a value"
+      EXTRA_PATHS+=("$2")
+      shift 2
+      ;;
     --keep-stale-figures)
       KEEP_STALE_FIGURES=1
       shift
@@ -153,6 +179,10 @@ else
     includes+=(data/bronze data/silver data/harmonized data/interim data/metadata)
   fi
   [[ "${INCLUDE_RAW}" -eq 1 ]] && includes+=(data/raw)
+fi
+[[ "${INCLUDE_LOGS}" -eq 1 ]] && includes+=(logs)
+if [[ "${#EXTRA_PATHS[@]}" -gt 0 ]]; then
+  includes+=("${EXTRA_PATHS[@]}")
 fi
 
 existing=()
