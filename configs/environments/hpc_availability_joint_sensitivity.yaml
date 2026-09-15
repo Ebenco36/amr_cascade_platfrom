@@ -1,0 +1,49 @@
+# Sensitivity variant of hpc.yaml: identical primary settings, except BOTH
+# operational-availability parameters are tightened simultaneously -- minimum
+# observed support raised from 1 to 5, AND era width narrowed from 5 years to
+# 1 -- to test whether validated patterns survive the stricter denominator
+# under both restrictions at once, not just each independently.
+# Reviewer-requested check (see Methods, Denominator construction): the two
+# single-parameter sensitivities (hpc_availability_sensitivity.yaml,
+# hpc_availability_annual_sensitivity.yaml) target different vulnerabilities
+# in the primary denominator (support count and era width) and are assessed
+# independently; this config is the joint case where both are tightened
+# together (minimum observed support of five within a one-year era).
+#
+# data_root is DELIBERATELY not "data" -- see hpc_availability_sensitivity.yaml's
+# comment for why (PathManager has no other environment-specific output
+# segregation, so reusing "data" would silently overwrite the primary run's
+# gold-layer output). Before running:
+#   mkdir -p data_availability_joint_sensitivity
+#   for d in raw sample bronze silver harmonized metadata reference interim features; do
+#     ln -s "$(pwd)/data/$d" "data_availability_joint_sensitivity/$d"
+#   done
+#   mkdir -p data_availability_joint_sensitivity/gold data_availability_joint_sensitivity/artifacts
+#
+# Usage: run the full DAG with --env hpc_availability_joint_sensitivity
+# instead of --env hpc. This changes the eligibility denominator itself, so
+# it requires a full rerun from the eligibility/gold stage forward -- it
+# cannot be computed by re-filtering an already-materialised results table.
+# Do not run this config's reporting stage: outputs/ is always
+# <project_root>/outputs regardless of data_root and is NOT isolated by this
+# symlink setup -- this sensitivity check only needs validation_results.parquet.
+environment:
+  name: hpc_availability_joint_sensitivity
+  data_root: data_availability_joint_sensitivity
+  execution_mode: distributed
+  default_data_layer: raw
+  allow_raw_processing: true
+
+features:
+  auto_build_comorbidity: false
+  auto_prepare_silver_feature_sources: false
+
+cascade:
+  validation:
+    permutation_iterations: 1000
+    bootstrap_iterations: 1000
+
+gold:
+  eligibility:
+    availability_min_observed: 5
+    availability_era_years: 1
