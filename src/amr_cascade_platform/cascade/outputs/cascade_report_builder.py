@@ -47,6 +47,7 @@ class CascadeReportBuilder:
         "raw_effect_direction",
         "adjusted_effect_direction",
         "raw_adjusted_direction_agreement",
+        "adjustment_concordance",
         "adjusted_or_positive",
         "modeled_n",
         "clustered_n",
@@ -239,6 +240,15 @@ class CascadeReportBuilder:
             lambda row: self._compare_effect_directions(
                 row.get("raw_effect_direction"),
                 row.get("adjusted_effect_direction"),
+            ),
+            axis=1,
+        )
+        report["adjustment_concordance"] = report.apply(
+            lambda row: self._adjustment_concordance(
+                row.get("raw_effect_direction"),
+                row.get("adjusted_odds_ratio"),
+                row.get("adjusted_odds_ratio_ci_lower"),
+                row.get("adjusted_odds_ratio_ci_upper"),
             ),
             axis=1,
         )
@@ -458,7 +468,7 @@ class CascadeReportBuilder:
             return pd.DataFrame(columns=self._DIAGNOSTIC_COLUMNS)
         diagnostics = adjusted_results.copy()
         diagnostics["adjusted_effect_direction"] = diagnostics["adjusted_log_odds"].map(
-            lambda value: "positive" if value > 0 else "negative"
+            self._effect_direction_from_log_odds
         )
         diagnostics["model_rank"] = (
             diagnostics["adjusted_odds_ratio"]
@@ -470,6 +480,25 @@ class CascadeReportBuilder:
             by=["adjusted_odds_ratio", "modeled_n"],
             ascending=[False, False],
         ).reset_index(drop=True).reindex(columns=self._DIAGNOSTIC_COLUMNS)
+
+    @staticmethod
+    def _effect_direction_from_log_odds(value: float | int | None) -> str:
+        """Direction from a log-odds coefficient; NaN (non-estimable pairs) -> "unavailable".
+
+        The previous inline lambda (`"positive" if value > 0 else "negative"`)
+        silently mapped every non-estimable pair (adjusted_log_odds = NaN, from
+        DownstreamTestingRegression._non_estimable_result) to "negative", since
+        `NaN > 0` is False in Python -- contaminating adjusted_model_diagnostics
+        with a false "negative effect" label for pairs that were never actually
+        fitted. Mirrors _effect_direction_from_ratio's existing NaN handling.
+        """
+        if pd.isna(value):
+            return "unavailable"
+        if value > 0:
+            return "positive"
+        if value < 0:
+            return "negative"
+        return "neutral"
 
     @staticmethod
     def _effect_direction_from_ratio(value: float | int | None) -> str:
@@ -488,3 +517,44 @@ class CascadeReportBuilder:
         if raw_direction == adjusted_direction:
             return "directionally_aligned"
         return "directionally_misaligned"
+
+    @staticmethod
+    def _adjustment_concordance(
+        raw_direction: str | None,
+        adjusted_odds_ratio: float | None,
+        adjusted_or_ci_lower: float | None,
+        adjusted_or_ci_upper: float | None,
+    ) -> str:
+        """Three-way adjustment-concordance label, distinct from the coarser
+
+        raw_adjusted_direction_agreement above: that field only checks which
+        side of 1 the adjusted point estimate falls on, so it cannot
+        distinguish a pattern that stays robustly on the same side after
+        adjustment from one that nominally stays on the same side but is now
+        statistically indistinguishable from the null. Uses the already-computed
+        adjusted OR confidence interval, not an arbitrary magnitude threshold:
+        "reversed" means the adjusted point estimate crosses to the opposite
+        side of 1 from the raw escalation ratio; "attenuated" means it stays on
+        the same side but the interval includes 1; "concordant" means it stays
+        on the same side and excludes 1. This does not gate validation status
+        (Methods): a pattern can remain a robust directional observation
+        pattern while being flagged not adjustment-concordant, which is itself
+        the informative signal that it may be case-mix- rather than
+        result-driven.
+        """
+        if raw_direction in (None, "neutral", "unavailable"):
+            return "unavailable"
+        if pd.isna(adjusted_odds_ratio):
+            return "unavailable"
+        if adjusted_odds_ratio > 1:
+            adjusted_direction = "positive"
+        elif adjusted_odds_ratio < 1:
+            adjusted_direction = "negative"
+        else:
+            adjusted_direction = "neutral"
+        if adjusted_direction != "neutral" and adjusted_direction != raw_direction:
+            return "reversed"
+        if pd.isna(adjusted_or_ci_lower) or pd.isna(adjusted_or_ci_upper):
+            return "attenuated"
+        ci_excludes_null = not (adjusted_or_ci_lower <= 1 <= adjusted_or_ci_upper)
+        return "concordant" if ci_excludes_null else "attenuated"

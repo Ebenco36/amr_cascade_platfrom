@@ -301,14 +301,49 @@ class CascadeAnalysisWorkflow:
             edge_report["validation_status"].isin(CascadeValidationAnalyzer.VALIDATED_STATUSES)
         ].reset_index(drop=True)
 
-    @staticmethod
+    # Every column merge_shards() writes into the final validation_results
+    # schema (see CascadeValidationAnalyzer._VALIDATION_COLUMNS). Checked as a
+    # set, not by re-importing the full list, so this file doesn't need to
+    # track that constant's exact membership -- only that nothing is missing.
+    # This is what actually would have caught the stale-shard incident this
+    # pipeline hit before the two-sided-permutation fix: the key-correspondence
+    # check below only verifies the RIGHT PAIRS are present, not that they were
+    # computed by the current code version -- a validation_results.parquet
+    # computed by pre-fix code has the right pairs and passes that check clean,
+    # while silently missing permutation_fdr_q_value_two_sided and reporting
+    # False for a column-existence check run against it.
+    _EXPECTED_VALIDATION_COLUMNS = frozenset(
+        {
+            "permutation_p_value_two_sided",
+            "permutation_fdr_q_value_two_sided",
+            "permutation_fdr_supported_two_sided",
+            "between_site_permutation_p_value_two_sided",
+            "between_site_permutation_fdr_q_value_two_sided",
+            "between_site_permutation_supported_two_sided",
+            "validation_status",
+        }
+    )
+
+    @classmethod
     def _validate_precomputed_validation_matches_retained_edges(
+        cls,
         *,
         validation_results,
         retained_edges,
         validation_path: Path,
     ) -> None:
-        """Fail closed when a shard-merged validation file is stale or mismatched."""
+        """Fail closed when a shard-merged validation file is stale or mismatched.
+
+        Two independent kinds of "stale" are checked, not just one: a file can
+        have the right set of edges (checked below by key correspondence) while
+        still having been computed by an older code version that never wrote a
+        newer column -- that gap is what caused a real multi-turn debugging
+        session (stale validation_results.parquet kept reporting False for a
+        schema check even after the underlying code was already fixed, because
+        nothing re-derived the merged file itself). Checking for the newest
+        columns this pipeline can produce catches that case at the moment the
+        stale file is loaded, not several confused re-runs later.
+        """
         keys = ["upstream_antibiotic", "downstream_antibiotic"]
         if validation_results is None or validation_results.empty:
             if retained_edges.empty:
@@ -323,6 +358,16 @@ class CascadeAnalysisWorkflow:
             raise ValueError(
                 f"Precomputed validation file is missing required columns {sorted(missing)}: "
                 f"{validation_path}"
+            )
+        missing_current = cls._EXPECTED_VALIDATION_COLUMNS - set(validation_results.columns)
+        if missing_current:
+            raise ValueError(
+                f"Precomputed validation file is missing columns the current code produces "
+                f"{sorted(missing_current)} -- this file was almost certainly merged by an "
+                f"older code version. Delete and regenerate validation shards (do not just "
+                f"resubmit with --force-rerun-existing: the shard/merge scripts skip existing "
+                f"output files independently of that flag) before running cascade analysis. "
+                f"Path: {validation_path}"
             )
         retained_keys = retained_edges.loc[:, keys].drop_duplicates()
         validation_keys = validation_results.loc[:, keys].drop_duplicates()

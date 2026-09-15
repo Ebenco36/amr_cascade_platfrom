@@ -9,6 +9,7 @@ import pandas as pd
 
 from amr_cascade_platform.core.config.config_models import Settings
 from amr_cascade_platform.core.utils.antibiotic_names import normalize_antibiotic_label
+from amr_cascade_platform.core.utils.organism_names import normalize_organism_label
 from amr_cascade_platform.core.utils.text import normalize_label
 
 
@@ -64,7 +65,14 @@ class EligibilityService:
         eligible_space["is_observed_tested"] = eligible_space["is_observed_tested"].fillna(0).astype("int64")
 
         intrinsic_reference = self._load_intrinsic_reference()
-        eligible_space["organism_normalized"] = eligible_space["organism"].map(normalize_label)
+        # normalize_organism_label (not the bare normalize_label) resolves known
+        # phenotype/resistance-annotated, abbreviated, and legacy-coded spelling
+        # variants (e.g. "STAPH AUREUS {MRSA}", "MUCOID PSEUDOMONAS AERUGINOSA")
+        # to the same canonical organism the plain-spelled rows already match --
+        # see organism_names.py's module docstring for how this alias table was
+        # built and how to extend it. Using the bare normalizer here silently
+        # defaulted every unmatched variant's is_intrinsic_resistance to 0.
+        eligible_space["organism_normalized"] = eligible_space["organism"].map(normalize_organism_label)
         eligible_space["antibiotic_normalized"] = eligible_space["antibiotic"].map(normalize_antibiotic_label)
         eligible_space = eligible_space.merge(
             intrinsic_reference,
@@ -171,7 +179,12 @@ class EligibilityService:
             )
         frame = culture_drug_episodes.copy()
         frame["availability_era"] = self._availability_era(frame)
-        frame["organism_normalized"] = frame["organism"].map(normalize_label)
+        # Must use the same normalize_organism_label as build_episode_eligibility's
+        # eligible_space (not bare normalize_label) -- this table is joined back
+        # onto eligible_space by organism_normalized, so a mismatched normalizer
+        # here would silently re-fragment the very spelling-variant pooling the
+        # alias table is meant to fix.
+        frame["organism_normalized"] = frame["organism"].map(normalize_organism_label)
         frame["antibiotic_normalized"] = frame["antibiotic"].map(normalize_antibiotic_label)
         group_columns = ["source_site", "organism_normalized", "availability_era", "antibiotic_normalized"]
         return (

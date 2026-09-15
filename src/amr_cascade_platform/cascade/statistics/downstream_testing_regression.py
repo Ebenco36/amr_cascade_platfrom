@@ -586,15 +586,52 @@ class DownstreamTestingRegression:
         return tuple(columns)
 
     def _resolve_cluster_ids(self, frame: pd.DataFrame) -> pd.Series:
+        # Multi-site pooled fit: prefix every candidate with source_site so a raw
+        # identifier that happens to collide across sites (e.g. anon_id "123" at
+        # two different institutions) is never treated as the same cluster. The
+        # episode_key fallback below is already site-scoped, since source_site is
+        # one of the configured episode-key columns.
+        #
+        # Fallback is resolved per ROW, not per column: a candidate column that is
+        # only partially missing (rather than absent/constant) previously caused
+        # every row missing that value to collapse into one shared "site::nan"
+        # cluster, incorrectly telling the sandwich estimator those rows were the
+        # same patient. Each row now independently takes the first non-null value
+        # in priority order (anon_id -> pat_enc_csn_id_coded -> order_proc_id_coded
+        # -> episode_key), so two different patients who both happen to be missing
+        # anon_id still end up in different clusters as long as any lower-priority
+        # identifier distinguishes them.
+        site_prefix = frame["source_site"].astype(str) + "::"
+
+        resolved = pd.Series(pd.NA, index=frame.index, dtype=object)
+        primary_source: str | None = None
         for column in self._CLUSTER_CANDIDATES:
-            if column in frame.columns:
-                values = frame[column].astype(str)
-                if values.nunique(dropna=False) >= 2:
-                    values.name = column
-                    return values
-        fallback = frame.loc[:, list(self._settings.gold.episode_key_columns)].astype(str).agg("||".join, axis=1)
-        fallback.name = "episode_key"
-        return fallback
+            if column not in frame.columns:
+                continue
+            missing = resolved.isna()
+            if not missing.any():
+                break
+            fillable = missing & frame[column].notna()
+            if fillable.any() and primary_source is None:
+                primary_source = column
+            resolved.loc[fillable] = frame.loc[fillable, column].astype(str)
+
+        still_missing = resolved.isna()
+        if still_missing.any():
+            # Only touch episode_key_columns when actually needed: some callers
+            # (e.g. unit fixtures) construct minimal frames with just anon_id and
+            # source_site, and requiring the full episode key up front would break
+            # them even though no row ever needs this fallback.
+            episode_key = frame.loc[:, list(self._settings.gold.episode_key_columns)].astype(str).agg(
+                "||".join, axis=1
+            )
+            resolved.loc[still_missing] = episode_key.loc[still_missing]
+            if primary_source is None:
+                primary_source = "episode_key"
+
+        cluster_ids = site_prefix + resolved.astype(str)
+        cluster_ids.name = primary_source or "episode_key"
+        return cluster_ids
 
     @staticmethod
     def _select_cluster_variable(cluster_ids: pd.Series) -> str:

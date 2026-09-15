@@ -165,6 +165,119 @@ def test_biological_denominator_keeps_non_intrinsic_unavailable_drugs_eligible()
     assert int(row["is_eligible"]) == 1
 
 
+def test_organism_alias_resolves_intrinsic_resistance_for_annotated_spelling() -> None:
+    """A phenotype-annotated raw organism string must inherit its species' real
+
+    intrinsic-resistance profile, not silently default to "not resistant".
+    Regression test for the organism-alias gap: before normalize_organism_label,
+    "STAPH AUREUS {MRSA}" had zero match against the reference (exact-string
+    join on the bare, un-aliased label), so is_intrinsic_resistance defaulted
+    to 0 for every MRSA-labeled row -- verified against real data to affect
+    12.05% of the audited ESKAPE cohort (577,805 of 4,795,529 rows).
+    Staphylococcus aureus is a real, verified intrinsic-resistance entry in
+    data/reference/intrinsic_resistance.csv for aztreonam (a monobactam with
+    no gram-positive activity).
+    """
+    project_root = Path(__file__).resolve().parents[2]
+    settings = ConfigLoader(project_root).load("mac")
+    path_manager = PathManager(project_root, settings)
+    service = EligibilityService(settings, path_manager.paths.reference)
+
+    culture_episodes = pd.DataFrame(
+        [
+            {
+                "anon_id": "A1",
+                "pat_enc_csn_id_coded": "1",
+                "order_proc_id_coded": "2",
+                "order_time_jittered": "2024-01-01",
+                "organism": "STAPH AUREUS {MRSA}",
+                "source_site": "armd",
+            }
+        ]
+    )
+    culture_drug_episodes = pd.DataFrame(
+        [
+            {
+                "anon_id": "A1",
+                "pat_enc_csn_id_coded": "1",
+                "order_proc_id_coded": "2",
+                "order_time_jittered": "2024-01-01",
+                "organism": "STAPH AUREUS {MRSA}",
+                "source_site": "armd",
+                "antibiotic": "AZTREONAM",
+                "susceptibility": "RESISTANT",
+                "was_tested": 1,
+            }
+        ]
+    )
+
+    eligible = service.build_episode_eligibility(culture_episodes, culture_drug_episodes)
+    row = eligible.iloc[0]
+    assert int(row["is_intrinsic_resistance"]) == 1
+    assert int(row["is_biologically_eligible"]) == 0
+    assert int(row["is_eligible"]) == 0
+
+
+def test_organism_alias_pools_operational_availability_across_spelling_variants() -> None:
+    """Testing history for one spelling variant must count toward another
+
+    variant's availability -- otherwise a drug well-established under
+    "STAPHYLOCOCCUS AUREUS" would wrongly read as operationally unavailable
+    for "METHICILLIN RESISTANT STAPHYLOCOCCUS AUREUS"-labeled episodes at the
+    same site/era, even though they are the same organism and the same testing
+    program. This is the availability-pooling half of the organism-alias fix,
+    separate from the intrinsic-resistance join covered above.
+    """
+    project_root = Path(__file__).resolve().parents[2]
+    settings = ConfigLoader(project_root).load("mac")
+    path_manager = PathManager(project_root, settings)
+    service = EligibilityService(settings, path_manager.paths.reference)
+
+    culture_episodes = pd.DataFrame(
+        [
+            {
+                "anon_id": "A1",
+                "pat_enc_csn_id_coded": "1",
+                "order_proc_id_coded": "1",
+                "order_time_jittered": "2020-01-01",
+                "organism": "STAPHYLOCOCCUS AUREUS",
+                "source_site": "site_a",
+            },
+            {
+                "anon_id": "B1",
+                "pat_enc_csn_id_coded": "2",
+                "order_proc_id_coded": "2",
+                "order_time_jittered": "2020-01-01",
+                "organism": "METHICILLIN RESISTANT STAPHYLOCOCCUS AUREUS",
+                "source_site": "site_a",
+            },
+        ]
+    )
+    culture_drug_episodes = pd.DataFrame(
+        [
+            {
+                "anon_id": "A1",
+                "pat_enc_csn_id_coded": "1",
+                "order_proc_id_coded": "1",
+                "order_time_jittered": "2020-01-01",
+                "organism": "STAPHYLOCOCCUS AUREUS",
+                "source_site": "site_a",
+                "antibiotic": "VANCOMYCIN",
+                "susceptibility": "SUSCEPTIBLE",
+                "was_tested": 1,
+            },
+        ]
+    )
+
+    eligible = service.build_episode_eligibility(culture_episodes, culture_drug_episodes)
+    mrsa_vancomycin = eligible[
+        (eligible["organism"] == "METHICILLIN RESISTANT STAPHYLOCOCCUS AUREUS")
+        & (eligible["antibiotic"] == "VANCOMYCIN")
+    ].iloc[0]
+    assert int(mrsa_vancomycin["availability_support_n"]) == 1
+    assert int(mrsa_vancomycin["is_operationally_available"]) == 1
+
+
 def test_operational_eligibility_requires_parseable_time_column() -> None:
     project_root = Path(__file__).resolve().parents[2]
     settings = ConfigLoader(project_root).load("mac")

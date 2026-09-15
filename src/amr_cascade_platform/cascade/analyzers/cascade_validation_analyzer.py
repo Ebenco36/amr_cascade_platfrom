@@ -56,8 +56,11 @@ class CascadeValidationAnalyzer:
         "site_cochran_q",
         "site_heterogeneity_p",
         "between_site_permutation_p_value",
+        "between_site_permutation_p_value_two_sided",
         "between_site_permutation_fdr_q_value",
         "between_site_permutation_supported",
+        "between_site_permutation_fdr_q_value_two_sided",
+        "between_site_permutation_supported_two_sided",
         "temporal_early_er",
         "temporal_late_er",
         "temporal_n_early",
@@ -93,6 +96,7 @@ class CascadeValidationAnalyzer:
         "site_cochran_q",
         "site_heterogeneity_p",
         "between_site_permutation_p_value",
+        "between_site_permutation_p_value_two_sided",
         "temporal_early_er",
         "temporal_late_er",
         "temporal_n_early",
@@ -241,10 +245,10 @@ class CascadeValidationAnalyzer:
             combined["permutation_fdr_q_value"].notna()
             & combined["permutation_fdr_q_value"].le(thresh)
         )
-        # Parallel two-sided variant, not yet wired into validation_status below:
-        # reported alongside the one-sided-in-observed-direction q-value that
-        # currently governs the authoritative label, so the two can be compared
-        # directly before deciding whether to switch which one governs.
+        # Two-sided variant: this IS the q-value that governs validation_status
+        # below (see comment above) -- the one-sided permutation_fdr_q_value is
+        # still reported alongside it for comparability, but plays no role in
+        # classification.
         combined["permutation_fdr_q_value_two_sided"] = self._benjamini_hochberg(
             combined["permutation_p_value_two_sided"]
         )
@@ -258,6 +262,16 @@ class CascadeValidationAnalyzer:
         combined["between_site_permutation_supported"] = (
             combined["between_site_permutation_fdr_q_value"].notna()
             & combined["between_site_permutation_fdr_q_value"].le(thresh)
+        )
+        # Two-sided variant -- use this one, not the pair above, for any standalone
+        # significance claim about between-site heterogeneity (see the one-sided
+        # value's anti-conservative-direction caveat in _empirical_p_value_two_sided).
+        combined["between_site_permutation_fdr_q_value_two_sided"] = self._benjamini_hochberg(
+            combined["between_site_permutation_p_value_two_sided"]
+        )
+        combined["between_site_permutation_supported_two_sided"] = (
+            combined["between_site_permutation_fdr_q_value_two_sided"].notna()
+            & combined["between_site_permutation_fdr_q_value_two_sided"].le(thresh)
         )
         combined["validation_status"] = [
             self._classify_validation(
@@ -461,6 +475,160 @@ class CascadeValidationAnalyzer:
             "permutation_null_q95_er": self._safe_quantile(null_values, 0.95),
         }
 
+    def permutation_summary_era_stratified(
+        self,
+        subset: pd.DataFrame,
+        observed_er: float,
+        upstream_antibiotic: str,
+        downstream_antibiotic: str,
+    ) -> dict[str, float]:
+        """Sensitivity permutation stratified by site x calendar era, not site alone.
+
+        The primary permutation (_permutation_summary) shuffles upstream
+        resistant/susceptible labels within site only. That preserves site-level
+        testing burden but destroys any within-site temporal structure: if
+        resistance prevalence and downstream observation practice both drift over
+        calendar time at a site (e.g. a panel or reporting-policy change), that
+        shared drift could look like a drug-specific result-conditioned
+        association under a site-only null. This variant additionally stratifies
+        by the same five-year calendar eras used for operational availability
+        (Methods, Denominator construction), so within-era shuffling cannot draw
+        on the temporal drift the primary permutation is vulnerable to. It reports
+        only the two-sided p-value, since the two-sided criterion is primary
+        (Methods, Permutation, bootstrap stability, and replication).
+
+        This is a bounded local sensitivity check intended to run on the
+        validated (robust/supported) pattern set, not the full candidate set at
+        production replicate counts, mirroring the existing patient-cluster
+        bootstrap and I-squared threshold sensitivity checks.
+
+        Also reports degeneracy diagnostics for the stratification itself
+        (era_stratified_n_strata, era_stratified_n_strata_with_both_labels,
+        era_stratified_n_permutable_rows, era_stratified_fraction_fixed_rows):
+        a site x era stratum with only one upstream_result_group value present
+        contributes nothing to the null distribution (shuffling a single-value
+        stratum is a no-op), so the p-value above is only as informative as
+        these numbers say it is -- a heavily degenerate stratification biases
+        the p-value toward the conservative direction (p -> 1, never toward
+        false significance) but gives no other signal that it happened unless
+        reported explicitly.
+        """
+        frame = subset.loc[:, ["source_site", "upstream_result_group", "downstream_tested", "_event_time"]].copy()
+        era_years = self._settings.gold.eligibility.availability_era_years
+        era_start = (frame["_event_time"].dt.year // era_years) * era_years
+        era_label = era_start.astype("Int64").astype("string").fillna("unknown")
+        frame["_stratum"] = frame["source_site"].astype(str) + "::" + era_label
+
+        degeneracy = self._era_stratum_degeneracy(frame)
+
+        iterations = self._config.permutation_iterations
+        if iterations <= 0 or pd.isna(observed_er):
+            return {
+                "permutation_p_value_two_sided_era_stratified": math.nan,
+                **degeneracy,
+            }
+
+        rng = np.random.default_rng(self._edge_seed(upstream_antibiotic, downstream_antibiotic, salt=23))
+
+        null_values: list[float] = []
+        for i in range(iterations):
+            permuted = frame.copy()
+            permuted["upstream_result_group"] = self._shuffle_within_strata(
+                values=frame["upstream_result_group"],
+                strata=frame["_stratum"],
+                rng=rng,
+                episode_keys=subset,
+            )
+            null_values.append(self._compute_escalation_ratio(permuted))
+            del permuted
+            if i % 50 == 49:
+                gc.collect()
+
+        return {
+            "permutation_p_value_two_sided_era_stratified": self._empirical_p_value_two_sided(observed_er, null_values),
+            **degeneracy,
+        }
+
+    @staticmethod
+    def _era_stratum_degeneracy(frame: pd.DataFrame) -> dict[str, float]:
+        """How much of `frame` is actually permutable under its own _stratum
+
+        column, computed once from the data itself before any permutation draw
+        runs (not a property of a specific draw).
+        """
+        if frame.empty:
+            return {
+                "era_stratified_n_strata": 0.0,
+                "era_stratified_n_strata_with_both_labels": 0.0,
+                "era_stratified_n_permutable_rows": 0.0,
+                "era_stratified_fraction_fixed_rows": math.nan,
+            }
+        label_counts = frame.groupby("_stratum")["upstream_result_group"].nunique()
+        strata_with_both = label_counts[label_counts >= 2].index
+        permutable_mask = frame["_stratum"].isin(strata_with_both)
+        total_rows = len(frame)
+        n_permutable = int(permutable_mask.sum())
+        return {
+            "era_stratified_n_strata": float(len(label_counts)),
+            "era_stratified_n_strata_with_both_labels": float(len(strata_with_both)),
+            "era_stratified_n_permutable_rows": float(n_permutable),
+            "era_stratified_fraction_fixed_rows": (
+                float(1.0 - (n_permutable / total_rows)) if total_rows > 0 else math.nan
+            ),
+        }
+
+    def era_stratified_sensitivity_summary(
+        self,
+        drug_pairs: pd.DataFrame,
+        edges: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """Run permutation_summary_era_stratified over every row in `edges`.
+
+        Intended caller: a script that loads the merged, validated
+        (robust/supported) pattern set and passes it here -- not a shard of the
+        full candidate set. This is a reported sensitivity column, not a second
+        FDR gate: no BH-FDR is applied here, since the primary two-sided
+        criterion already governs validation_status (Methods, Permutation,
+        bootstrap stability, and replication).
+        """
+        _era_columns = [
+            "upstream_antibiotic",
+            "downstream_antibiotic",
+            "observed_escalation_ratio",
+            "permutation_p_value_two_sided_era_stratified",
+            "era_stratified_n_strata",
+            "era_stratified_n_strata_with_both_labels",
+            "era_stratified_n_permutable_rows",
+            "era_stratified_fraction_fixed_rows",
+        ]
+        if drug_pairs.empty or edges.empty:
+            return pd.DataFrame(columns=_era_columns)
+
+        prepared = self._prepare_pairs(drug_pairs)
+        if prepared.empty:
+            return pd.DataFrame(columns=_era_columns)
+
+        grouped = prepared.groupby(
+            ["upstream_antibiotic", "downstream_antibiotic"], dropna=False, observed=True
+        )
+        rows: list[dict[str, object]] = []
+        for edge in edges.itertuples(index=False):
+            key = (edge.upstream_antibiotic, edge.downstream_antibiotic)
+            if key not in grouped.groups:
+                continue
+            subset = grouped.get_group(key).reset_index(drop=True)
+            observed_er = self._coerce_ratio(getattr(edge, "escalation_ratio", math.nan))
+            result = self.permutation_summary_era_stratified(subset, observed_er, *key)
+            rows.append(
+                {
+                    "upstream_antibiotic": key[0],
+                    "downstream_antibiotic": key[1],
+                    "observed_escalation_ratio": observed_er,
+                    **result,
+                }
+            )
+        return pd.DataFrame(rows).reindex(columns=_era_columns)
+
     def _bootstrap_summary(
         self,
         subset: pd.DataFrame,
@@ -565,13 +733,19 @@ class CascadeValidationAnalyzer:
         derived numpy arrays, not on an episode-level object, so nothing else about an episode
         travels with it into the shuffle."""
         if not self._config.between_site_permutation_enabled:
-            return {"between_site_permutation_p_value": math.nan}
+            return {
+                "between_site_permutation_p_value": math.nan,
+                "between_site_permutation_p_value_two_sided": math.nan,
+            }
 
         iterations = self._config.permutation_iterations
         sites = list(subset["source_site"].dropna().unique())
 
         if iterations <= 0 or pd.isna(observed_er) or len(sites) < 2:
-            return {"between_site_permutation_p_value": math.nan}
+            return {
+                "between_site_permutation_p_value": math.nan,
+                "between_site_permutation_p_value_two_sided": math.nan,
+            }
 
         rng = np.random.default_rng(
             self._edge_seed(upstream_antibiotic, downstream_antibiotic, salt=53)
@@ -623,7 +797,10 @@ class CascadeValidationAnalyzer:
 
         observed_dl_log_er = _dl_pooled_log_er_stat(is_positive, tested)
         if pd.isna(observed_dl_log_er):
-            return {"between_site_permutation_p_value": math.nan}
+            return {
+                "between_site_permutation_p_value": math.nan,
+                "between_site_permutation_p_value_two_sided": math.nan,
+            }
         observed_dl_er = math.exp(observed_dl_log_er)
 
         null_values: list[float] = []
@@ -636,6 +813,15 @@ class CascadeValidationAnalyzer:
 
         return {
             "between_site_permutation_p_value": self._empirical_p_value(observed_dl_er, null_values),
+            # See _empirical_p_value_two_sided's docstring: the one-sided value above
+            # tests the tail matching the observed direction, decided from the same
+            # data being tested, which is anti-conservative for exactly the same
+            # reason it was for the primary permutation. This is the corrected
+            # version; it -- not the one-sided value -- is the one that should be
+            # cited as a standalone significance claim for this statistic.
+            "between_site_permutation_p_value_two_sided": self._empirical_p_value_two_sided(
+                observed_dl_er, null_values
+            ),
         }
 
     def _temporal_replication_summary(self, subset: pd.DataFrame, observed_er: float) -> dict[str, object]:

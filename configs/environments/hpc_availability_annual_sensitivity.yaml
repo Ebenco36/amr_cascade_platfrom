@@ -1,0 +1,44 @@
+# Sensitivity variant of hpc.yaml: identical production settings, except the
+# operational-availability era width is narrowed from the primary value
+# (5 years) to 1, to test whether validated patterns are an artefact of the
+# five-year era's temporal coarseness -- e.g. a drug first appearing in the
+# final months of a five-year window is treated as "available" for every
+# earlier episode in that same window under the primary configuration.
+# Reviewer-requested check (see Methods, Denominator construction).
+#
+# data_root is DELIBERATELY not "data" -- see hpc_availability_sensitivity.yaml's
+# comment for why (PathManager has no other environment-specific output
+# segregation, so reusing "data" would silently overwrite the primary run's
+# gold-layer output). Before running:
+#   mkdir -p data_availability_annual_sensitivity
+#   for d in raw sample bronze silver harmonized metadata reference interim features; do
+#     ln -s "$(pwd)/data/$d" "data_availability_annual_sensitivity/$d"
+#   done
+#   mkdir -p data_availability_annual_sensitivity/gold data_availability_annual_sensitivity/artifacts
+#
+# Usage: run the full DAG with --env hpc_availability_annual_sensitivity
+# instead of --env hpc. This changes the eligibility denominator itself, so
+# it requires a full rerun from the eligibility/gold stage forward -- it
+# cannot be computed by re-filtering an already-materialised results table.
+# Do not run this config's reporting stage: outputs/ is always
+# <project_root>/outputs regardless of data_root and is NOT isolated by this
+# symlink setup -- this sensitivity check only needs validation_results.parquet.
+environment:
+  name: hpc_availability_annual_sensitivity
+  data_root: data_availability_annual_sensitivity
+  execution_mode: distributed
+  default_data_layer: raw
+  allow_raw_processing: true
+
+features:
+  auto_build_comorbidity: false
+  auto_prepare_silver_feature_sources: false
+
+cascade:
+  validation:
+    permutation_iterations: 1000
+    bootstrap_iterations: 1000
+
+gold:
+  eligibility:
+    availability_era_years: 1

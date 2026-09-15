@@ -67,6 +67,22 @@ Options:
                                forcing a clean reinstall of all Python packages.
                                Use this when switching Python versions or when
                                packages are corrupted.
+  --fix-stale-gold             Before submitting, move aside any existing
+                               gold-layer output (data/gold/.../organisms/<slug>)
+                               for every organism/scope this invocation would
+                               touch, to a timestamped stale_backup_<TS>/
+                               directory. Use after a code change that alters
+                               gold-layer construction (eligibility, pair
+                               generation) -- run_gold.py's own
+                               "if output exists: return" check is otherwise
+                               independent of --force-rerun-existing and will
+                               silently keep the old output.
+  --fix-stale-cascade           Same, for cascade-layer output
+                               (data/artifacts/cascade/.../organisms/<slug>,
+                               including validation_shards/). Use after a code
+                               change to any cascade analyzer, the adjusted
+                               model, or validation logic.
+  --fix-stale                  Shorthand for --fix-stale-gold --fix-stale-cascade.
   --force-rerun-existing       Submit enabled stages even when outputs exist.
   --dry-run                    Print sbatch commands without submitting.
   --wait                       After submission, block until all jobs finish
@@ -135,6 +151,18 @@ ORGANISMS=("ESCHERICHIA COLI")
 ESKAPE_TARGETS=(Enterococcus Staphylococcus Klebsiella Acinetobacter Pseudomonas Enterobacter)
 PARTITION="main"
 PYTHON_BIN="${PYTHON_BIN:-}"
+# --env selects which configs/environments/<name>.yaml every sub-script loads
+# (default hpc, the primary production config). --data-root MUST be set to
+# that same config's environment.data_root whenever --env is not "hpc" --
+# PathManager derives every dataset path (including gold/artifacts) from
+# data_root alone with no other environment-specific segregation, so an
+# --env/--data-root mismatch here would make this script's own readiness
+# checks look at the wrong directory (silently re-running finished work, or
+# silently reporting a stage "ready" when it never ran under that env).
+ENV_NAME="hpc"
+DATA_ROOT_DIR="data"
+FIX_STALE_GOLD=0
+FIX_STALE_CASCADE=0
 # Never inherit VENV_SITE from the caller. A stale path would point at packages
 # for a different Python version or a different venv rebuild.
 VENV_SITE=""
@@ -195,6 +223,16 @@ while [[ $# -gt 0 ]]; do
       PYTHON_BIN="$2"
       shift 2
       ;;
+    --env)
+      [[ $# -ge 2 ]] || { echo "--env requires a value" >&2; exit 2; }
+      ENV_NAME="$2"
+      shift 2
+      ;;
+    --data-root)
+      [[ $# -ge 2 ]] || { echo "--data-root requires a value" >&2; exit 2; }
+      DATA_ROOT_DIR="$2"
+      shift 2
+      ;;
     --skip-ingestion) RUN_INGESTION=0; shift ;;
     --skip-preprocessing) RUN_PREPROCESSING=0; shift ;;
     --skip-harmonization) RUN_HARMONIZATION=0; shift ;;
@@ -228,6 +266,13 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --delete-venv) DELETE_VENV=1; shift ;;
+    --fix-stale-gold) FIX_STALE_GOLD=1; shift ;;
+    --fix-stale-cascade) FIX_STALE_CASCADE=1; shift ;;
+    --fix-stale)
+      FIX_STALE_GOLD=1
+      FIX_STALE_CASCADE=1
+      shift
+      ;;
     --force-rerun-existing) REUSE_EXISTING=0; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --wait) WAIT_FOR_JOBS=1; shift ;;
@@ -521,16 +566,93 @@ scope_dir_path() {
   printf '%s\n' "${base}"
 }
 
+STALE_BACKUP_DIR=""
+
+# Moves a stale output directory aside rather than deleting it (reversible),
+# to a single timestamped directory shared across every path moved in this
+# invocation -- so one run's backups stay grouped, and nothing is silently
+# lost the way `rm -rf` would.
+backup_stale_dir() {
+  local label="$1"
+  local dir="$2"
+  [[ -d "${dir}" ]] || return 0
+  if [[ -z "${STALE_BACKUP_DIR}" ]]; then
+    STALE_BACKUP_DIR="${PROJECT_ROOT}/stale_backup_$(date +%Y%m%d_%H%M%S)"
+  fi
+  local dest="${STALE_BACKUP_DIR}/${label}"
+  # --dry-run must never actually move anything: unlike job submission (which
+  # --dry-run already makes safe by construction, since sbatch is simply never
+  # called), a real mv here would silently mutate state on a call meant only
+  # to preview one. Print the same target path a real run would use, without
+  # touching the filesystem, so --dry-run --fix-stale is genuinely a no-op.
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    echo "  [dry-run] would move aside: ${dir} -> ${dest}"
+    return 0
+  fi
+  mkdir -p "$(dirname "${dest}")"
+  mv "${dir}" "${dest}"
+  echo "  moved aside: ${dir} -> ${dest}"
+}
+
+# Layered, opt-in stale-output check: gated by --fix-stale-gold/--fix-stale-cascade
+# (or --fix-stale for both), off by default so a normal resubmission never moves
+# anything. Runs once, before any job is submitted, over every organism x scope
+# this invocation would actually touch (combined always; each site too when
+# --run-site-cascade is set) -- the same scope_dir_path() used by the readiness
+# checks below, so "what gets backed up" and "what gets checked as ready" can
+# never drift apart.
+fix_stale_outputs() {
+  if [[ "${FIX_STALE_GOLD}" -ne 1 && "${FIX_STALE_CASCADE}" -ne 1 ]]; then
+    return 0
+  fi
+  echo "Checking for stale gold/cascade output to move aside..."
+  local organism organism_slug site scope_label gold_dir cascade_dir
+  for raw_organism in "${ORGANISMS[@]}"; do
+    organism="$(trim "${raw_organism}")"
+    [[ -n "${organism}" ]] || continue
+    organism_slug="$(slugify "${organism}")"
+
+    if [[ "${FIX_STALE_GOLD}" -eq 1 ]]; then
+      gold_dir="$(scope_dir_path "${PROJECT_ROOT}/${DATA_ROOT_DIR}/gold" combined "" "${organism}")"
+      backup_stale_dir "gold/combined/organisms/${organism_slug}" "${gold_dir}"
+    fi
+    if [[ "${FIX_STALE_CASCADE}" -eq 1 ]]; then
+      cascade_dir="$(scope_dir_path "${PROJECT_ROOT}/${DATA_ROOT_DIR}/artifacts/cascade" combined "" "${organism}")"
+      backup_stale_dir "cascade/combined/organisms/${organism_slug}" "${cascade_dir}"
+    fi
+
+    if [[ "${RUN_SITE_CASCADE}" -eq 1 ]]; then
+      for raw_site in "${SITES[@]}"; do
+        site="$(trim "${raw_site}")"
+        [[ -n "${site}" ]] || continue
+        if [[ "${FIX_STALE_GOLD}" -eq 1 ]]; then
+          gold_dir="$(scope_dir_path "${PROJECT_ROOT}/${DATA_ROOT_DIR}/gold" site "${site}" "${organism}")"
+          backup_stale_dir "gold/${site}/organisms/${organism_slug}" "${gold_dir}"
+        fi
+        if [[ "${FIX_STALE_CASCADE}" -eq 1 ]]; then
+          cascade_dir="$(scope_dir_path "${PROJECT_ROOT}/${DATA_ROOT_DIR}/artifacts/cascade" site "${site}" "${organism}")"
+          backup_stale_dir "cascade/${site}/organisms/${organism_slug}" "${cascade_dir}"
+        fi
+      done
+    fi
+  done
+  if [[ -n "${STALE_BACKUP_DIR}" ]]; then
+    echo "Stale output backed up to: ${STALE_BACKUP_DIR}"
+  else
+    echo "No stale gold/cascade output found for the selected organisms/scopes."
+  fi
+}
+
 bronze_ready() {
   local site="$1"
-  [[ -e "${PROJECT_ROOT}/data/bronze/${site}/cohort" &&
-     -e "${PROJECT_ROOT}/data/bronze/${site}/microbial_resistance" ]]
+  [[ -e "${PROJECT_ROOT}/${DATA_ROOT_DIR}/bronze/${site}/cohort" &&
+     -e "${PROJECT_ROOT}/${DATA_ROOT_DIR}/bronze/${site}/microbial_resistance" ]]
 }
 
 silver_ready() {
   local site="$1"
-  [[ -e "${PROJECT_ROOT}/data/silver/${site}/cohort.parquet" &&
-     -e "${PROJECT_ROOT}/data/silver/${site}/microbial_resistance.parquet" ]]
+  [[ -e "${PROJECT_ROOT}/${DATA_ROOT_DIR}/silver/${site}/cohort.parquet" &&
+     -e "${PROJECT_ROOT}/${DATA_ROOT_DIR}/silver/${site}/microbial_resistance.parquet" ]]
 }
 
 harmonized_ready() {
@@ -538,16 +660,16 @@ harmonized_ready() {
   for site in "${SITES[@]}"; do
     site="$(trim "${site}")"
     [[ -n "${site}" ]] || continue
-    [[ -f "${PROJECT_ROOT}/data/harmonized/site_aligned/${site}/cohort.parquet" &&
-       -f "${PROJECT_ROOT}/data/harmonized/site_aligned/${site}/microbial_resistance.parquet" ]] || return 1
+    [[ -f "${PROJECT_ROOT}/${DATA_ROOT_DIR}/harmonized/site_aligned/${site}/cohort.parquet" &&
+       -f "${PROJECT_ROOT}/${DATA_ROOT_DIR}/harmonized/site_aligned/${site}/microbial_resistance.parquet" ]] || return 1
   done
-  [[ -f "${PROJECT_ROOT}/data/harmonized/combined/cohort.parquet" &&
-     -f "${PROJECT_ROOT}/data/harmonized/combined/microbial_resistance.parquet" ]]
+  [[ -f "${PROJECT_ROOT}/${DATA_ROOT_DIR}/harmonized/combined/cohort.parquet" &&
+     -f "${PROJECT_ROOT}/${DATA_ROOT_DIR}/harmonized/combined/microbial_resistance.parquet" ]]
 }
 
 comorbidity_ready() {
   local site="$1"
-  [[ -f "${PROJECT_ROOT}/data/interim/${site}/feature_matrices/comorbidity_aggregated.parquet" ]]
+  [[ -f "${PROJECT_ROOT}/${DATA_ROOT_DIR}/interim/${site}/feature_matrices/comorbidity_aggregated.parquet" ]]
 }
 
 gold_ready() {
@@ -555,7 +677,7 @@ gold_ready() {
   local site="${2:-}"
   local organism="${3:-}"
   local dir
-  dir="$(scope_dir_path "${PROJECT_ROOT}/data/gold" "${scope}" "${site}" "${organism}")"
+  dir="$(scope_dir_path "${PROJECT_ROOT}/${DATA_ROOT_DIR}/gold" "${scope}" "${site}" "${organism}")"
   [[ -f "${dir}/culture_episodes.parquet" &&
      -f "${dir}/culture_drug_episodes.parquet" &&
      -f "${dir}/drug_pair_episodes.parquet" &&
@@ -568,7 +690,7 @@ cascade_ready() {
   local site="${2:-}"
   local organism="${3:-}"
   local dir
-  dir="$(scope_dir_path "${PROJECT_ROOT}/data/artifacts/cascade" "${scope}" "${site}" "${organism}")"
+  dir="$(scope_dir_path "${PROJECT_ROOT}/${DATA_ROOT_DIR}/artifacts/cascade" "${scope}" "${site}" "${organism}")"
   [[ -f "${dir}/retained_edges.parquet" &&
      -f "${dir}/edge_report.parquet" &&
      -f "${dir}/network_nodes.parquet" &&
@@ -582,7 +704,7 @@ validation_merge_ready() {
   local site="${2:-}"
   local organism="${3:-}"
   local dir
-  dir="$(scope_dir_path "${PROJECT_ROOT}/data/artifacts/cascade" "${scope}" "${site}" "${organism}")"
+  dir="$(scope_dir_path "${PROJECT_ROOT}/${DATA_ROOT_DIR}/artifacts/cascade" "${scope}" "${site}" "${organism}")"
   [[ -f "${dir}/validation_results.parquet" ]]
 }
 
@@ -594,7 +716,7 @@ shard_ready() {
   local shard_idx="$4"
   local shard_total="$5"
   local dir
-  dir="$(scope_dir_path "${PROJECT_ROOT}/data/artifacts/cascade" "${scope}" "${site}" "${organism}")"
+  dir="$(scope_dir_path "${PROJECT_ROOT}/${DATA_ROOT_DIR}/artifacts/cascade" "${scope}" "${site}" "${organism}")"
   [[ -f "${dir}/validation_shards/shard_$(printf '%04d' "${shard_idx}")_of_$(printf '%04d' "${shard_total}").parquet" ]]
 }
 
@@ -603,7 +725,7 @@ prevalence_ready() {
   local site="${2:-}"
   local organism="${3:-}"
   local dir
-  dir="$(scope_dir_path "${PROJECT_ROOT}/data/artifacts/prevalence_shift" "${scope}" "${site}" "${organism}")"
+  dir="$(scope_dir_path "${PROJECT_ROOT}/${DATA_ROOT_DIR}/artifacts/prevalence_shift" "${scope}" "${site}" "${organism}")"
   [[ -f "${dir}/prevalence_shift.parquet" &&
      -f "${dir}/prevalence_mnar_sensitivity_curves.parquet" &&
      -f "${dir}/prevalence_mnar_tipping_points.parquet" &&
@@ -615,7 +737,7 @@ feature_ready() {
   local site="${2:-}"
   local organism="${3:-}"
   local dir
-  dir="$(scope_dir_path "${PROJECT_ROOT}/data/features" "${scope}" "${site}" "${organism}")"
+  dir="$(scope_dir_path "${PROJECT_ROOT}/${DATA_ROOT_DIR}/features" "${scope}" "${site}" "${organism}")"
   [[ -f "${dir}/model_ready_pair_features.parquet" &&
      -f "${dir}/feature_build_summary.json" ]]
 }
@@ -625,7 +747,7 @@ training_ready() {
   local site="${2:-}"
   local organism="${3:-}"
   local dir
-  dir="$(scope_dir_path "${PROJECT_ROOT}/data/artifacts/modeling/downstream_testing" "${scope}" "${site}" "${organism}")"
+  dir="$(scope_dir_path "${PROJECT_ROOT}/${DATA_ROOT_DIR}/artifacts/modeling/downstream_testing" "${scope}" "${site}" "${organism}")"
   [[ -f "${dir}/metrics.parquet" &&
      -f "${dir}/threshold_metrics.parquet" &&
      -f "${dir}/selected_thresholds.parquet" &&
@@ -678,7 +800,7 @@ eskape_ready() {
   fi
   local target_slug
   target_slug="$(slugify "${target}")"
-  [[ -f "${PROJECT_ROOT}/data/artifacts/eskape_validation/armd/${scope_dir}/organisms/${target_slug}/eskape_existence_summary.csv" ]]
+  [[ -f "${PROJECT_ROOT}/${DATA_ROOT_DIR}/artifacts/eskape_validation/armd/${scope_dir}/organisms/${target_slug}/eskape_existence_summary.csv" ]]
 }
 
 eskape_merge_ready() {
@@ -708,7 +830,12 @@ should_submit() {
 
 skip_ready() {
   local label="$1"
-  echo "Ready; not submitting ${label}"
+  local msg="Ready; not submitting ${label}"
+  echo "${msg}"
+  # Skip decisions never produce a SLURM job, so they never get a .out/.err
+  # file or a timeline entry -- this is the only persistent record that a
+  # given stage was reused rather than recomputed on this invocation.
+  printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "${msg}" >> "${LOG_DIR}/submission_decisions.log"
 }
 
 join_colon() {
@@ -1019,6 +1146,8 @@ echo "Publication readiness audit: ${RUN_READINESS_AUDIT}"
 echo "Reuse existing outputs: ${REUSE_EXISTING}"
 echo "Wait for completion: ${WAIT_FOR_JOBS}"
 
+fix_stale_outputs
+
 publication_terminal_jobs=()
 
 for raw_site in "${SITES[@]}"; do
@@ -1031,7 +1160,7 @@ for raw_site in "${SITES[@]}"; do
     if should_submit "" bronze_ready "${site}"; then
       ingest_job="$(
         submit_job "amr_${site_slug}_ingest" "${INGEST_TIME}" "${INGEST_MEM}" "" \
-          "\"\${AMR_CASCADE_PYTHON}\" scripts/run_ingestion.py --env hpc --site '${site}' --source-layer raw"
+          "\"\${AMR_CASCADE_PYTHON}\" scripts/run_ingestion.py --env ${ENV_NAME} --site '${site}' --source-layer raw"
       )"
       echo "Ingestion ${site}: ${ingest_job}"
       submitted_jobs+=("${ingest_job}")
@@ -1045,7 +1174,7 @@ for raw_site in "${SITES[@]}"; do
     if should_submit "${deps}" silver_ready "${site}"; then
       preprocess_job="$(
         submit_job "amr_${site_slug}_preprocess" "${PREPROCESS_TIME}" "${PREPROCESS_MEM}" "${deps}" \
-          "\"\${AMR_CASCADE_PYTHON}\" scripts/run_preprocessing.py --env hpc --site '${site}'"
+          "\"\${AMR_CASCADE_PYTHON}\" scripts/run_preprocessing.py --env ${ENV_NAME} --site '${site}'"
       )"
       echo "Preprocessing ${site}: ${preprocess_job}"
       submitted_jobs+=("${preprocess_job}")
@@ -1060,7 +1189,7 @@ done
 
 harmonize_deps="$(join_colon "${site_terminal_jobs[@]}")"
 if [[ "${RUN_HARMONIZATION}" -eq 1 ]]; then
-  harmonize_command="\"\${AMR_CASCADE_PYTHON}\" scripts/run_harmonization.py --env hpc"
+  harmonize_command="\"\${AMR_CASCADE_PYTHON}\" scripts/run_harmonization.py --env \${ENV_NAME}"
   for raw_site in "${SITES[@]}"; do
     site="$(trim "${raw_site}")"
     [[ -n "${site}" ]] && harmonize_command+=" --site '${site}'"
@@ -1088,7 +1217,7 @@ if [[ "${RUN_COMORBIDITY}" -eq 1 && "${RUN_FEATURES}" -eq 1 ]]; then
     if should_submit "${common_dep}" comorbidity_ready "${site}"; then
       comorbidity_job="$(
         submit_job "amr_${site_slug}_comorbidity" "${COMORBIDITY_TIME}" "${COMORBIDITY_MEM}" "${common_dep}" \
-          "\"\${AMR_CASCADE_PYTHON}\" scripts/pre_aggregate_comorbidities.py --env hpc --site '${site}' --min-coverage 0.8"
+          "\"\${AMR_CASCADE_PYTHON}\" scripts/pre_aggregate_comorbidities.py --env ${ENV_NAME} --site '${site}' --min-coverage 0.8"
       )"
       echo "Comorbidity ${site}: ${comorbidity_job}"
       submitted_jobs+=("${comorbidity_job}")
@@ -1116,7 +1245,7 @@ for raw_organism in "${ORGANISMS[@]}"; do
         if should_submit "${site_dep}" gold_ready "site" "${site}" "${organism}"; then
           site_gold_job="$(
             submit_job "${organism_prefix}_${site_slug}_gold" "${GOLD_TIME}" "${GOLD_MEM}" "${site_dep}" \
-              "\"\${AMR_CASCADE_PYTHON}\" scripts/run_gold.py --env hpc --source-scope site --site '${site}' --organism '${organism}'"
+              "\"\${AMR_CASCADE_PYTHON}\" scripts/run_gold.py --env ${ENV_NAME} --source-scope site --site '${site}' --organism '${organism}'"
           )"
           echo "Site gold ${site} | ${organism}: ${site_gold_job}"
           submitted_jobs+=("${site_gold_job}")
@@ -1140,7 +1269,7 @@ for raw_organism in "${ORGANISMS[@]}"; do
               site_shard_job="$(
                 PARTITION="${CASCADE_PARTITION}"
                 submit_job "${organism_prefix}_${site_slug}_cval_s${site_shard_idx}" "${CASCADE_SHARD_TIME}" "${CASCADE_SHARD_MEM}" "${site_dep}" \
-                  "\"\${AMR_CASCADE_PYTHON}\" scripts/run_cascade_validation_shard.py --env hpc --gold-scope site --site '${site}' --organism '${organism}' --shard-index ${site_shard_idx} --shard-total ${site_shard_total}"
+                  "\"\${AMR_CASCADE_PYTHON}\" scripts/run_cascade_validation_shard.py --env ${ENV_NAME} --gold-scope site --site '${site}' --organism '${organism}' --shard-index ${site_shard_idx} --shard-total ${site_shard_total}"
               )"
               echo "  Site cascade shard ${site_shard_idx}/${site_shard_total} ${site} | ${organism}: ${site_shard_job}"
               submitted_jobs+=("${site_shard_job}")
@@ -1155,7 +1284,7 @@ for raw_organism in "${ORGANISMS[@]}"; do
             site_merge_job="$(
               PARTITION="${CASCADE_PARTITION}"
               submit_job "${organism_prefix}_${site_slug}_cval_merge" "${CASCADE_MERGE_TIME}" "${CASCADE_MERGE_MEM}" "${site_shard_dep}" \
-                "\"\${AMR_CASCADE_PYTHON}\" scripts/merge_cascade_validation_shards.py --env hpc --gold-scope site --site '${site}' --organism '${organism}' --shard-total ${site_shard_total}"
+                "\"\${AMR_CASCADE_PYTHON}\" scripts/merge_cascade_validation_shards.py --env ${ENV_NAME} --gold-scope site --site '${site}' --organism '${organism}' --shard-total ${site_shard_total}"
             )"
             echo "Site cascade validation merge ${site} | ${organism}: ${site_merge_job}"
             submitted_jobs+=("${site_merge_job}")
@@ -1167,7 +1296,7 @@ for raw_organism in "${ORGANISMS[@]}"; do
           site_cascade_job="$(
             PARTITION="${CASCADE_PARTITION}"
             submit_job "${organism_prefix}_${site_slug}_cascade" "${CASCADE_TIME}" "${CASCADE_MEM}" "${site_dep}" \
-              "\"\${AMR_CASCADE_PYTHON}\" scripts/run_cascade_analysis.py --env hpc --gold-scope site --site '${site}' --organism '${organism}'"
+              "\"\${AMR_CASCADE_PYTHON}\" scripts/run_cascade_analysis.py --env ${ENV_NAME} --gold-scope site --site '${site}' --organism '${organism}'"
           )"
           echo "Site cascade ${site} | ${organism}: ${site_cascade_job}"
           submitted_jobs+=("${site_cascade_job}")
@@ -1184,7 +1313,7 @@ for raw_organism in "${ORGANISMS[@]}"; do
     if should_submit "${combined_dep}" gold_ready "combined" "" "${organism}"; then
       combined_gold_job="$(
         submit_job "${organism_prefix}_gold" "${GOLD_TIME}" "${GOLD_MEM}" "${combined_dep}" \
-          "\"\${AMR_CASCADE_PYTHON}\" scripts/run_gold.py --env hpc --source-scope combined --organism '${organism}'"
+          "\"\${AMR_CASCADE_PYTHON}\" scripts/run_gold.py --env ${ENV_NAME} --source-scope combined --organism '${organism}'"
       )"
       echo "Combined gold ${organism}: ${combined_gold_job}"
       submitted_jobs+=("${combined_gold_job}")
@@ -1209,7 +1338,7 @@ for raw_organism in "${ORGANISMS[@]}"; do
           shard_job="$(
             PARTITION="${CASCADE_PARTITION}"
             submit_job "${organism_prefix}_cval_s${shard_idx}" "${CASCADE_SHARD_TIME}" "${CASCADE_SHARD_MEM}" "${cascade_dep}" \
-              "\"\${AMR_CASCADE_PYTHON}\" scripts/run_cascade_validation_shard.py --env hpc --gold-scope combined --organism '${organism}' --shard-index ${shard_idx} --shard-total ${shard_total}"
+              "\"\${AMR_CASCADE_PYTHON}\" scripts/run_cascade_validation_shard.py --env ${ENV_NAME} --gold-scope combined --organism '${organism}' --shard-index ${shard_idx} --shard-total ${shard_total}"
           )"
           echo "  Cascade shard ${shard_idx}/${shard_total} ${organism}: ${shard_job}"
           submitted_jobs+=("${shard_job}")
@@ -1224,7 +1353,7 @@ for raw_organism in "${ORGANISMS[@]}"; do
         merge_job="$(
           PARTITION="${CASCADE_PARTITION}"
           submit_job "${organism_prefix}_cval_merge" "${CASCADE_MERGE_TIME}" "${CASCADE_MERGE_MEM}" "${shard_dep}" \
-            "\"\${AMR_CASCADE_PYTHON}\" scripts/merge_cascade_validation_shards.py --env hpc --gold-scope combined --organism '${organism}' --shard-total ${shard_total}"
+            "\"\${AMR_CASCADE_PYTHON}\" scripts/merge_cascade_validation_shards.py --env ${ENV_NAME} --gold-scope combined --organism '${organism}' --shard-total ${shard_total}"
         )"
         echo "Cascade validation merge ${organism}: ${merge_job}"
         submitted_jobs+=("${merge_job}")
@@ -1236,7 +1365,7 @@ for raw_organism in "${ORGANISMS[@]}"; do
       combined_cascade_job="$(
         PARTITION="${CASCADE_PARTITION}"
         submit_job "${organism_prefix}_cascade" "${CASCADE_TIME}" "${CASCADE_MEM}" "${cascade_dep}" \
-          "\"\${AMR_CASCADE_PYTHON}\" scripts/run_cascade_analysis.py --env hpc --gold-scope combined --organism '${organism}'"
+          "\"\${AMR_CASCADE_PYTHON}\" scripts/run_cascade_analysis.py --env ${ENV_NAME} --gold-scope combined --organism '${organism}'"
       )"
       echo "Combined cascade ${organism}: ${combined_cascade_job}"
       submitted_jobs+=("${combined_cascade_job}")
@@ -1251,7 +1380,7 @@ for raw_organism in "${ORGANISMS[@]}"; do
     if should_submit "${prevalence_dep}" prevalence_ready "combined" "" "${organism}"; then
       prevalence_job="$(
         submit_job "${organism_prefix}_prev" "${PREVALENCE_TIME}" "${PREVALENCE_MEM}" "${prevalence_dep}" \
-          "\"\${AMR_CASCADE_PYTHON}\" scripts/run_prevalence_analysis.py --env hpc --scope combined --organism '${organism}' --figure-format html --figure-format png --figure-format svg --figure-format pdf"
+          "\"\${AMR_CASCADE_PYTHON}\" scripts/run_prevalence_analysis.py --env ${ENV_NAME} --scope combined --organism '${organism}' --figure-format html --figure-format png --figure-format svg --figure-format pdf"
       )"
       echo "Prevalence ${organism}: ${prevalence_job}"
       submitted_jobs+=("${prevalence_job}")
@@ -1271,7 +1400,7 @@ for raw_organism in "${ORGANISMS[@]}"; do
     if should_submit "${feature_input_deps}" feature_ready "combined" "" "${organism}"; then
       feature_job="$(
         submit_job "${organism_prefix}_features" "${FEATURE_TIME}" "${FEATURE_MEM}" "${feature_input_deps}" \
-          "\"\${AMR_CASCADE_PYTHON}\" scripts/run_feature_build.py --env hpc --scope combined --organism '${organism}'"
+          "\"\${AMR_CASCADE_PYTHON}\" scripts/run_feature_build.py --env ${ENV_NAME} --scope combined --organism '${organism}'"
       )"
       echo "Features ${organism}: ${feature_job}"
       submitted_jobs+=("${feature_job}")
@@ -1286,7 +1415,7 @@ for raw_organism in "${ORGANISMS[@]}"; do
     if should_submit "${feature_dep}" training_ready "combined" "" "${organism}"; then
       training_job="$(
         submit_job "${organism_prefix}_training" "${TRAINING_TIME}" "${TRAINING_MEM}" "${feature_dep}" \
-          "\"\${AMR_CASCADE_PYTHON}\" scripts/run_training.py --env hpc --scope combined --organism '${organism}'"
+          "\"\${AMR_CASCADE_PYTHON}\" scripts/run_training.py --env ${ENV_NAME} --scope combined --organism '${organism}'"
       )"
       echo "Training ${organism}: ${training_job}"
       submitted_jobs+=("${training_job}")
@@ -1304,7 +1433,7 @@ for raw_organism in "${ORGANISMS[@]}"; do
     if should_submit "${report_deps}" reporting_ready "combined" "" "${organism}"; then
       report_job="$(
         submit_job "${organism_prefix}_report" "${REPORT_TIME}" "${REPORT_MEM}" "${report_deps}" \
-          "\"\${AMR_CASCADE_PYTHON}\" scripts/run_reporting.py --env hpc --scope combined --organism '${organism}' --figure-format html --figure-format png --figure-format svg --figure-format pdf ${REPORT_FIGURE_ARGS}"
+          "\"\${AMR_CASCADE_PYTHON}\" scripts/run_reporting.py --env ${ENV_NAME} --scope combined --organism '${organism}' --figure-format html --figure-format png --figure-format svg --figure-format pdf ${REPORT_FIGURE_ARGS}"
       )"
       echo "Report ${organism}: ${report_job}"
       submitted_jobs+=("${report_job}")
@@ -1318,7 +1447,7 @@ for raw_organism in "${ORGANISMS[@]}"; do
       if should_submit "${organism_publication_dep}" publication_readiness_ready "combined" "" "${organism}"; then
         readiness_job="$(
           submit_job "${organism_prefix}_readiness_audit" "${READINESS_AUDIT_TIME}" "${READINESS_AUDIT_MEM}" "${organism_publication_dep}" \
-            "\"\${AMR_CASCADE_PYTHON}\" scripts/run_publication_readiness_audit.py --env hpc --scope combined --organism '${organism}' ${readiness_args}"
+            "\"\${AMR_CASCADE_PYTHON}\" scripts/run_publication_readiness_audit.py --env ${ENV_NAME} --scope combined --organism '${organism}' ${readiness_args}"
         )"
         echo "Publication readiness audit ${organism}: ${readiness_job}"
         submitted_jobs+=("${readiness_job}")
@@ -1337,7 +1466,7 @@ if [[ "${RUN_ESKAPE}" -eq 1 ]]; then
   echo "Submitting ESKAPE-family validation: ${#SITES[@]} site(s) x ${#ESKAPE_TARGETS[@]} target(s) (site scope), plus ${#ESKAPE_TARGETS[@]} target(s) (combined scope)."
   echo "Each (scope, target) pair is an independent job -- no target waits on another."
 
-  eskape_root="${PROJECT_ROOT}/data/artifacts/eskape_validation/armd"
+  eskape_root="${PROJECT_ROOT}/${DATA_ROOT_DIR}/artifacts/eskape_validation/armd"
   eskape_tables_root="${PROJECT_ROOT}/outputs/tables/eskape"
 
   for raw_site in "${SITES[@]}"; do
@@ -1356,7 +1485,7 @@ if [[ "${RUN_ESKAPE}" -eq 1 ]]; then
         eskape_job="$(
           PARTITION="${CASCADE_PARTITION}"
           submit_job "amr_eskape_${site_slug}_${target_slug}" "${ESKAPE_TIME}" "${ESKAPE_MEM}" "${common_dep}" \
-            "\"\${AMR_CASCADE_PYTHON}\" scripts/run_eskape_cascade_validation.py --env hpc --armd-source-scope site --armd-site '${site}' --targets '${target}' --armd-output-root '${eskape_root}' --summary-dir '${per_target_dir}'"
+            "\"\${AMR_CASCADE_PYTHON}\" scripts/run_eskape_cascade_validation.py --env ${ENV_NAME} --armd-source-scope site --armd-site '${site}' --targets '${target}' --armd-output-root '${eskape_root}' --summary-dir '${per_target_dir}'"
         )"
         echo "ESKAPE ${site} | ${target}: ${eskape_job}"
         submitted_jobs+=("${eskape_job}")
@@ -1391,7 +1520,7 @@ if [[ "${RUN_ESKAPE}" -eq 1 ]]; then
       eskape_job="$(
         PARTITION="${CASCADE_PARTITION}"
         submit_job "amr_eskape_combined_${target_slug}" "${ESKAPE_TIME}" "${ESKAPE_MEM}" "${common_dep}" \
-          "\"\${AMR_CASCADE_PYTHON}\" scripts/run_eskape_cascade_validation.py --env hpc --armd-source-scope combined --targets '${target}' --armd-output-root '${eskape_root}' --summary-dir '${per_target_dir}'"
+          "\"\${AMR_CASCADE_PYTHON}\" scripts/run_eskape_cascade_validation.py --env ${ENV_NAME} --armd-source-scope combined --targets '${target}' --armd-output-root '${eskape_root}' --summary-dir '${per_target_dir}'"
       )"
       echo "ESKAPE combined | ${target}: ${eskape_job}"
       submitted_jobs+=("${eskape_job}")
@@ -1422,7 +1551,7 @@ if [[ "${RUN_AUDIT}" -eq 1 ]]; then
     if should_submit "${audit_deps}" scientific_audit_ready "combined" "" "${organism}"; then
       audit_job="$(
         submit_job "amr_scientific_audit_${organism_slug}" "${AUDIT_TIME}" "${AUDIT_MEM}" "${audit_deps}" \
-          "\"\${AMR_CASCADE_PYTHON}\" scripts/run_scientific_audit.py --env hpc --scope combined --organism '${organism}'"
+          "\"\${AMR_CASCADE_PYTHON}\" scripts/run_scientific_audit.py --env ${ENV_NAME} --scope combined --organism '${organism}'"
       )"
       echo "Scientific audit | ${organism}: ${audit_job}"
       submitted_jobs+=("${audit_job}")

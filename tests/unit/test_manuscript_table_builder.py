@@ -544,6 +544,50 @@ def test_provenance_table_includes_discordant_susceptibility_audit() -> None:
     assert row["discordant_susceptibility_row_n"] == 7
 
 
+def test_data_quality_flow_table_reports_eligible_not_total_rows() -> None:
+    """"eligible_episode_drug_rows"/"eligible_directed_pair_rows" must count only
+
+    is_eligible==1 / downstream_eligible==1 rows, not the full unfiltered
+    candidate universe. Regression test: eligible_pairs.parquet and
+    drug_pair_episodes.parquet are written with BOTH eligible and ineligible
+    rows (gold_build_manager.py), and every cascade analyzer separately
+    re-filters to the eligible subset before computing any statistic -- but
+    this table previously did a plain row count with no such filter, so it
+    reported the full candidate universe under a label that claims to be the
+    eligible subset, silently contradicting build_eligibility_table's
+    eligible_rows for the identical underlying file. Verified against real
+    generated manuscript output: this overstated the true eligible count by
+    18-60% depending on site.
+    """
+    project_root = Path(__file__).resolve().parents[2]
+    settings = ConfigLoader(project_root).load("mac")
+    path_manager = PathManager(project_root, settings)
+    builder = ManuscriptTableBuilder(settings, path_manager)
+
+    organism = "unit_test_eligible_counts"
+    combined_gold_dir = path_manager.paths.gold / "combined" / "organisms" / organism
+    combined_gold_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame({"source_site": ["site_a", "site_a"]}).to_parquet(
+        combined_gold_dir / "culture_episodes.parquet", index=False
+    )
+    pd.DataFrame({"source_site": ["site_a", "site_a"]}).to_parquet(
+        combined_gold_dir / "culture_drug_episodes.parquet", index=False
+    )
+    # 4 rows for site_a: only 3 are eligible.
+    pd.DataFrame(
+        {"source_site": ["site_a"] * 4, "is_eligible": [1, 1, 1, 0]}
+    ).to_parquet(combined_gold_dir / "eligible_pairs.parquet", index=False)
+    # 6 rows for site_a: only 2 are eligible.
+    pd.DataFrame(
+        {"source_site": ["site_a"] * 6, "downstream_eligible": [1, 1, 0, 0, 0, 0]}
+    ).to_parquet(combined_gold_dir / "drug_pair_episodes.parquet", index=False)
+
+    table = builder.build_data_quality_flow_table("site", "site_a", organism)
+    rows = table.set_index("stage")["row_count"]
+    assert int(rows["eligible_episode_drug_rows"]) == 3
+    assert int(rows["eligible_directed_pair_rows"]) == 2
+
+
 def test_upstream_selection_balance_table_summarizes_tested_vs_untested_groups(tmp_path: Path) -> None:
     project_root = Path(__file__).resolve().parents[2]
     settings = ConfigLoader(project_root).load("mac")

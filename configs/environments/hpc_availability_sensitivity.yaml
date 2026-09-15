@@ -1,0 +1,50 @@
+# Sensitivity variant of hpc.yaml: identical production settings, except the
+# operational-availability minimum support is raised from the primary value
+# (1 observed row) to 5, to test whether validated patterns survive a
+# stricter observability requirement. Reviewer-requested check (see Methods,
+# Denominator construction): a single observation in a five-year site-era
+# stratum is defensible but a reasonable reviewer could ask whether it really
+# supports treating every episode in that stratum as eligible.
+#
+# data_root is DELIBERATELY not "data" (unlike most environment configs):
+# PathManager derives every one of raw/bronze/silver/harmonized/gold/interim/
+# features/artifacts from data_root with no other environment-specific
+# segregation, so reusing "data" here would make this config's gold-layer
+# rebuild (different eligibility denominator) silently overwrite the primary
+# hpc.yaml run's gold-layer output -- same physical files, no isolation, no
+# error. Before running, symlink the *unaffected* upstream stages in so they
+# are not expensively redone, and let gold/artifacts be fresh, real
+# directories:
+#   mkdir -p data_availability_sensitivity
+#   for d in raw sample bronze silver harmonized metadata reference interim features; do
+#     ln -s "$(pwd)/data/$d" "data_availability_sensitivity/$d"
+#   done
+#   mkdir -p data_availability_sensitivity/gold data_availability_sensitivity/artifacts
+#
+# Usage: run the full DAG with --env hpc_availability_sensitivity instead of
+# --env hpc. This changes the eligibility denominator itself, so it requires
+# a full rerun from the eligibility/gold stage forward -- it cannot be
+# computed by re-filtering an already-materialised results table. Do not run
+# this config's reporting stage (run_reporting.py): outputs/ is always
+# <project_root>/outputs regardless of data_root, so it is NOT isolated by
+# this symlink setup and would overwrite the primary run's manuscript tables
+# and figures -- this sensitivity check only needs validation_results.parquet.
+environment:
+  name: hpc_availability_sensitivity
+  data_root: data_availability_sensitivity
+  execution_mode: distributed
+  default_data_layer: raw
+  allow_raw_processing: true
+
+features:
+  auto_build_comorbidity: false
+  auto_prepare_silver_feature_sources: false
+
+cascade:
+  validation:
+    permutation_iterations: 1000
+    bootstrap_iterations: 1000
+
+gold:
+  eligibility:
+    availability_min_observed: 5

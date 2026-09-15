@@ -42,8 +42,8 @@ class ManuscriptTableBuilder:
         # column (source_site) -- projecting it here avoids materializing the full
         # table (drug_pair_episodes.parquet can be 100M+ rows) just to count rows.
         combined_culture = self._safe_read(combined_gold_dir / "culture_episodes.parquet", columns=["source_site"])
-        combined_eligible = self._safe_read(combined_gold_dir / "eligible_pairs.parquet", columns=["source_site"])
-        combined_pairs = self._safe_read(combined_gold_dir / "drug_pair_episodes.parquet", columns=["source_site"])
+        combined_eligible = self._safe_read(combined_gold_dir / "eligible_pairs.parquet", columns=["source_site", "is_eligible"])
+        combined_pairs = self._safe_read(combined_gold_dir / "drug_pair_episodes.parquet", columns=["source_site", "downstream_eligible"])
 
         for current_site in sites:
             microbial_resistance_metadata = self._read_silver_metadata(current_site, "microbial_resistance")
@@ -55,11 +55,17 @@ class ManuscriptTableBuilder:
                 "culture_episode_n": self._site_row_count(
                     combined_culture, "source_site", current_site, fallback_path=scoped_output_dir(self._paths.paths.gold, "site", site=current_site, organism=organism) / "culture_episodes.parquet"
                 ),
-                "eligible_episode_drug_n": self._site_row_count(
-                    combined_eligible, "source_site", current_site, fallback_path=scoped_output_dir(self._paths.paths.gold, "site", site=current_site, organism=organism) / "eligible_pairs.parquet"
+                # "eligible" means is_eligible/downstream_eligible == 1, matching every
+                # cascade analyzer's own filter -- eligible_pairs.parquet and
+                # drug_pair_episodes.parquet are written unfiltered (see
+                # _site_eligible_row_count's docstring), so a plain row count here
+                # previously reported the full candidate universe, not the eligible
+                # subset the field name claims.
+                "eligible_episode_drug_n": self._site_eligible_row_count(
+                    combined_eligible, "source_site", "is_eligible", current_site, fallback_path=scoped_output_dir(self._paths.paths.gold, "site", site=current_site, organism=organism) / "eligible_pairs.parquet"
                 ),
-                "eligible_directed_pair_n": self._site_row_count(
-                    combined_pairs, "source_site", current_site, fallback_path=scoped_output_dir(self._paths.paths.gold, "site", site=current_site, organism=organism) / "drug_pair_episodes.parquet"
+                "eligible_directed_pair_n": self._site_eligible_row_count(
+                    combined_pairs, "source_site", "downstream_eligible", current_site, fallback_path=scoped_output_dir(self._paths.paths.gold, "site", site=current_site, organism=organism) / "drug_pair_episodes.parquet"
                 ),
                 "microbial_resistance_duplicates_removed": int(microbial_resistance_metadata.get("duplicates_removed", 0) or 0),
                 "discordant_susceptibility_group_n": int(microbial_resistance_metadata.get("discordant_susceptibility_group_n", 0) or 0),
@@ -76,8 +82,8 @@ class ManuscriptTableBuilder:
         # just source_site to avoid materializing the full tables.
         combined_culture = self._safe_read(combined_gold_dir / "culture_episodes.parquet", columns=["source_site"])
         combined_observed = self._safe_read(combined_gold_dir / "culture_drug_episodes.parquet", columns=["source_site"])
-        combined_eligible = self._safe_read(combined_gold_dir / "eligible_pairs.parquet", columns=["source_site"])
-        combined_pairs = self._safe_read(combined_gold_dir / "drug_pair_episodes.parquet", columns=["source_site"])
+        combined_eligible = self._safe_read(combined_gold_dir / "eligible_pairs.parquet", columns=["source_site", "is_eligible"])
+        combined_pairs = self._safe_read(combined_gold_dir / "drug_pair_episodes.parquet", columns=["source_site", "downstream_eligible"])
 
         for current_site in sites:
             raw_dir = self._paths.paths.raw / current_site
@@ -86,8 +92,14 @@ class ManuscriptTableBuilder:
             site_gold_dir = scoped_output_dir(self._paths.paths.gold, "site", site=current_site, organism=organism)
             culture_n = self._site_row_count(combined_culture, "source_site", current_site, site_gold_dir / "culture_episodes.parquet")
             observed_n = self._site_row_count(combined_observed, "source_site", current_site, site_gold_dir / "culture_drug_episodes.parquet")
-            eligible_n = self._site_row_count(combined_eligible, "source_site", current_site, site_gold_dir / "eligible_pairs.parquet")
-            pair_n = self._site_row_count(combined_pairs, "source_site", current_site, site_gold_dir / "drug_pair_episodes.parquet")
+            # "eligible_episode_drug_rows"/"eligible_directed_pair_rows" must mean
+            # is_eligible/downstream_eligible == 1 (see _site_eligible_row_count) --
+            # both source files are written unfiltered, so a plain row count here
+            # previously overstated these two stages by the full ineligible fraction
+            # (verified: 18-60% overstatement depending on site) and silently
+            # contradicted build_eligibility_table's eligible_rows for the same data.
+            eligible_n = self._site_eligible_row_count(combined_eligible, "source_site", "is_eligible", current_site, site_gold_dir / "eligible_pairs.parquet")
+            pair_n = self._site_eligible_row_count(combined_pairs, "source_site", "downstream_eligible", current_site, site_gold_dir / "drug_pair_episodes.parquet")
             rows.extend(
                 [
                     {"site": current_site, "stage": "raw_ast_rows", "row_count": raw_ast_rows},
@@ -1239,6 +1251,33 @@ class ManuscriptTableBuilder:
             return int((dataframe[site_column] == site).sum())
         fallback = self._safe_read(fallback_path)
         return len(fallback)
+
+    def _site_eligible_row_count(
+        self,
+        dataframe: pd.DataFrame,
+        site_column: str,
+        eligibility_column: str,
+        site: str,
+        fallback_path: Path,
+    ) -> int:
+        """Row count restricted to eligibility_column == 1, not the raw table size.
+
+        eligible_pairs.parquet and drug_pair_episodes.parquet are written
+        UNFILTERED (every is_eligible/downstream_eligible value, 0 and 1 both) --
+        see gold_build_manager.py. A plain _site_row_count on these files counts
+        the full candidate universe, not what "eligible" actually means; every
+        cascade analyzer separately re-applies this same filter before computing
+        any statistic (cascade.require_downstream_eligible), so this must match
+        that filter for the reported provenance/flow counts to mean what their
+        labels claim and to agree with build_eligibility_table's eligible_rows.
+        """
+        if not dataframe.empty and site_column in dataframe.columns and eligibility_column in dataframe.columns:
+            site_rows = dataframe.loc[dataframe[site_column] == site]
+            return int((site_rows[eligibility_column] == 1).sum())
+        fallback = self._safe_read(fallback_path)
+        if fallback.empty or eligibility_column not in fallback.columns:
+            return len(fallback)
+        return int((fallback[eligibility_column] == 1).sum())
 
     @staticmethod
     def _edge_presence_label(row: pd.Series) -> str:

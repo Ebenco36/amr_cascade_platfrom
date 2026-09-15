@@ -254,6 +254,22 @@ class CascadeCovariateBuilder:
                 empty["cov_comorbidity_available"] = 0
                 results.append(empty)
                 continue
+            # Availability means "do we have ANY comorbidity extract row for this
+            # patient", independent of whether that row passes the active-at-culture
+            # window below -- a patient whose only comorbidity row resolved before
+            # culture is a genuine, known zero count, not missing data. Restricted
+            # (inner join) to this site's actual culture-episode patients, mirroring
+            # the pattern used by the other _available builders in this file (e.g.
+            # _build_prior_antibiotic) instead of a blanket assignment.
+            available_keys = (
+                table.loc[:, feature_join_keys]
+                .drop_duplicates()
+                .merge(
+                    site_base.loc[:, feature_join_keys].drop_duplicates(),
+                    on=feature_join_keys,
+                    how="inner",
+                )
+            )
             active = table.copy()
             active["comorbidity_component_start_days_culture"] = pd.to_numeric(
                 active["comorbidity_component_start_days_culture"], errors="coerce"
@@ -288,9 +304,17 @@ class CascadeCovariateBuilder:
                 site_base.loc[:, feature_join_keys]
                 .drop_duplicates()
                 .merge(grouped, on=feature_join_keys, how="left", validate="one_to_one")
+                .merge(
+                    available_keys.assign(cov_comorbidity_available=1),
+                    on=feature_join_keys,
+                    how="left",
+                    validate="one_to_one",
+                )
             )
             site_frame["comorbidity_count"] = site_frame["comorbidity_count"].fillna(0).astype(int)
-            site_frame["cov_comorbidity_available"] = 1
+            site_frame["cov_comorbidity_available"] = (
+                site_frame["cov_comorbidity_available"].fillna(0).astype(int)
+            )
             results.append(site_frame)
             del table, active, grouped
             gc.collect()
@@ -605,6 +629,18 @@ class CascadeCovariateBuilder:
             table["nursing_home_visit_culture"] = pd.to_numeric(
                 table["nursing_home_visit_culture"], errors="coerce"
             )
+            # A post-culture visit (negative offset, or an unparseable one) tells us
+            # nothing about PRIOR nursing-home residency -- it's a different time
+            # period entirely, not a known-zero for the question being asked. Filter
+            # to valid pre-culture rows before computing availability, mirroring
+            # _build_prior_antibiotic's ge(0) gate (previously this builder computed
+            # `available` before that filter, unlike every sibling _available builder).
+            table = table.loc[table["nursing_home_visit_culture"].ge(0).fillna(False)].copy()
+            if table.empty:
+                base_frame["cov_nursing_home_90d"] = 0
+                base_frame["cov_nursing_home_available"] = 0
+                results.append(base_frame)
+                continue
             table = table.merge(
                 site_base.loc[:, feature_join_keys], on=feature_join_keys, how="inner"
             )

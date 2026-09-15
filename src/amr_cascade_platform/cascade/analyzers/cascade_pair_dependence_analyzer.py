@@ -26,6 +26,13 @@ class CascadePairDependenceAnalyzer:
         "bundled_panel_fraction",
         "max_other_downstream_test_rate",
         "mean_other_downstream_test_rate",
+        "directional_support_ratio",
+        "directional_episode_overlap",
+        "mutual_eligible_pair_support_n",
+        "mutual_eligible_reverse_support_n",
+        "mutual_eligible_pair_test_rate",
+        "mutual_eligible_reverse_test_rate",
+        "directional_asymmetry_score_mutual_eligible",
     ]
 
     def __init__(self, settings: Settings) -> None:
@@ -41,7 +48,60 @@ class CascadePairDependenceAnalyzer:
         if frame.empty:
             return pd.DataFrame(columns=self._OUTPUT_COLUMNS)
 
-        panel_keys = list(self._settings.gold.episode_key_columns) + ["upstream_antibiotic"]
+        episode_key_columns = list(self._settings.gold.episode_key_columns)
+        retained_pair_labels = retained_edges.loc[:, ["upstream_antibiotic", "downstream_antibiotic"]].drop_duplicates()
+        relevant_labels = pd.concat(
+            [
+                retained_pair_labels,
+                retained_pair_labels.rename(
+                    columns={"upstream_antibiotic": "downstream_antibiotic", "downstream_antibiotic": "upstream_antibiotic"}
+                ),
+            ],
+            ignore_index=True,
+        ).drop_duplicates()
+        overlap_frame = frame.merge(
+            relevant_labels, on=["upstream_antibiotic", "downstream_antibiotic"], how="inner"
+        )
+        if not overlap_frame.empty:
+            overlap_frame = overlap_frame.copy()
+            overlap_frame["_episode_key"] = (
+                overlap_frame[episode_key_columns].astype(str).agg("||".join, axis=1)
+            )
+            episode_sets = (
+                overlap_frame.groupby(["upstream_antibiotic", "downstream_antibiotic"], dropna=False, observed=True)["_episode_key"]
+                .agg(lambda values: frozenset(values))
+                .to_dict()
+            )
+        else:
+            episode_sets = {}
+
+        # Mutual-eligibility sensitivity: DAS/PBI above condition each direction only
+        # on the DOWNSTREAM drug's eligibility (frame is already filtered to
+        # downstream_eligible==1). This restricts BOTH directions further to a
+        # common opportunity universe -- upstream_eligible==1 as well -- without
+        # requiring both drugs to be OBSERVED (that would coincide with the
+        # co-tested population the panel-bundling screen treats as suspect, not a
+        # clean comparison population). upstream_eligible is absent from
+        # drug_pairs materialised before PairGenerator started carrying it; this
+        # diagnostic degrades to NaN rather than raising when that column is missing.
+        if "upstream_eligible" in frame.columns:
+            mutual_frame = frame.loc[frame["upstream_eligible"] == 1]
+        else:
+            mutual_frame = frame.iloc[0:0]
+        if not mutual_frame.empty:
+            mutual_rates = (
+                mutual_frame.groupby(["upstream_antibiotic", "downstream_antibiotic"], dropna=False, observed=True)["downstream_tested"]
+                .agg(mutual_tested_n="sum", mutual_support_n="size")
+                .reset_index()
+            )
+            mutual_rate_lookup = {
+                (row.upstream_antibiotic, row.downstream_antibiotic): (row.mutual_tested_n, row.mutual_support_n)
+                for row in mutual_rates.itertuples(index=False)
+            }
+        else:
+            mutual_rate_lookup = {}
+
+        panel_keys = episode_key_columns + ["upstream_antibiotic"]
         panel_sizes = (
             frame.groupby(panel_keys, dropna=False, observed=True)["downstream_tested"]
             .sum()
@@ -120,6 +180,26 @@ class CascadePairDependenceAnalyzer:
                     "bundled_panel_fraction": float(panel_size.ge(2).mean()) if panel_size.notna().any() else math.nan,
                     "max_other_downstream_test_rate": float(other_rates.max()) if not other_rates.empty else math.nan,
                     "mean_other_downstream_test_rate": float(other_rates.mean()) if not other_rates.empty else math.nan,
+                    # Quantifies the j->k vs k->j population-size mismatch the DAS/PBI
+                    # diagnostics do not otherwise control for (min/max of the two
+                    # directions' row counts; 1.0 = identically sized, ->0 = highly
+                    # mismatched). Does not restrict DAS/PBI themselves to a mutually
+                    # eligible population -- reports how large that gap actually is.
+                    "directional_support_ratio": self._directional_support_ratio(
+                        pair_support_n.iloc[0] if not pair_support_n.empty else math.nan,
+                        reverse_support_n.iloc[0] if not reverse_support_n.empty else math.nan,
+                    ),
+                    # Jaccard overlap of the *actual episodes* contributing to each
+                    # direction -- complements directional_support_ratio, which only
+                    # compares denominator sizes and cannot detect two equally sized
+                    # but compositionally different episode sets.
+                    "directional_episode_overlap": self._episode_jaccard_overlap(
+                        episode_sets.get((upstream_antibiotic, downstream_antibiotic), frozenset()),
+                        episode_sets.get((downstream_antibiotic, upstream_antibiotic), frozenset()),
+                    ),
+                    **self._mutual_eligible_diagnostics(
+                        mutual_rate_lookup, upstream_antibiotic, downstream_antibiotic, cc
+                    ),
                 }
             )
         result = pd.DataFrame(rows).reindex(columns=self._OUTPUT_COLUMNS)
@@ -148,6 +228,68 @@ class CascadePairDependenceAnalyzer:
         if pd.isna(pair_rate) or pd.isna(reverse_rate):
             return math.nan
         return float(min(pair_rate, reverse_rate))
+
+    @staticmethod
+    def _directional_support_ratio(pair_support_n: float, reverse_support_n: float) -> float:
+        """min/max of the two directions' denominator sizes; 1.0 = identically sized."""
+        if pd.isna(pair_support_n) or pd.isna(reverse_support_n) or pair_support_n <= 0 or reverse_support_n <= 0:
+            return math.nan
+        return float(min(pair_support_n, reverse_support_n) / max(pair_support_n, reverse_support_n))
+
+    @staticmethod
+    def _episode_jaccard_overlap(forward_episodes: frozenset, reverse_episodes: frozenset) -> float:
+        """Jaccard index of the two directions' contributing episode sets.
+
+        1.0 = identical episode composition, 0.0 = fully disjoint episodes, NaN
+        when either direction has no episodes at all. Complements
+        directional_support_ratio: two directions can have identical support
+        counts while sharing few or no episodes, which a size-only ratio cannot
+        detect.
+        """
+        if not forward_episodes or not reverse_episodes:
+            return math.nan
+        union_size = len(forward_episodes | reverse_episodes)
+        if union_size == 0:
+            return math.nan
+        return float(len(forward_episodes & reverse_episodes) / union_size)
+
+    def _mutual_eligible_diagnostics(
+        self,
+        mutual_rate_lookup: dict[tuple[object, object], tuple[float, float]],
+        upstream_antibiotic: object,
+        downstream_antibiotic: object,
+        continuity_correction: float,
+    ) -> dict[str, float]:
+        """DAS recomputed with both directions restricted to a common, mutually
+
+        eligible opportunity universe (both upstream_eligible==1 and
+        downstream_eligible==1), rather than each direction conditioning only on
+        its own downstream drug's eligibility. Complements, does not replace,
+        the primary directional_asymmetry_score in cascade_report_builder.py:
+        this quantifies how much of that primary DAS could reflect the two
+        directions drawing from different opportunity populations, by showing
+        what DAS looks like once that specific difference is removed. The two
+        directions' SUPPORT SIZES can still differ afterward (one direction
+        still requires the upstream drug to be observed, the other requires the
+        reverse), which is exactly why mutual_eligible_pair_support_n and
+        mutual_eligible_reverse_support_n are reported alongside it rather than
+        DAS alone.
+        """
+        pair = mutual_rate_lookup.get((upstream_antibiotic, downstream_antibiotic))
+        reverse = mutual_rate_lookup.get((downstream_antibiotic, upstream_antibiotic))
+        pair_rate = (
+            self._smoothed_rate(pair[0], pair[1], continuity_correction) if pair else math.nan
+        )
+        reverse_rate = (
+            self._smoothed_rate(reverse[0], reverse[1], continuity_correction) if reverse else math.nan
+        )
+        return {
+            "mutual_eligible_pair_support_n": float(pair[1]) if pair else math.nan,
+            "mutual_eligible_reverse_support_n": float(reverse[1]) if reverse else math.nan,
+            "mutual_eligible_pair_test_rate": pair_rate,
+            "mutual_eligible_reverse_test_rate": reverse_rate,
+            "directional_asymmetry_score_mutual_eligible": self._asymmetry_score(pair_rate, reverse_rate),
+        }
 
     @staticmethod
     def _assign_asymmetry_bins(scores: pd.Series) -> pd.Series:

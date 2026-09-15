@@ -5,6 +5,108 @@ import pandas as pd
 from amr_cascade_platform.cascade.outputs.cascade_report_builder import CascadeReportBuilder
 
 
+def test_diagnostics_marks_non_estimable_pairs_unavailable_not_negative(tmp_path: Path) -> None:
+    """A non-estimable pair (adjusted_log_odds=NaN) must not read as a "negative" effect.
+
+    NaN > 0 is False in Python, so a naive `"positive" if value > 0 else "negative"`
+    mislabels every non-estimable pair as negative. This is the actual shape
+    DownstreamTestingRegression._non_estimable_result produces for pairs where the
+    model was never fitted (e.g. zero-variance outcome/exposure).
+    """
+    adjusted_results = pd.DataFrame(
+        [
+            {
+                "upstream_antibiotic": "A",
+                "downstream_antibiotic": "B",
+                "adjusted_log_odds": 0.4,
+                "adjusted_odds_ratio": 1.5,
+                "modeled_n": 50,
+            },
+            {
+                "upstream_antibiotic": "C",
+                "downstream_antibiotic": "D",
+                "adjusted_log_odds": float("nan"),
+                "adjusted_odds_ratio": float("nan"),
+                "modeled_n": float("nan"),
+                "supports_adjusted_model": False,
+                "non_estimable_reason": "zero_variance_outcome_or_exposure",
+            },
+        ]
+    )
+
+    outputs = CascadeReportBuilder().export(pd.DataFrame(), adjusted_results, tmp_path)
+    diagnostics = pd.read_parquet(outputs["diagnostics_path"])
+
+    positive_row = diagnostics.loc[diagnostics["upstream_antibiotic"] == "A"].iloc[0]
+    non_estimable_row = diagnostics.loc[diagnostics["upstream_antibiotic"] == "C"].iloc[0]
+    assert positive_row["adjusted_effect_direction"] == "positive"
+    assert non_estimable_row["adjusted_effect_direction"] == "unavailable"
+
+
+def test_adjustment_concordance_distinguishes_concordant_attenuated_reversed(tmp_path: Path) -> None:
+    """Three-way classification, not just same-side-of-1 agreement: a pattern
+
+    whose adjusted CI still straddles 1 is "attenuated" even though its point
+    estimate nominally agrees in direction with the raw escalation ratio --
+    raw_adjusted_direction_agreement alone would call this "aligned" and lose
+    that distinction. adjusted_odds_ratio and its CI live directly on
+    retained_edges here (as RetainedEdgeAnalyzer's real output does), not on a
+    separately-merged adjusted_results -- _build_edge_report reads them
+    straight off retained_edges; adjusted_results only feeds the separate
+    per-model diagnostics table.
+    """
+    retained_edges = pd.DataFrame(
+        [
+            # Concordant: same direction (OR>1), CI excludes 1.
+            {
+                "upstream_antibiotic": "A", "downstream_antibiotic": "B",
+                "escalation_ratio": 4.0, "total_support_n": 50,
+                "adjusted_odds_ratio": 3.5,
+                "adjusted_odds_ratio_ci_lower": 1.8, "adjusted_odds_ratio_ci_upper": 6.2,
+            },
+            # Attenuated: same direction (OR>1), but CI straddles 1.
+            {
+                "upstream_antibiotic": "C", "downstream_antibiotic": "D",
+                "escalation_ratio": 4.0, "total_support_n": 50,
+                "adjusted_odds_ratio": 1.05,
+                "adjusted_odds_ratio_ci_lower": 0.8, "adjusted_odds_ratio_ci_upper": 1.4,
+            },
+            # Reversed: raw ER>1 (escalation) but adjusted OR<1.
+            {
+                "upstream_antibiotic": "E", "downstream_antibiotic": "F",
+                "escalation_ratio": 4.0, "total_support_n": 50,
+                "adjusted_odds_ratio": 0.6,
+                "adjusted_odds_ratio_ci_lower": 0.4, "adjusted_odds_ratio_ci_upper": 0.9,
+            },
+        ]
+    )
+
+    outputs = CascadeReportBuilder().export(retained_edges, pd.DataFrame(), tmp_path)
+    edge_report = pd.read_parquet(outputs["edge_report_path"])
+    by_pair = edge_report.set_index(["upstream_antibiotic", "downstream_antibiotic"])["adjustment_concordance"]
+
+    assert by_pair[("A", "B")] == "concordant"
+    assert by_pair[("C", "D")] == "attenuated"
+    assert by_pair[("E", "F")] == "reversed"
+
+
+def test_adjustment_concordance_unavailable_when_not_estimable(tmp_path: Path) -> None:
+    retained_edges = pd.DataFrame(
+        [
+            {
+                "upstream_antibiotic": "A", "downstream_antibiotic": "B",
+                "escalation_ratio": 4.0, "total_support_n": 50,
+                "adjusted_odds_ratio": float("nan"),
+            }
+        ]
+    )
+
+    outputs = CascadeReportBuilder().export(retained_edges, pd.DataFrame(), tmp_path)
+    edge_report = pd.read_parquet(outputs["edge_report_path"])
+
+    assert edge_report.iloc[0]["adjustment_concordance"] == "unavailable"
+
+
 def test_report_builder_creates_two_step_paths(tmp_path: Path) -> None:
     retained_edges = pd.DataFrame(
         [

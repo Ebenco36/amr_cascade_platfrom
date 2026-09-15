@@ -53,6 +53,56 @@ def _downstream(anon_id: str, antibiotic: str, tested: int = 0) -> dict:
 
 # ── Basic contract ────────────────────────────────────────────────────────────
 
+def test_upstream_eligible_mirrors_downstream_eligible(generator: PairGenerator) -> None:
+    """upstream_eligible must read is_eligible for the UPSTREAM drug itself,
+
+    not just copy downstream_eligible or default to 1. Without this, a
+    diagnostic cannot restrict both directions of a pair to a common,
+    mutually eligible opportunity universe -- only downstream_eligible was
+    previously available, which conditions on the wrong drug's eligibility
+    for that purpose.
+    """
+    culture_drug_episodes = pd.DataFrame(
+        [_episode("A1", "CIPRO", "RESISTANT")]
+    )
+    # Eligibility space covers the full antibiotic universe for this episode:
+    # CIPRO (the upstream drug) is NOT operationally eligible; MEROPENEM
+    # (the downstream drug) is.
+    eligibility_space = pd.DataFrame(
+        [
+            {**_downstream("A1", "CIPRO"), "is_eligible": 0},
+            {**_downstream("A1", "MEROPENEM"), "is_eligible": 1},
+        ]
+    )
+
+    pairs = generator.build(culture_drug_episodes, eligibility_space)
+
+    assert len(pairs) == 1
+    row = pairs.iloc[0]
+    assert row["upstream_antibiotic"] == "CIPRO"
+    assert row["downstream_antibiotic"] == "MEROPENEM"
+    assert int(row["upstream_eligible"]) == 0
+    assert int(row["downstream_eligible"]) == 1
+
+
+def test_upstream_eligible_defaults_to_zero_when_unmatched(generator: PairGenerator) -> None:
+    """A row-generation gap (upstream drug missing from eligibility_space) must
+
+    default upstream_eligible to 0 (not confirmed eligible), not raise or
+    silently default to eligible.
+    """
+    culture_drug_episodes = pd.DataFrame(
+        [_episode("A1", "CIPRO", "RESISTANT")]
+    )
+    # eligibility_space has no row at all for (A1, CIPRO) -- only MEROPENEM.
+    eligibility_space = pd.DataFrame([_downstream("A1", "MEROPENEM")])
+
+    pairs = generator.build(culture_drug_episodes, eligibility_space)
+
+    assert len(pairs) == 1
+    assert int(pairs.iloc[0]["upstream_eligible"]) == 0
+
+
 def test_basic_ordered_pair(generator: PairGenerator) -> None:
     """A single upstream + downstream row produces exactly one directed pair."""
     pairs = generator.build(

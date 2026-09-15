@@ -47,6 +47,7 @@ class PairGenerator:
                     *episode_keys,
                     "upstream_antibiotic",
                     "upstream_susceptibility",
+                    "upstream_eligible",
                     "downstream_antibiotic",
                     "downstream_tested",
                     "downstream_eligible",
@@ -63,6 +64,25 @@ class PairGenerator:
                 "susceptibility": "upstream_susceptibility",
             }
         )
+        # upstream_eligible mirrors downstream_eligible below (both read is_eligible
+        # from the same eligibility_space, keyed by episode + antibiotic) -- without
+        # it, a directional-asymmetry diagnostic (DAS) can only condition each
+        # direction on the DOWNSTREAM drug's eligibility, never the upstream drug's
+        # own, so it cannot restrict both directions to a common, mutually eligible
+        # opportunity universe. Left join + fillna(0): a row generation gap here
+        # (upstream drug missing from eligibility_space) is treated as not
+        # confirmed eligible, the same conservative default eligibility_service.py
+        # uses for is_observed_tested.
+        upstream_eligibility = eligibility_space.loc[
+            :, episode_keys + ["antibiotic", "is_eligible"]
+        ].rename(columns={"antibiotic": "upstream_antibiotic", "is_eligible": "upstream_eligible"})
+        upstream = upstream.merge(
+            upstream_eligibility,
+            on=episode_keys + ["upstream_antibiotic"],
+            how="left",
+            validate="many_to_one",
+        )
+        upstream["upstream_eligible"] = upstream["upstream_eligible"].fillna(0).astype("int64")
         downstream = eligibility_space.loc[
             :,
             episode_keys

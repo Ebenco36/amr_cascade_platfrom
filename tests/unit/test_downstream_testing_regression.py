@@ -292,3 +292,91 @@ def test_downstream_testing_regression_empty_result_keeps_schema(tmp_path: Path)
     assert "adjusted_odds_ratio" in result.columns
     assert "quasi_separation_flagged" in result.columns
     assert "adjustment_covariates" in result.columns
+
+
+def test_resolve_cluster_ids_prefixes_by_site(tmp_path: Path) -> None:
+    """A raw identifier that collides across sites must not collapse into one cluster.
+
+    Multi-site pooled fits are vulnerable to this: anon_id is generated independently
+    per site, so the same raw value (e.g. "123") can appear at two different
+    institutions without referring to the same patient.
+    """
+    project_root = Path(__file__).resolve().parents[2]
+    settings = ConfigLoader(project_root).load("mac")
+    regression = DownstreamTestingRegression(settings, PathManager(tmp_path, settings))
+
+    frame = pd.DataFrame(
+        {
+            "anon_id": ["123", "123", "456"],
+            "source_site": ["armd", "armd_ecuh", "armd"],
+        }
+    )
+
+    cluster_ids = regression._resolve_cluster_ids(frame)
+
+    assert cluster_ids.name == "anon_id"
+    assert cluster_ids.nunique() == 3
+    assert cluster_ids.iloc[0] != cluster_ids.iloc[1]
+
+
+def test_resolve_cluster_ids_falls_back_per_row_on_missing_anon_id() -> None:
+    """A row missing its primary identifier must not collapse into a shared fake cluster.
+
+    Two different patients can both have a missing anon_id (e.g. a linkage gap).
+    Naively casting NaN to the literal string "nan" would merge every such row
+    into one cluster, telling the sandwich estimator two unrelated patients were
+    the same person. Each row must instead fall through to its own
+    pat_enc_csn_id_coded independently.
+    """
+    project_root = Path(__file__).resolve().parents[2]
+    settings = ConfigLoader(project_root).load("mac")
+    regression = DownstreamTestingRegression(settings, PathManager(Path("/tmp"), settings))
+
+    frame = pd.DataFrame(
+        {
+            "anon_id": ["123", np.nan, np.nan, "456"],
+            "pat_enc_csn_id_coded": ["e123", "e_missing_1", "e_missing_2", "e456"],
+            "source_site": ["armd", "armd", "armd", "armd"],
+        }
+    )
+
+    cluster_ids = regression._resolve_cluster_ids(frame)
+
+    # The two rows with a missing anon_id must NOT be merged into one cluster --
+    # each falls back independently to its own pat_enc_csn_id_coded.
+    assert cluster_ids.iloc[1] != cluster_ids.iloc[2]
+    assert "nan" not in cluster_ids.iloc[1]
+    assert "nan" not in cluster_ids.iloc[2]
+    assert cluster_ids.nunique() == 4
+    # Primary identifier is still anon_id, since it supplied at least one row.
+    assert cluster_ids.name == "anon_id"
+
+
+def test_resolve_cluster_ids_falls_back_to_episode_key_when_all_candidates_missing() -> None:
+    """Two rows missing every ID candidate still land in different clusters.
+
+    They must not silently collapse into one cluster just because their
+    identifier columns are equally absent -- the remaining episode-key columns
+    (here, order_time_jittered) still distinguish genuinely different episodes.
+    """
+    project_root = Path(__file__).resolve().parents[2]
+    settings = ConfigLoader(project_root).load("mac")
+    regression = DownstreamTestingRegression(settings, PathManager(Path("/tmp"), settings))
+
+    frame = pd.DataFrame(
+        {
+            "anon_id": [np.nan, np.nan],
+            "pat_enc_csn_id_coded": [np.nan, np.nan],
+            "order_proc_id_coded": [np.nan, np.nan],
+            "source_site": ["armd", "armd"],
+            "order_time_jittered": ["2024-01-01T00:00:00Z", "2024-06-01T00:00:00Z"],
+            "organism": ["ESCHERICHIA COLI", "ESCHERICHIA COLI"],
+        }
+    )
+
+    cluster_ids = regression._resolve_cluster_ids(frame)
+
+    assert cluster_ids.name == "episode_key"
+    assert cluster_ids.iloc[0] != cluster_ids.iloc[1]
+    assert cluster_ids.nunique() == 2
+    assert cluster_ids.iloc[0].startswith("armd::")

@@ -94,6 +94,11 @@ class DatasetCharacterizationPlotter:
         output_dir.mkdir(parents=True, exist_ok=True)
         outputs: dict[str, Path] = {}
 
+        outputs.update(self.export_eligibility_funnel(
+            eligible_pairs,
+            output_dir / "dataset_eligibility_funnel",
+            formats,
+        ))
         outputs.update(self.export_eligible_vs_observed_by_drug(
             eligible_pairs,
             output_dir / "dataset_eligible_vs_observed",
@@ -136,6 +141,151 @@ class DatasetCharacterizationPlotter:
             formats,
         ))
         return outputs
+
+    # ── Figure 0: Eligibility funnel (biological vs. operational exclusion) ──
+
+    def export_eligibility_funnel(
+        self,
+        eligible_pairs: pd.DataFrame,
+        output_stem: Path,
+        formats: tuple[str, ...],
+    ) -> dict[str, Path]:
+        """Two-panel view of how the candidate episode-antibiotic space narrows
+
+        to the eligible opportunity space: a funnel of the two sequential
+        gates (biological, then operational), and a per-site stacked bar
+        showing the same three-way split so a reader can see, at a glance,
+        that biological exclusion is essentially fixed across sites while
+        operational exclusion is not -- the actual driver of any site-level
+        eligible-rate gap. Both traces are native Plotly geometry (Funnel,
+        Bar) rather than manually positioned shapes/annotations, so there is
+        no risk of the label-collision failure mode
+        export_eligible_vs_observed_by_drug's neighbour, PlotlyConsortPlotter,
+        works around with a Matplotlib fallback -- funnels and stacked bars
+        lay themselves out.
+
+        is_eligible is definitionally (is_intrinsic_resistance == 0) AND
+        (is_operationally_available == 1) under the primary denominator
+        (Methods, Denominator construction), so intrinsic-resistance count,
+        operationally-unavailable count (among the biologically eligible
+        remainder), and eligible count partition the candidate space exactly
+        -- the three segments always sum to the total by construction, not by
+        rounding.
+        """
+        required = {"is_eligible", "is_intrinsic_resistance", "is_operationally_available", "source_site"}
+        if eligible_pairs.empty or not required.issubset(eligible_pairs.columns):
+            return self._exporter.write(
+                _empty(self._template, self._width, self._height,
+                       "Eligibility funnel unavailable — required columns missing"),
+                output_stem, formats,
+            )
+
+        def _segments(frame: pd.DataFrame) -> tuple[int, int, int]:
+            total = len(frame)
+            intrinsic = int(frame["is_intrinsic_resistance"].eq(1).sum())
+            biologically_eligible = frame.loc[frame["is_intrinsic_resistance"].eq(0)]
+            operationally_unavailable = int(biologically_eligible["is_operationally_available"].eq(0).sum())
+            eligible = int(frame["is_eligible"].eq(1).sum())
+            assert intrinsic + operationally_unavailable + eligible == total, (
+                "eligibility funnel segments must partition the candidate space exactly"
+            )
+            return intrinsic, operationally_unavailable, eligible
+
+        total_n = len(eligible_pairs)
+        intrinsic_n, operational_n, eligible_n = _segments(eligible_pairs)
+        biologically_eligible_n = total_n - intrinsic_n
+
+        site_rows = []
+        for site, group in eligible_pairs.groupby("source_site", observed=True):
+            site_intrinsic, site_operational, site_eligible = _segments(group)
+            site_total = len(group)
+            if site_total == 0:
+                continue
+            site_rows.append({
+                "source_site": site,
+                "total": site_total,
+                "intrinsic_pct": 100 * site_intrinsic / site_total,
+                "operational_pct": 100 * site_operational / site_total,
+                "eligible_pct": 100 * site_eligible / site_total,
+                "eligible_n": site_eligible,
+            })
+        site_df = pd.DataFrame(site_rows).sort_values("eligible_pct", ascending=True)
+
+        fig = make_subplots(
+            rows=1, cols=2,
+            specs=[[{"type": "funnel"}, {"type": "bar"}]],
+            subplot_titles=["Candidate space → eligible", "Eligible share by site"],
+            column_widths=[0.42, 0.58],
+            horizontal_spacing=0.12,
+        )
+
+        fig.add_trace(
+            go.Funnel(
+                y=["Candidate episode–antibiotic pairs", "Biologically eligible", "Eligible (biological + operational)"],
+                x=[total_n, biologically_eligible_n, eligible_n],
+                textinfo="value+percent initial",
+                # Dark blue -> lighter blue -> green: the first two stages are
+                # both still "in the funnel" (not yet a final categorisation),
+                # so they share the same hue at different tints; only the last
+                # stage is the true final outcome and gets the distinct
+                # success colour. Two full-strength greens in a row would
+                # wrongly read as two separate "done" states.
+                marker=dict(color=[_SITE[0], "rgba(44,111,172,0.5)", _LOW]),
+                connector=dict(line=dict(color=_REF, width=1)),
+                showlegend=False,
+                hovertemplate="<b>%{y}</b><br>N = %{x:,}<extra></extra>",
+            ),
+            row=1, col=1,
+        )
+
+        for name, color, key in [
+            ("Intrinsic resistance (biological)", _HIGH, "intrinsic_pct"),
+            ("Operationally unavailable", _UNOBS, "operational_pct"),
+            ("Eligible", _LOW, "eligible_pct"),
+        ]:
+            fig.add_trace(
+                go.Bar(
+                    name=name,
+                    y=site_df["source_site"],
+                    x=site_df[key],
+                    orientation="h",
+                    marker_color=color,
+                    hovertemplate=f"<b>%{{y}}</b><br>{name}: %{{x:.1f}}%<extra></extra>",
+                ),
+                row=1, col=2,
+            )
+
+        for _, row in site_df.iterrows():
+            fig.add_annotation(
+                x=101, y=row["source_site"],
+                xref="x2", yref="y2",
+                text=f"{row['eligible_n']:,} eligible",
+                showarrow=False,
+                font=dict(size=10, color=_TEXT),
+                xanchor="left",
+            )
+
+        h = max(self._height, 70 * max(len(site_df), 3))
+        fig.update_layout(
+            template=self._template,
+            width=self._width,
+            height=h,
+            paper_bgcolor=_BG,
+            plot_bgcolor=_BG,
+            barmode="stack",
+            title=dict(
+                text="<b>Eligible Opportunity Space</b><br>"
+                     "<sup>Biological exclusion is fixed by organism–drug identity; "
+                     "operational exclusion varies by site × era</sup>",
+                font=dict(size=16, color=_TEXT),
+                x=0.01, xanchor="left",
+            ),
+            xaxis2=dict(title="Share of candidate space (%)", range=[0, 122], gridcolor=_GRID),
+            yaxis2=dict(title=""),
+            legend=dict(orientation="h", yanchor="top", y=0.96, xanchor="left", x=0.44),
+            margin=dict(l=20, r=40, t=160, b=50),
+        )
+        return self._exporter.write(fig, output_stem, formats)
 
     # ── Figure 1: Eligible vs. Observed space by drug ─────────────────────────
 
