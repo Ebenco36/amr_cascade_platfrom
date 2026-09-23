@@ -54,6 +54,14 @@ class DemographicsFeatureBuilder:
                     .reset_index()
                 )
                 frame = site_base.merge(table, on=join_keys, how="left", validate="one_to_one")
+                # Source extracts encode a missing gender as the literal string
+                # "Null" (mixed case across sites), not a true null -- left
+                # unhandled, that string survives str.strip().str.upper() as
+                # "NULL" and gets treated as a real (if unrecognised) code
+                # instead of absent data, inflating "available" and shifting
+                # it into demo_gender_category as an opaque code rather than
+                # counting toward missingness.
+                frame.loc[frame["gender"].astype(str).str.strip().str.upper() == "NULL", "gender"] = pd.NA
                 gender = frame["gender"].fillna("").astype(str).str.strip().str.upper()
                 frame["baseline_demographics_available"] = (
                     frame["age"].notna() | frame["gender"].notna()

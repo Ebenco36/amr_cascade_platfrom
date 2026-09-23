@@ -108,6 +108,14 @@ class PlotlyCrossSiteConcordancePlotter:
             ),
             horizontal_spacing=0.12,
         )
+        # make_subplots's auto-generated subplot-title annotations carry no
+        # explicit font size, so the print-export font scale (which only
+        # multiplies sizes actually present in the figure JSON) never touches
+        # them -- they stayed at Plotly's small unscaled default while the
+        # 2.6x-scaled main title grew past them, colliding. Giving them an
+        # explicit size makes them participate in the same scaling.
+        for annotation in fig.layout.annotations:
+            annotation.font = {"size": 11}
 
         self._panel_a(fig, df, sites, site_colors)
         self._panel_b(fig, df, sites, site_colors)
@@ -125,7 +133,7 @@ class PlotlyCrossSiteConcordancePlotter:
                     f"({n_pairs} unique pairs, {n_rows} site observations)"
                 ),
                 x=0.5,
-                font=dict(size=15),
+                font=dict(size=12),
             ),
             legend=dict(
                 title="Site",
@@ -133,7 +141,7 @@ class PlotlyCrossSiteConcordancePlotter:
                 borderwidth=1,
                 bgcolor="rgba(255,255,255,0.9)",
             ),
-            margin=dict(t=100, b=70, l=70, r=50),
+            margin=dict(t=170, b=70, l=70, r=50),
         )
         fig.update_xaxes(showgrid=True, gridcolor=_GRID)
         fig.update_yaxes(showgrid=True, gridcolor=_GRID)

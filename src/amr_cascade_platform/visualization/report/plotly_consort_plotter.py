@@ -20,7 +20,7 @@ _FINAL_FILL = "#EAF7EA"
 _FINAL_LINE = "#27AE60"
 _TEXT_DARK  = "#1a1a2e"
 _ARROW      = "#555555"
-_BG         = "rgba(0,0,0,0)"
+_BG         = "white"  # static PNG/PDF exports composite transparency onto black in some viewers/renderers -- explicit white matches every other figure module in this codebase
 
 
 def _fmt(n: int | None) -> str:

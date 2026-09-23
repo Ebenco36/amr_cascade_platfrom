@@ -705,3 +705,114 @@ def test_upstream_selection_balance_table_summarizes_tested_vs_untested_groups(t
     assert icu_row["upstream_tested_value"] == 1.0
     assert icu_row["upstream_untested_value"] == 0.0
     assert icu_row["balance_flag"] == "high_imbalance"
+
+
+def test_episode_audit_table_counts_patients_encounters_orders_and_episodes() -> None:
+    """Patients/encounters/orders can each de-duplicate to a different count
+
+    than the raw episode row count; a table that just reported len(frame) for
+    all four would be unable to distinguish "one patient with four episodes"
+    from "four patients with one episode each" -- exactly the distinction the
+    within-patient-clustering sensitivity check in Results depends on.
+    """
+    project_root = Path(__file__).resolve().parents[2]
+    settings = ConfigLoader(project_root).load("mac")
+    path_manager = PathManager(project_root, settings)
+    builder = ManuscriptTableBuilder(settings, path_manager)
+
+    organism = "unit_test_episode_audit"
+    combined_gold_dir = path_manager.paths.gold / "combined" / "organisms" / organism
+    combined_gold_dir.mkdir(parents=True, exist_ok=True)
+    # Patient P1 contributes 2 episodes across 2 encounters and 2 orders;
+    # patient P2 contributes 1. -> 2 patients, 3 encounters, 3 orders, 3 episodes.
+    pd.DataFrame(
+        {
+            "anon_id": ["P1", "P1", "P2"],
+            "pat_enc_csn_id_coded": ["E1", "E2", "E3"],
+            "order_proc_id_coded": ["O1", "O2", "O3"],
+            "source_site": ["armd", "armd", "armd"],
+        }
+    ).to_parquet(combined_gold_dir / "culture_episodes.parquet", index=False)
+
+    table = builder.build_episode_audit_table("combined", None, organism)
+    row = table.iloc[0]
+    assert row["patient_n"] == 2
+    assert row["encounter_n"] == 3
+    assert row["culture_order_n"] == 3
+    assert row["culture_episode_n"] == 3
+
+
+def test_operational_availability_table_groups_to_one_row_per_site_era_drug() -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    settings = ConfigLoader(project_root).load("mac")
+    path_manager = PathManager(project_root, settings)
+    builder = ManuscriptTableBuilder(settings, path_manager)
+
+    organism = "unit_test_operational_availability"
+    combined_gold_dir = path_manager.paths.gold / "combined" / "organisms" / organism
+    combined_gold_dir.mkdir(parents=True, exist_ok=True)
+    # Two rows for the same (site, era, drug) stratum -- availability_support_n
+    # and is_operationally_available are constant within a stratum by
+    # construction (verified against real data), so grouping must take one
+    # value per stratum, never sum across the rows that share it.
+    pd.DataFrame(
+        {
+            "source_site": ["armd", "armd"],
+            "availability_era": ["2020-2024", "2020-2024"],
+            "antibiotic": ["AMIKACIN", "AMIKACIN"],
+            "availability_support_n": [500, 500],
+            "is_operationally_available": [1, 1],
+            "is_eligible": [1, 0],
+            "is_observed_tested": [1, 0],
+        }
+    ).to_parquet(combined_gold_dir / "eligible_pairs.parquet", index=False)
+
+    table = builder.build_operational_availability_table("combined", None, organism)
+    assert len(table) == 1
+    row = table.iloc[0]
+    assert row["availability_support_n"] == 500
+    assert row["is_operationally_available"] == 1
+    assert row["eligible_n"] == 1
+    assert row["observed_n"] == 1
+
+
+def test_cohort_characteristics_table_deduplicates_pair_rows_to_one_row_per_episode() -> None:
+    """model_ready_pair_features.parquet is one row per (episode, upstream
+
+    drug, downstream drug) pair; every demographic/clinical column is constant
+    within an episode across its pair-rows, so summarising without first
+    de-duplicating on the episode key would count one real episode several
+    times over -- once per pair it happens to participate in.
+    """
+    project_root = Path(__file__).resolve().parents[2]
+    settings = ConfigLoader(project_root).load("mac")
+    path_manager = PathManager(project_root, settings)
+    builder = ManuscriptTableBuilder(settings, path_manager)
+
+    organism = "unit_test_cohort_characteristics"
+    features_dir = path_manager.paths.features / "combined" / "organisms" / organism
+    features_dir.mkdir(parents=True, exist_ok=True)
+    # One real episode (E1) appears twice, as two different drug pairs; one
+    # more (E2). A naive row count would see 3 "episodes" instead of 2.
+    pd.DataFrame(
+        {
+            "anon_id": ["P1", "P1", "P2"],
+            "pat_enc_csn_id_coded": ["E1", "E1", "E2"],
+            "order_proc_id_coded": ["O1", "O1", "O2"],
+            "source_site": ["armd", "armd", "armd"],
+            "demo_age": [60.0, 60.0, 40.0],
+            "ward_hosp_ward_ip": [1, 1, 0],
+            "ward_hosp_ward_op": [0, 0, 1],
+            "ward_hosp_ward_er": [0, 0, 0],
+            "ward_hosp_ward_icu": [0, 0, 0],
+            "comorbidity_count": [5, 5, 2],
+            "history_abx_any_90d": [1, 1, 0],
+            "history_abx_available": [1, 1, 1],
+            "culture_description": ["URINE", "URINE", "BLOOD"],
+        }
+    ).to_parquet(features_dir / "model_ready_pair_features.parquet", index=False)
+
+    table = builder.build_cohort_characteristics_table("combined", None, organism)
+    rows = table.set_index("characteristic")["value"]
+    assert rows["Episodes, N"] == "2"
+    assert rows["Age (years), median [IQR]"] == "50 [45–55]"

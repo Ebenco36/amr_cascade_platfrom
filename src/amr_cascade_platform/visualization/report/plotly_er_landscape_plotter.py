@@ -96,6 +96,12 @@ class PlotlyERLandscapePlotter:
             column_widths=[0.62, 0.38],
             horizontal_spacing=0.10,
         )
+        # make_subplots's auto-generated subplot-title annotations carry no
+        # explicit font size, so the print-export font scale (which only
+        # multiplies sizes already present in the figure JSON) never touches
+        # them -- give them one explicitly so they participate in it too.
+        for annotation in fig.layout.annotations:
+            annotation.font = {"size": 11}
         # Shared across both panels so a status already legended in panel A
         # (e.g. "Robust") isn't legended a second time by panel B.
         seen: set[str] = set()

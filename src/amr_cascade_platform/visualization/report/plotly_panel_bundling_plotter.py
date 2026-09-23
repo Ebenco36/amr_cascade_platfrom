@@ -92,6 +92,12 @@ class PlotlyPanelBundlingPlotter:
             ),
             horizontal_spacing=0.12,
         )
+        # make_subplots's auto-generated subplot-title annotations carry no
+        # explicit font size, so the print-export font scale (which only
+        # multiplies sizes already present in the figure JSON) never touches
+        # them -- give them one explicitly so they participate in it too.
+        for annotation in fig.layout.annotations:
+            annotation.font = {"size": 11}
 
         self._panel_a_histogram(fig, df)
         self._panel_b_scatter(fig, df, pair_labels)

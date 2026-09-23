@@ -133,6 +133,126 @@ class ManuscriptTableBuilder:
         grouped["canonical_map_file"] = self._settings.platform.reference_files["canonical_table_map"]
         return grouped
 
+    def build_episode_audit_table(self, scope: str, site: str | None, organism: str | None = None) -> pd.DataFrame:
+        """Patients, encounters, culture orders, and culture episodes per site.
+
+        ``culture_episode_n`` matches the row-flow audit's "Culture episodes"
+        column exactly. The other three counts sit upstream of it in the same
+        gold-layer file: several raw orders can collapse into one episode,
+        and one patient or encounter can contribute several episodes, so this
+        table is what backs claims about within-patient clustering (e.g. the
+        fraction of patients contributing more than one episode) with a
+        traceable number rather than leaving it only in prose.
+        """
+        sites = self._resolve_sites(scope, site)
+        rows: list[dict[str, object]] = []
+        combined_culture = self._safe_read(
+            scoped_output_dir(self._paths.paths.gold, "combined", organism=organism) / "culture_episodes.parquet",
+            columns=["source_site", "anon_id", "pat_enc_csn_id_coded", "order_proc_id_coded"],
+        )
+        for current_site in sites:
+            frame = combined_culture[combined_culture["source_site"] == current_site] if not combined_culture.empty else pd.DataFrame()
+            if frame.empty:
+                site_gold_dir = scoped_output_dir(self._paths.paths.gold, "site", site=current_site, organism=organism)
+                frame = self._safe_read(
+                    site_gold_dir / "culture_episodes.parquet",
+                    columns=["anon_id", "pat_enc_csn_id_coded", "order_proc_id_coded"],
+                )
+            rows.append({
+                "site": current_site,
+                "patient_n": int(frame["anon_id"].nunique()) if "anon_id" in frame.columns else 0,
+                "encounter_n": int(frame["pat_enc_csn_id_coded"].nunique()) if "pat_enc_csn_id_coded" in frame.columns else 0,
+                "culture_order_n": int(frame["order_proc_id_coded"].nunique()) if "order_proc_id_coded" in frame.columns else 0,
+                "culture_episode_n": int(len(frame)),
+            })
+        return pd.DataFrame(rows)
+
+    def build_cohort_characteristics_table(self, scope: str, site: str | None, organism: str | None = None) -> pd.DataFrame:
+        """Episode-level cohort characteristics (age, care setting, specimen, comorbidity burden, prior exposure).
+
+        Reads ``model_ready_pair_features.parquet`` -- built for the adjusted
+        cascade models, one row per (episode, upstream drug, downstream drug)
+        pair -- and de-duplicates to one row per episode before summarising,
+        since every demographic/clinical column is constant within an episode
+        across its pair-rows. This is a real gap the platform's own figures
+        never surfaced: the covariates already computed for adjustment were
+        never reported as a descriptive cohort table.
+
+        Sex/gender is deliberately excluded: ``demo_gender_female``,
+        ``demo_gender_male``, and ``demo_gender_category`` are constant
+        (0/0/0) for every episode in the archived run checked while building
+        this method, with ``demo_gender_unknown`` universally 1 -- a feature-
+        join defect upstream of this table, not a real 100%-unknown cohort.
+        Re-add it once that join is fixed; do not report it as-is.
+        """
+        organism_slug = organism.lower().replace(" ", "_") if organism else ""
+        base = self._paths.paths.features / (site if scope == "site" and site else "combined")
+        feature_path = base / "organisms" / organism_slug / "model_ready_pair_features.parquet"
+        columns = [
+            "anon_id", "pat_enc_csn_id_coded", "order_proc_id_coded", "source_site",
+            "demo_age", "ward_hosp_ward_ip", "ward_hosp_ward_op", "ward_hosp_ward_er", "ward_hosp_ward_icu",
+            "comorbidity_count", "history_abx_any_90d", "history_abx_available",
+            "culture_description",
+        ]
+        pair_features = self._safe_read(feature_path, columns=columns)
+        if pair_features.empty:
+            return pd.DataFrame()
+        episodes = pair_features.drop_duplicates(subset=["anon_id", "pat_enc_csn_id_coded", "order_proc_id_coded"])
+        n = len(episodes)
+        if n == 0:
+            return pd.DataFrame()
+
+        def pct(mask: pd.Series) -> float:
+            return round(100.0 * float(mask.sum()) / n, 1)
+
+        age_q1, age_med, age_q3 = episodes["demo_age"].quantile([0.25, 0.5, 0.75])
+        como_q1, como_med, como_q3 = episodes["comorbidity_count"].quantile([0.25, 0.5, 0.75])
+        specimen_counts = episodes["culture_description"].value_counts()
+        evaluable_abx = episodes.loc[episodes["history_abx_available"] == 1, "history_abx_any_90d"]
+
+        rows = [
+            {"characteristic": "Episodes, N", "value": f"{n:,}"},
+            {"characteristic": "Age (years), median [IQR]", "value": f"{age_med:.0f} [{age_q1:.0f}\u2013{age_q3:.0f}]"},
+            {"characteristic": "Care setting: inpatient, N (%)", "value": f"{int(episodes['ward_hosp_ward_ip'].sum()):,} ({pct(episodes['ward_hosp_ward_ip'] == 1)})"},
+            {"characteristic": "Care setting: outpatient, N (%)", "value": f"{int(episodes['ward_hosp_ward_op'].sum()):,} ({pct(episodes['ward_hosp_ward_op'] == 1)})"},
+            {"characteristic": "Care setting: emergency department, N (%)", "value": f"{int(episodes['ward_hosp_ward_er'].sum()):,} ({pct(episodes['ward_hosp_ward_er'] == 1)})"},
+            {"characteristic": "Care setting: ICU, N (%)", "value": f"{int(episodes['ward_hosp_ward_icu'].sum()):,} ({pct(episodes['ward_hosp_ward_icu'] == 1)})"},
+            {"characteristic": "Specimen: urine, N (%)", "value": f"{int(specimen_counts.get('URINE', 0)):,} ({pct(episodes['culture_description'] == 'URINE')})"},
+            {"characteristic": "Specimen: blood, N (%)", "value": f"{int(specimen_counts.get('BLOOD', 0)):,} ({pct(episodes['culture_description'] == 'BLOOD')})"},
+            {"characteristic": "Specimen: respiratory, N (%)", "value": f"{int(specimen_counts.get('RESPIRATORY', 0)):,} ({pct(episodes['culture_description'] == 'RESPIRATORY')})"},
+            {"characteristic": "Comorbidity count, median [IQR]", "value": f"{como_med:.0f} [{como_q1:.0f}\u2013{como_q3:.0f}]"},
+            {"characteristic": "Prior antibiotic exposure (90d), N (%) of evaluable", "value": (
+                f"{int(evaluable_abx.sum()):,} ({round(100.0 * evaluable_abx.mean(), 1) if len(evaluable_abx) else float('nan')})"
+            )},
+        ]
+        return pd.DataFrame(rows)
+
+    def build_operational_availability_table(self, scope: str, site: str | None, organism: str | None = None) -> pd.DataFrame:
+        """Site x era x antibiotic operational-availability grid.
+
+        One row per (site, era, antibiotic) stratum in the eligible-opportunity
+        space, carrying the same ``is_operationally_available`` flag and
+        ``availability_support_n`` the eligibility service itself computed for
+        that stratum (both are constant within a stratum by construction, so
+        this groups rather than re-derives them). Backs the operational-
+        availability matrix and the site-era availability timeline.
+        """
+        eligible_pairs = self._load_scope_gold(scope, site, filename="eligible_pairs.parquet", organism=organism)
+        if eligible_pairs.empty:
+            return pd.DataFrame()
+        grouped = (
+            eligible_pairs.groupby(["source_site", "availability_era", "antibiotic"], observed=True)
+            .agg(
+                availability_support_n=("availability_support_n", "first"),
+                is_operationally_available=("is_operationally_available", "first"),
+                eligible_n=("is_eligible", "sum"),
+                observed_n=("is_observed_tested", "sum"),
+            )
+            .reset_index()
+            .rename(columns={"source_site": "site", "availability_era": "era"})
+        )
+        return grouped
+
     def build_upstream_selection_balance_table(
         self,
         scope: str,
@@ -949,6 +1069,8 @@ class ManuscriptTableBuilder:
             "standardised_prevalence_pct",
             "rho_independent_vs_cascade",
             "cascade_trigger_fraction",
+            "cascade_prevalence_pct",
+            "independent_prevalence_pct",
         ]
         available = [column for column in columns if column in prevalence.columns]
         table = prevalence.loc[:, available].copy()
@@ -963,6 +1085,8 @@ class ManuscriptTableBuilder:
             "prevalence_lower_bound_pct",
             "prevalence_upper_bound_pct",
             "standardised_prevalence_pct",
+            "cascade_prevalence_pct",
+            "independent_prevalence_pct",
         ]
         for column in percent_columns:
             if column in table.columns:

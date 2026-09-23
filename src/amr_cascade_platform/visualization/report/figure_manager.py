@@ -10,6 +10,17 @@ from amr_cascade_platform.core.config.config_models import Settings
 from amr_cascade_platform.core.paths.path_manager import PathManager
 from amr_cascade_platform.visualization.report.antibiotic_classification import AntibioticClassificationResolver
 from amr_cascade_platform.visualization.report.plotly_exporter import PlotlyFigureExporter
+from amr_cascade_platform.reporting.builders import directional_views as dv
+from amr_cascade_platform.visualization.report.directional_plotters import (
+    AdjustmentConcordancePlotter,
+    AdjustmentConcordanceSummaryPlotter,
+    AntiArtefactScatterPlotter,
+    DirectionalAwarePlotter,
+    DirectionalForestPlotter,
+    DirectionalMatrixPlotter,
+    DirectionalNetworkPlotter,
+    DirectionalSankeyPlotter,
+)
 from amr_cascade_platform.visualization.report.plotly_aware_transition_plotter import PlotlyAwareTransitionPlotter
 from amr_cascade_platform.visualization.report.plotly_forest_plotter import PlotlyForestPlotter
 from amr_cascade_platform.visualization.report.publication_forest_plotter import PublicationForestPlotter
@@ -47,6 +58,31 @@ class FigureManager:
         )
         classification = AntibioticClassificationResolver(
             path_manager.project_root / "data" / "antibiotic_classification_complete.csv"
+        )
+        self._classification = classification
+        self._directional_sankey_plotter = DirectionalSankeyPlotter(
+            exporter=exporter, template=settings.reporting.plotly_template, width=settings.reporting.image_width,
+            classification=classification,
+        )
+        self._directional_matrix_plotter = DirectionalMatrixPlotter(
+            exporter=exporter, template=settings.reporting.plotly_template, classification=classification
+        )
+        self._directional_network_plotter = DirectionalNetworkPlotter(classification)
+        self._directional_forest_plotter = DirectionalForestPlotter(
+            exporter=exporter, template=settings.reporting.plotly_template, classification=classification,
+        )
+        self._directional_aware_plotter = DirectionalAwarePlotter(classification)
+        self._anti_artefact_plotter = AntiArtefactScatterPlotter(
+            exporter=exporter, template=settings.reporting.plotly_template,
+            width=settings.reporting.image_width, height=settings.reporting.image_height,
+        )
+        self._adjustment_concordance_plotter = AdjustmentConcordancePlotter(
+            exporter=exporter, template=settings.reporting.plotly_template,
+            width=settings.reporting.image_width, height=settings.reporting.image_height,
+        )
+        self._adjustment_concordance_summary_plotter = AdjustmentConcordanceSummaryPlotter(
+            exporter=exporter, template=settings.reporting.plotly_template,
+            width=settings.reporting.image_width, height=settings.reporting.image_height,
         )
         self._forest_plotter = PlotlyForestPlotter(
             exporter=exporter,
@@ -229,6 +265,102 @@ class FigureManager:
     ) -> dict[str, Path]:
         return self._network_plotter.export(network_edges, network_nodes, output_stem, formats, tier_label)
 
+    def export_directional_suite(
+        self,
+        edge_report: pd.DataFrame,
+        output_dir: Path,
+        formats: tuple[str, ...],
+        *,
+        tier: str = "validated",
+        min_fold: float = 1.5,
+        sankey_top_n: int = 30,
+        network_top_n: int = 60,
+        forest_top_n: int = 20,
+    ) -> dict[str, Path]:
+        """Escalation and suppression cascade figures, always as separate files, never pooled.
+
+        Produces, for each of ``escalation``/``suppression``: a Sankey, an
+        upstream x downstream matrix, a directed network, a forest of the
+        strongest CI-bearing effects, and an AWaRe-tier heatmap -- ten files
+        per tier. See `reporting.builders.directional_views` for why pooling
+        the two directions into one figure is never done here.
+        """
+        outputs: dict[str, Path] = {}
+        canonical = dv.canonicalize_edges(edge_report, self._classification.canonical_display_label)
+        validated = dv.tier_edges(dv.validated_edges(canonical), tier)
+        if validated.empty:
+            return outputs
+        aware_of = lambda label: self._classification.resolve(label).aware_category  # noqa: E731
+        order = dv.shared_drug_order(validated, aware_of, self._classification.category_sort_key)
+        positions = dv.circular_layout(order, aware_of, self._classification.category_sort_key)
+        for direction in dv.DIRECTIONS:
+            n_direction = int((validated.direction == direction).sum())
+            displayed = dv.display_selection(validated, direction, min_fold)
+
+            links = dv.bipartite_links(displayed, direction, top_n=sankey_top_n)
+            coverage = dv.coverage_summary(links, displayed, direction)
+            outputs.update(self._directional_sankey_plotter.export(
+                links, direction, output_dir / f"figure_{direction}_sankey_{tier}", formats,
+                order=order, tier=tier, coverage=coverage, n_eligible=len(displayed), min_fold=min_fold,
+            ))
+
+            cells = dv.matrix_frame(validated.loc[validated.direction == direction], direction, order)
+            outputs.update(self._directional_matrix_plotter.export(
+                cells, direction, output_dir / f"figure_{direction}_matrix_{tier}", formats,
+                order=order, tier=tier, n_direction=n_direction,
+            ))
+
+            net_pool = displayed.sort_values("effect_magnitude", ascending=False).head(network_top_n) if "effect_magnitude" in displayed.columns else displayed.head(network_top_n)
+            g_edges, g_nodes = dv.directional_graph_tables(dv.with_effect_columns(net_pool), direction)
+            outputs.update(self._directional_network_plotter.export(
+                g_edges, g_nodes, positions, direction, output_dir / f"figure_{direction}_network_{tier}", formats,
+                tier=tier, n_eligible=len(displayed), n_direction=n_direction, min_fold=min_fold,
+            ))
+
+            outputs.update(self._directional_forest_plotter.export(
+                validated, direction, output_dir / f"figure_{direction}_forest_{tier}", formats,
+                tier=tier, top_n=forest_top_n, n_direction=n_direction,
+            ))
+
+            aware_table = dv.aware_direction_table(validated, direction, aware_of, self._classification.transition_direction)
+            outputs.update(self._directional_aware_plotter.export(
+                aware_table, direction, output_dir / f"figure_{direction}_aware_{tier}", formats,
+                tier=tier, n_direction=n_direction,
+            ))
+        return outputs
+
+    def export_evidence_scatter_suite(
+        self,
+        edge_report: pd.DataFrame,
+        output_dir: Path,
+        formats: tuple[str, ...],
+        *,
+        tier: str = "validated",
+    ) -> dict[str, Path]:
+        """Anti-artefact (DAS vs. PBI) and adjustment-concordance (raw ER vs. adjusted OR) scatters.
+
+        Both directions share one plot in each of these two figures -- see
+        AntiArtefactScatterPlotter and AdjustmentConcordancePlotter for why
+        that is the correct reading here rather than a violation of the
+        never-pool-directions rule the five-plotter suite above enforces.
+        """
+        outputs: dict[str, Path] = {}
+        canonical = dv.canonicalize_edges(edge_report, self._classification.canonical_display_label)
+        validated = dv.tier_edges(dv.validated_edges(canonical), tier)
+        if validated.empty:
+            return outputs
+        outputs.update(self._anti_artefact_plotter.export(
+            validated, output_dir / f"figure_das_vs_pbi_{tier}", formats, tier=tier,
+        ))
+        outputs.update(self._adjustment_concordance_plotter.export(
+            validated, output_dir / f"figure_raw_vs_adjusted_{tier}", formats, tier=tier,
+        ))
+        validated_with_concordance = dv.with_adjustment_concordance(validated)
+        outputs.update(self._adjustment_concordance_summary_plotter.export(
+            validated_with_concordance, output_dir / f"figure_adjustment_concordance_summary_{tier}", formats, tier=tier,
+        ))
+        return outputs
+
     def export_model_metrics_comparison(self, metrics: pd.DataFrame, output_stem: Path, formats: tuple[str, ...]) -> dict[str, Path]:
         return self._model_plotter.export_metrics_comparison(metrics, output_stem, formats)
 
@@ -259,6 +391,15 @@ class FigureManager:
         formats: tuple[str, ...],
     ) -> dict[str, Path]:
         return self._prevalence_plotter.export_forest(results, output_stem, formats)
+
+    def export_kappa_ranked(self, results: pd.DataFrame, output_stem: Path, formats: tuple[str, ...]) -> dict[str, Path]:
+        return self._prevalence_plotter.export_kappa_ranked(results, output_stem, formats)
+
+    def export_cascade_vs_independent_dumbbell(self, results: pd.DataFrame, output_stem: Path, formats: tuple[str, ...]) -> dict[str, Path]:
+        return self._prevalence_plotter.export_cascade_vs_independent_dumbbell(results, output_stem, formats)
+
+    def export_surveillance_sensitivity_map(self, results: pd.DataFrame, output_stem: Path, formats: tuple[str, ...]) -> dict[str, Path]:
+        return self._prevalence_plotter.export_surveillance_sensitivity_map(results, output_stem, formats)
 
     def export_prevalence_delta_curves(
         self,
@@ -374,4 +515,18 @@ class FigureManager:
     ) -> dict[str, Path]:
         return self._dataset_characterization_plotter.export_testing_rate_by_upstream_result(
             drug_pair_episodes, output_stem, formats,
+        )
+
+    def export_operational_availability_matrix(
+        self, availability_table: pd.DataFrame, output_stem: Path, formats: tuple[str, ...],
+    ) -> dict[str, Path]:
+        return self._dataset_characterization_plotter.export_operational_availability_matrix(
+            availability_table, output_stem, formats,
+        )
+
+    def export_site_era_availability_timeline(
+        self, availability_table: pd.DataFrame, output_stem: Path, formats: tuple[str, ...],
+    ) -> dict[str, Path]:
+        return self._dataset_characterization_plotter.export_site_era_availability_timeline(
+            availability_table, output_stem, formats,
         )

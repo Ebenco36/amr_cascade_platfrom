@@ -70,10 +70,16 @@ class PlotlyModelEvaluationPlotter:
                 # label still reached far enough right to collide with the
                 # neighbouring subplot's own left-side category label at that
                 # shared row height (e.g. "0.641" running into "Logistic
-                # Regression"). Wider spacing keeps the two apart.
-                horizontal_spacing=0.14,
-                vertical_spacing=0.16,
+                # Regression"). Wider spacing keeps the two apart. Plotly
+                # reserves a fixed-height strip above each subplot for its
+                # title regardless of vertical_spacing, so a bigger vertical
+                # gap between rows is what actually keeps a title clear of
+                # the data row above it, not the title's own font size.
+                horizontal_spacing=0.22,
+                vertical_spacing=0.24,
             )
+            for annotation in fig.layout.annotations:
+                annotation.font = {"size": 9}
             for idx, (column, label) in enumerate(metric_specs, start=1):
                 row = (idx - 1) // cols + 1
                 col = (idx - 1) % cols + 1
@@ -87,6 +93,7 @@ class PlotlyModelEvaluationPlotter:
                         marker_color=ordered["model_name"].map(self._model_color),
                         text=ordered[column].map(lambda value: f"{value:.3g}"),
                         textposition="outside",
+                        textfont={"size": 9},
                         showlegend=False,
                         hovertemplate=f"{label}=%{{x:.4e}}<extra>%{{y}}</extra>",
                     ),
@@ -104,25 +111,23 @@ class PlotlyModelEvaluationPlotter:
                 axis_max = float(ordered[column].max())
                 axis_min = min(0.0, float(ordered[column].min()))
                 headroom = max((axis_max - axis_min) * 0.22, 0.03)
-                fig.update_xaxes(tickformat=".3g", range=[axis_min, axis_max + headroom], row=row, col=col)
+                fig.update_xaxes(tickformat=".3g", tickfont={"size": 9}, range=[axis_min, axis_max + headroom], row=row, col=col)
+                fig.update_yaxes(tickfont={"size": 9}, row=row, col=col)
             prevalence = float(plot_data["prevalence"].iloc[0]) if "prevalence" in plot_data.columns and not plot_data.empty else None
+            title_text = f"Model Performance Comparison ({split.title()} Split)"
+            if prevalence is not None and not np.isnan(prevalence):
+                # A separately-positioned annotation above the grid needs its
+                # y-coordinate re-tuned every time the title/margin height
+                # changes elsewhere; folding it into the title's own subtitle
+                # line ties it to the title block it is actually part of.
+                title_text += f"<br><sup>Observed event prevalence on the {split} split: {prevalence:.6f}</sup>"
             self._apply_standard_layout(
                 fig,
-                title=f"Model Performance Comparison ({split.title()} Split)",
-                height=max(self._height, 420 * rows + 140),
-                margin={"l": 150, "r": 80, "t": 150, "b": 60},
+                title=title_text,
+                width=max(self._width, 640 * cols),
+                height=max(self._height, 460 * rows + 160),
+                margin={"l": 150, "r": 80, "t": 130, "b": 60},
             )
-            if prevalence is not None and not np.isnan(prevalence):
-                fig.add_annotation(
-                    text=f"Observed event prevalence on the {split} split: {prevalence:.6f}",
-                    x=0,
-                    y=1.06,
-                    xref="paper",
-                    yref="paper",
-                    xanchor="left",
-                    showarrow=False,
-                    font={"size": 13, "color": "#475467"},
-                )
         return self._exporter.write(fig, output_stem, formats, static_fallback=lambda fmt, path: self._write_metrics_static(plot_data, fmt, path))
 
     def export_precision_recall(
@@ -156,16 +161,19 @@ class PlotlyModelEvaluationPlotter:
                 title=f"Precision-Recall Curves ({split.title()} Split)",
                 xaxis_title="Recall",
                 yaxis_title="Precision",
+                legend_y=-0.30,
+                height=1150,
+                margin={"l": 80, "r": 40, "t": 130, "b": 170},
             )
             fig.add_annotation(
                 text=f"Dashed line shows positive-class prevalence ({prevalence:.6f}).",
                 x=0,
-                y=1.08,
+                y=1.1,
                 xref="paper",
                 yref="paper",
                 xanchor="left",
                 showarrow=False,
-                font={"size": 13, "color": "#475467"},
+                font={"size": 12, "color": "#475467"},
             )
         return self._exporter.write(fig, output_stem, formats, static_fallback=lambda fmt, path: self._write_curve_static(plot_data, fmt, path, curve_type="pr"))
 
@@ -199,6 +207,9 @@ class PlotlyModelEvaluationPlotter:
                 title=f"ROC Curves ({split.title()} Split)",
                 xaxis_title="False Positive Rate",
                 yaxis_title="True Positive Rate",
+                legend_y=-0.23,
+                height=1150,
+                margin={"l": 80, "r": 40, "t": 90, "b": 170},
             )
         return self._exporter.write(fig, output_stem, formats, static_fallback=lambda fmt, path: self._write_curve_static(plot_data, fmt, path, curve_type="roc"))
 
@@ -238,6 +249,9 @@ class PlotlyModelEvaluationPlotter:
                 title=f"Calibration Curves ({split.title()} Split)",
                 xaxis_title="Mean Predicted Probability",
                 yaxis_title="Observed Event Rate",
+                legend_y=-0.23,
+                height=1150,
+                margin={"l": 80, "r": 40, "t": 90, "b": 170},
             )
         return self._exporter.write(fig, output_stem, formats, static_fallback=lambda fmt, path: self._write_calibration_static(plot_data, fmt, path))
 
@@ -259,9 +273,11 @@ class PlotlyModelEvaluationPlotter:
                 rows=rows,
                 cols=cols,
                 subplot_titles=[label for _, label in metric_specs],
-                horizontal_spacing=0.045,
-                vertical_spacing=0.12,
+                horizontal_spacing=0.08,
+                vertical_spacing=0.40,
             )
+            for annotation in fig.layout.annotations:
+                annotation.font = {"size": 9}
             for idx, (metric, label) in enumerate(metric_specs, start=1):
                 row = (idx - 1) // cols + 1
                 col = (idx - 1) % cols + 1
@@ -309,15 +325,21 @@ class PlotlyModelEvaluationPlotter:
             self._apply_standard_layout(
                 fig,
                 title=f"Threshold Sensitivity by Model ({split.title()} Split)",
-                width=1450,
-                height=max(self._height, 360 * rows + 120),
-                margin={"l": 70, "r": 40, "t": 100, "b": 85},
+                width=max(1450, 700 * cols),
+                height=max(self._height, 520 * rows + 200),
+                margin={"l": 70, "r": 40, "t": 110, "b": 170},
             )
             for idx, (_, label) in enumerate(metric_specs, start=1):
                 row = (idx - 1) // cols + 1
                 col = (idx - 1) % cols + 1
-                fig.update_xaxes(title_text="Threshold", row=row, col=col, range=[0.04, 0.91])
-                fig.update_yaxes(title_text=label, row=row, col=col, tickformat=".3g")
+                fig.update_xaxes(
+                    title={"text": "Threshold", "font": {"size": 11}}, tickfont={"size": 10},
+                    row=row, col=col, range=[0.04, 0.91],
+                )
+                fig.update_yaxes(
+                    title={"text": label, "font": {"size": 11}}, tickfont={"size": 10},
+                    row=row, col=col, tickformat=".3g",
+                )
         return self._exporter.write(fig, output_stem, formats, static_fallback=lambda fmt, path: self._write_threshold_static(plot_data, fmt, path))
 
     def _apply_standard_layout(
@@ -329,27 +351,28 @@ class PlotlyModelEvaluationPlotter:
         width: int | None = None,
         height: int | None = None,
         margin: dict[str, int] | None = None,
+        legend_y: float = -0.12,
     ) -> None:
         fig.update_layout(
             template=self._template,
             width=width or self._width,
             height=height or self._height,
-            title={"text": title, "x": 0.5, "xanchor": "center", "font": {"size": 20}},
+            title={"text": title, "x": 0.5, "xanchor": "center", "font": {"size": 13}},
             xaxis_title=xaxis_title,
             yaxis_title=yaxis_title,
             legend={
-                "title": {"text": "Model"},
+                "title": {"text": "Model", "font": {"size": 11}},
                 "orientation": "h",
                 "yanchor": "top",
-                "y": -0.12,
+                "y": legend_y,
                 "xanchor": "center",
                 "x": 0.5,
-                "font": {"size": 13},
+                "font": {"size": 10},
             },
-            margin=margin or {"l": 80, "r": 40, "t": 90, "b": 90},
+            margin=margin or {"l": 80, "r": 40, "t": 90, "b": 170},
             plot_bgcolor="white",
             paper_bgcolor="white",
-            font={"size": 16, "family": "Arial"},
+            font={"size": 12, "family": "Arial"},
         )
         fig.update_xaxes(showgrid=True, gridcolor="#E8EEF5", zeroline=False)
         fig.update_yaxes(showgrid=True, gridcolor="#F2F4F7", zeroline=False)

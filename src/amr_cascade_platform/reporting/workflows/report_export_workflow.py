@@ -96,6 +96,13 @@ class ReportExportWorkflow:
         correction_sensitivity = self._table_builder.build_correction_sensitivity_table(
             request.scope, request.site, request.organism
         )
+        episode_audit = self._table_builder.build_episode_audit_table(request.scope, request.site, request.organism)
+        operational_availability = self._table_builder.build_operational_availability_table(
+            request.scope, request.site, request.organism
+        )
+        cohort_characteristics = self._table_builder.build_cohort_characteristics_table(
+            request.scope, request.site, request.organism
+        )
 
         table_map = {
             "table_a_provenance.csv": table_a,
@@ -129,6 +136,12 @@ class ReportExportWorkflow:
             table_map["table_k_prevalence_shift_diagnostics.csv"] = prevalence_shift_diagnostics
         if not correction_sensitivity.empty:
             table_map["table_r_correction_sensitivity.csv"] = correction_sensitivity
+        if not episode_audit.empty:
+            table_map["table_t_episode_audit.csv"] = episode_audit
+        if not operational_availability.empty:
+            table_map["table_u_operational_availability.csv"] = operational_availability
+        if not cohort_characteristics.empty:
+            table_map["table_v_cohort_characteristics.csv"] = cohort_characteristics
         required_schema_tables = {
             "table_c_primary_cascade.csv",
             "table_l_validated_primary_cascade.csv",
@@ -274,6 +287,32 @@ class ReportExportWorkflow:
                     formats=figure_formats,
                 )
             )
+        if "cascade_consequence_summary" in selected_figures and not prevalence_shift.empty:
+            # kappa, cascade-vs-independent, and the combined sensitivity map
+            # all rank/place drugs by a different criterion than the shift-
+            # magnitude top-N used for prevalence_shift_forest, so they use
+            # the full prevalence_shift table rather than that subset.
+            figure_exports.update(
+                self._figure_manager.export_kappa_ranked(
+                    results=prevalence_shift,
+                    output_stem=figures_dir / "figure_kappa_ranked",
+                    formats=figure_formats,
+                )
+            )
+            figure_exports.update(
+                self._figure_manager.export_cascade_vs_independent_dumbbell(
+                    results=prevalence_shift,
+                    output_stem=figures_dir / "figure_cascade_vs_independent_dumbbell",
+                    formats=figure_formats,
+                )
+            )
+            figure_exports.update(
+                self._figure_manager.export_surveillance_sensitivity_map(
+                    results=prevalence_shift,
+                    output_stem=figures_dir / "figure_surveillance_sensitivity_map",
+                    formats=figure_formats,
+                )
+            )
         if "prevalence_shift_curves" in selected_figures and not prevalence_mnar_curves.empty:
             figure_exports.update(
                 self._figure_manager.export_prevalence_delta_curves(
@@ -389,6 +428,49 @@ class ReportExportWorkflow:
                         tier_label=label,
                     )
                 )
+        if "cascade_directional" in selected_figures and not edge_report.empty:
+            # Escalation (ER>1) and suppression (ER<1) are opposite observation
+            # behaviours and must never share a Sankey/matrix/network/forest -- see
+            # reporting.builders.directional_views for why pooling them is wrong.
+            # Produced alongside (not instead of) the pooled figures above, which
+            # remain for backward compatibility with anything already referencing them.
+            for tier in ("robust", "validated"):
+                figure_exports.update(
+                    self._figure_manager.export_directional_suite(
+                        edge_report=edge_report,
+                        output_dir=figures_dir,
+                        formats=figure_formats,
+                        tier=tier,
+                    )
+                )
+        if "cascade_evidence_scatter" in selected_figures and not edge_report.empty:
+            # DAS-vs-PBI (anti-artefact) and raw-ER-vs-adjusted-OR (adjustment
+            # concordance): pair-level diagnostics where both directions
+            # legitimately share one plot -- see export_evidence_scatter_suite.
+            for tier in ("robust", "validated"):
+                figure_exports.update(
+                    self._figure_manager.export_evidence_scatter_suite(
+                        edge_report=edge_report,
+                        output_dir=figures_dir,
+                        formats=figure_formats,
+                        tier=tier,
+                    )
+                )
+        if "operational_availability_suite" in selected_figures and not operational_availability.empty:
+            figure_exports.update(
+                self._figure_manager.export_operational_availability_matrix(
+                    availability_table=operational_availability,
+                    output_stem=figures_dir / "figure_operational_availability_matrix",
+                    formats=figure_formats,
+                )
+            )
+            figure_exports.update(
+                self._figure_manager.export_site_era_availability_timeline(
+                    availability_table=operational_availability,
+                    output_stem=figures_dir / "figure_site_era_availability_timeline",
+                    formats=figure_formats,
+                )
+            )
         if "model_metrics_comparison" in selected_figures and model_metrics is not None and not model_metrics.empty:
             figure_exports.update(
                 self._figure_manager.export_model_metrics_comparison(
@@ -477,10 +559,15 @@ class ReportExportWorkflow:
                     formats=figure_formats,
                 )
             )
-        if "cross_site_concordance" in selected_figures and not comparison_summary.empty:
+        if "cross_site_concordance" in selected_figures and not comparison.empty:
+            # Needs the per-pair detail table (site_escalation_ratio,
+            # combined_escalation_ratio columns), not comparison_summary's
+            # 3-column site/edge_presence/edge_count rollup -- passing the
+            # summary here always produced an empty placeholder figure since
+            # its required columns were never actually present.
             figure_exports.update(
                 self._figure_manager.export_cross_site_concordance(
-                    comparison_summary=comparison_summary,
+                    comparison_summary=comparison,
                     output_stem=figures_dir / "figure_cross_site_concordance",
                     formats=figure_formats,
                 )

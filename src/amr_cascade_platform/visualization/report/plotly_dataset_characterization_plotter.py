@@ -29,7 +29,7 @@ _TEXT  = "#1A1A2E"
 _REF   = "#888888"
 _HIGH  = "#C0392B"   # high imbalance (|SMD| ≥ 0.1)
 _LOW   = "#27AE60"   # acceptable balance
-_BG    = "rgba(0,0,0,0)"
+_BG    = "white"  # static PNG/PDF exports composite transparency onto black in some viewers/renderers -- explicit white matches every other figure module in this codebase
 
 
 def _empty(template: str, w: int, h: int, msg: str) -> go.Figure:
@@ -218,6 +218,8 @@ class DatasetCharacterizationPlotter:
             column_widths=[0.42, 0.58],
             horizontal_spacing=0.12,
         )
+        for annotation in fig.layout.annotations:
+            annotation.font = {"size": 11}
 
         fig.add_trace(
             go.Funnel(
@@ -384,7 +386,12 @@ class DatasetCharacterizationPlotter:
                        font=dict(size=16, color=_TEXT),
                        x=0.01, xanchor="left"),
             xaxis=dict(title="Episode-drug pair count", gridcolor=_GRID),
-            yaxis=dict(title="", tickfont=dict(size=11)),
+            # df is sorted obs_rate ascending (most-missing drug first) so that
+            # drug is meant to lead the chart -- Plotly's default y-axis for a
+            # horizontal bar plots the first category at the BOTTOM, which put
+            # the best-observed drugs on top instead. autorange="reversed" makes
+            # the visual order match the documented, intended reading order.
+            yaxis=dict(title="", tickfont=dict(size=11), autorange="reversed"),
             legend=dict(orientation="h", yanchor="bottom", y=1.0, xanchor="left", x=0),
             margin=dict(l=180, r=80, t=130, b=50),
         )
@@ -437,7 +444,7 @@ class DatasetCharacterizationPlotter:
             hoverongaps=False,
             colorbar=dict(title="Testing<br>rate (%)", ticksuffix="%"),
         ))
-        h = max(self._height, 28 * len(pivot))
+        h = max(self._height, 50 * len(pivot))  # was 28 -- taller rows needed once PRINT_FONT_SCALE enlarges tick labels
         fig.update_layout(
             template=self._template,
             width=self._width,
@@ -449,6 +456,130 @@ class DatasetCharacterizationPlotter:
             xaxis=dict(title="Site", side="bottom"),
             yaxis=dict(title="", tickfont=dict(size=10), autorange="reversed"),
             margin=dict(l=200, r=60, t=60, b=60),
+        )
+        return self._exporter.write(fig, output_stem, formats)
+
+    # ── Figure: Operational availability matrix (drug x site, era collapsed) ──
+
+    def export_operational_availability_matrix(
+        self,
+        availability_table: pd.DataFrame,
+        output_stem: Path,
+        formats: tuple[str, ...],
+    ) -> dict[str, Path]:
+        """Heatmap: share of eras each drug was operationally available, per site.
+
+        Collapses the era dimension of the site x era x drug availability
+        table into one summary statistic per drug x site cell -- "what could
+        plausibly be observed" as a stable snapshot. See
+        export_site_era_availability_timeline for the temporal view of the
+        same underlying table.
+        """
+        required = {"site", "era", "antibiotic", "is_operationally_available"}
+        if availability_table.empty or not required.issubset(availability_table.columns):
+            return self._exporter.write(
+                _empty(self._template, self._width, self._height,
+                       "Operational availability matrix unavailable — required columns missing"),
+                output_stem, formats,
+            )
+
+        df = (
+            availability_table.groupby(["antibiotic", "site"], observed=True)["is_operationally_available"]
+            .mean()
+            .reset_index(name="available_fraction")
+        )
+        pivot = df.pivot(index="antibiotic", columns="site", values="available_fraction")
+        pivot = pivot.loc[pivot.mean(axis=1).sort_values(ascending=False).index]
+
+        fig = go.Figure(go.Heatmap(
+            z=pivot.values * 100,
+            x=pivot.columns.tolist(),
+            y=pivot.index.tolist(),
+            colorscale=[[0, "#C0392B"], [0.5, "#F5CBA7"], [1, "#27AE60"]],
+            zmin=0, zmax=100,
+            text=[[f"{v * 100:.0f}%" if not math.isnan(v) else "—"
+                   for v in row] for row in pivot.values],
+            texttemplate="%{text}",
+            textfont=dict(size=9),
+            hoverongaps=False,
+            colorbar=dict(title="Eras<br>available", ticksuffix="%"),
+        ))
+        h = max(self._height, 50 * len(pivot))  # was 28 -- taller rows needed once PRINT_FONT_SCALE enlarges tick labels
+        fig.update_layout(
+            template=self._template,
+            width=self._width,
+            height=h,
+            paper_bgcolor=_BG,
+            plot_bgcolor=_BG,
+            title=dict(text="<b>Operational Availability by Drug and Site</b><br>"
+                            "<sup>Share of 5-year eras each drug met the site's operational-availability rule</sup>",
+                       font=dict(size=16, color=_TEXT)),
+            xaxis=dict(title="Site", side="bottom"),
+            yaxis=dict(title="", tickfont=dict(size=10), autorange="reversed"),
+            margin=dict(l=200, r=60, t=80, b=60),
+        )
+        return self._exporter.write(fig, output_stem, formats)
+
+    # ── Figure: Site-era availability timeline ────────────────────────────────
+
+    def export_site_era_availability_timeline(
+        self,
+        availability_table: pd.DataFrame,
+        output_stem: Path,
+        formats: tuple[str, ...],
+    ) -> dict[str, Path]:
+        """Faceted heatmap: drug x era operational availability, one panel per site.
+
+        Era runs chronologically left to right within each panel, so a drug
+        entering observability partway through the study window shows as
+        blank cells on the left (cold start), and one leaving shows as blank
+        cells on the right (panel discontinuation) -- read directly off the
+        grid rather than inferred from a summary statistic.
+        """
+        required = {"site", "era", "antibiotic", "is_operationally_available"}
+        if availability_table.empty or not required.issubset(availability_table.columns):
+            return self._exporter.write(
+                _empty(self._template, self._width, self._height,
+                       "Site-era availability timeline unavailable — required columns missing"),
+                output_stem, formats,
+            )
+
+        sites = sorted(availability_table["site"].dropna().unique().tolist())
+        eras = sorted(availability_table["era"].dropna().unique().tolist())
+        totals = availability_table.groupby("antibiotic", observed=True)["is_operationally_available"].sum()
+        drugs = sorted(availability_table["antibiotic"].dropna().unique().tolist(), key=lambda d: -totals.get(d, 0))
+
+        fig = make_subplots(
+            rows=1, cols=len(sites), shared_yaxes=True,
+            subplot_titles=sites, horizontal_spacing=0.03,
+        )
+        for annotation in fig.layout.annotations:
+            annotation.font = {"size": 12}
+        for col, current_site in enumerate(sites, start=1):
+            site_df = availability_table[availability_table.site == current_site]
+            pivot = site_df.pivot_table(index="antibiotic", columns="era", values="is_operationally_available", aggfunc="first")
+            pivot = pivot.reindex(index=drugs, columns=eras)
+            heatmap_kwargs = dict(
+                z=pivot.values, x=eras, y=drugs,
+                colorscale=[[0, "#F2F2F2"], [1, "#2C6FAC"]], zmin=0, zmax=1,
+                showscale=(col == 1),
+                hovertemplate="%{y}<br>%{x}: %{z}<extra></extra>",
+            )
+            if col == 1:
+                heatmap_kwargs["colorbar"] = dict(title="Available")
+            fig.add_trace(go.Heatmap(**heatmap_kwargs), row=1, col=col)
+        h = max(self._height, 36 * len(drugs))  # was 20 -- taller rows needed once PRINT_FONT_SCALE enlarges tick labels
+        fig.update_yaxes(autorange="reversed", tickfont=dict(size=8))
+        fig.update_layout(
+            template=self._template,
+            width=self._width,
+            height=h,
+            paper_bgcolor=_BG,
+            plot_bgcolor=_BG,
+            title=dict(text="<b>Site-Era Availability Timeline</b><br>"
+                            "<sup>Blank left of a drug's first solid cell = cold start; blank right of its last = panel discontinuation</sup>",
+                       font=dict(size=16, color=_TEXT)),
+            margin=dict(l=180, r=40, t=90, b=50),
         )
         return self._exporter.write(fig, output_stem, formats)
 
