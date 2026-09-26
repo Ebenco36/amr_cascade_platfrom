@@ -58,6 +58,16 @@ def test_cascade_pair_dependence_analyzer_reports_asymmetry_metrics() -> None:
     # A<->B rows 1-3 and 4-6 share the exact same three episodes (p1/e1/o1 etc.),
     # so overlap should agree with the support ratio here: both 1.0.
     assert row["directional_episode_overlap"] == 1.0
+
+    # PBI is the unsmoothed min of the two co-observation rates (A->B 2/3, B->A 1/3),
+    # the same probabilities the co-testing screen compares with its threshold.
+    assert row["panel_bundling_index"] == 1 / 3
+    from amr_cascade_platform.cascade.analyzers.cotesting_filter_analyzer import CoTestingFilterAnalyzer
+
+    _, _, assessed = CoTestingFilterAnalyzer(settings).filter_with_probabilities(drug_pairs)
+    screen = assessed.set_index(["upstream_antibiotic", "downstream_antibiotic"]).loc[("A", "B")]
+    assert min(screen["p_downstream_given_upstream"], screen["p_upstream_given_downstream"]) == row["panel_bundling_index"]
+    assert pd.isna(ac_row["panel_bundling_index"])
     assert pd.isna(ac_row["directional_episode_overlap"])
 
 

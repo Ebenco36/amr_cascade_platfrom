@@ -28,12 +28,14 @@ def _edge_report(n_escalation: int = 3, n_suppression: int = 3) -> pd.DataFrame:
         rows.append({
             "upstream_antibiotic": drugs[i % len(drugs)], "downstream_antibiotic": drugs[(i + 1) % len(drugs)],
             "escalation_ratio": 2.0 + i, "total_support_n": 100 + i, "resistant_support_n": 40, "susceptible_support_n": 60,
+            "resistant_tested_n": 20, "susceptible_tested_n": 10,
             "er_ci_lower": 1.5 + i, "er_ci_upper": 3.0 + i, "adjusted_odds_ratio": 1.8 + i, "validation_status": "robust" if i % 2 == 0 else "supported",
         })
     for i in range(n_suppression):
         rows.append({
             "upstream_antibiotic": drugs[(i + 2) % len(drugs)], "downstream_antibiotic": drugs[(i + 3) % len(drugs)],
             "escalation_ratio": 0.5 / (i + 1), "total_support_n": 200 + i, "resistant_support_n": 20, "susceptible_support_n": 180,
+            "resistant_tested_n": 2, "susceptible_tested_n": 40,
             "er_ci_lower": 0.2 / (i + 1), "er_ci_upper": 0.8 / (i + 1), "adjusted_odds_ratio": 0.4, "validation_status": "robust",
         })
     return pd.DataFrame(rows)
@@ -125,3 +127,31 @@ def test_adjustment_concordance_summary_counts_match_the_underlying_labels(figur
     outputs = figure_manager.export_evidence_scatter_suite(edges, tmp_path, ("png",), tier="validated")
     assert "figure_adjustment_concordance_summary_validated.png" in outputs
     assert outputs["figure_adjustment_concordance_summary_validated.png"].stat().st_size > 0
+
+
+def test_forest_ranks_by_conservative_bound_and_puts_near_deterministic_pairs_last(figure_manager, monkeypatch):
+    captured = {}
+
+    class _CapturingExporter:
+        def write(self, fig, output_stem, formats):
+            captured["fig"] = fig
+            return {}
+
+    plotter = figure_manager._directional_forest_plotter
+    monkeypatch.setattr(plotter, "_exporter", _CapturingExporter())
+    common = {"direction": "escalation", "total_support_n": 5000, "validation_status": "robust", "adjusted_odds_ratio": float("nan")}
+    edges = pd.DataFrame(
+        [
+            {**common, "upstream_antibiotic": "MEROPENEM", "downstream_antibiotic": "CEFIDEROCOL", "escalation_ratio": 2800.0,
+             "er_ci_lower": 119.0, "er_ci_upper": 66000.0, "resistant_tested_n": 2, "susceptible_tested_n": 0},
+            {**common, "upstream_antibiotic": "CEFOTAXIME", "downstream_antibiotic": "ERAVACYCLINE", "escalation_ratio": 50.0,
+             "er_ci_lower": 3.0, "er_ci_upper": 800.0, "resistant_tested_n": 3, "susceptible_tested_n": 1},
+            {**common, "upstream_antibiotic": "CEFTRIAXONE", "downstream_antibiotic": "FOSFOMYCIN", "escalation_ratio": 6.0,
+             "er_ci_lower": 5.0, "er_ci_upper": 7.2, "resistant_tested_n": 400, "susceptible_tested_n": 300},
+        ]
+    )
+
+    plotter.export(edges, "escalation", Path("unused"), ("html",), tier="validated", top_n=1, n_direction=3)
+
+    drawn = [a.text for a in captured["fig"].layout.annotations if a.text and "→" in a.text and not a.text.startswith("<b>")]
+    assert len(drawn) == 1 and drawn[0].startswith("Ceftriaxone")

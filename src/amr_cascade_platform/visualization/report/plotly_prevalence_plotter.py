@@ -8,6 +8,8 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from matplotlib import pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap, Normalize
+from matplotlib.lines import Line2D
 
 from amr_cascade_platform.visualization.report.organism_labels import format_organism_label
 from amr_cascade_platform.visualization.report.plotly_exporter import PlotlyFigureExporter
@@ -17,11 +19,18 @@ class PlotlyPrevalencePlotter:
     """Render publication-ready prevalence-shift plots."""
 
     _SHIFT_DIRECTION_LABELS = {
-        "naive_overestimates": "MNAR estimate (naive overstates)",
-        "naive_underestimates": "MNAR estimate (naive understates)",
-        "no_difference": "MNAR estimate (no shift)",
-        "unavailable": "MNAR estimate (not estimable)",
+        "naive_overestimates": "Reference estimate (naive higher)",
+        "naive_underestimates": "Reference estimate (naive lower)",
+        "no_difference": "Reference estimate (no difference)",
+        "unavailable": "Reference estimate (not estimable)",
     }
+    _SHIFT_COLORS = {
+        "naive_overestimates": "#C0392B",
+        "naive_underestimates": "#1F77B4",
+        "no_difference": "#7F8C8D",
+        "unavailable": "#98A2B3",
+    }
+    _BOUNDS_COLOR = "#B8C0CC"
 
     def __init__(self, exporter: PlotlyFigureExporter, template: str, width: int, height: int) -> None:
         self._exporter = exporter
@@ -36,6 +45,7 @@ class PlotlyPrevalencePlotter:
             output_stem,
             formats,
             static_fallback=lambda fmt, path: self._write_static(results, fmt, path),
+            prefer_static_fallback=True,
         )
 
     def _build_figure(self, results: pd.DataFrame) -> go.Figure:
@@ -43,7 +53,7 @@ class PlotlyPrevalencePlotter:
             fig = go.Figure()
             fig.update_layout(
                 template=self._template,
-                title="Prevalence Shift Under Selective Testing",
+                title="Eligible-denominator resistance summaries",
                 annotations=[
                     {
                         "text": "No organism-drug pairs met the prevalence-shift support thresholds.",
@@ -63,33 +73,26 @@ class PlotlyPrevalencePlotter:
         plot_data["label"] = (
             plot_data["drug"] if single_organism else plot_data["organism"] + " | " + plot_data["drug"]
         )
-        # Sorted by the MNAR point estimate itself (not by shift magnitude): rows
+        # Sorted by the lambda=0 reference-model estimate (not by shift magnitude): rows
         # then form one visual gradient top-to-bottom instead of jumping between
         # unrelated prevalence levels from row to row.
         plot_data = plot_data.sort_values("mnar_lambda0_prevalence_pct", ascending=True).reset_index(drop=True)
         plot_data["shift_direction"] = plot_data["mnar_lambda0_shift_from_naive"].map(
             self._shift_direction
         )
-        plot_data["shift_color"] = plot_data["shift_direction"].map(
-            {
-                "naive_overestimates": "#C0392B",
-                "naive_underestimates": "#1F77B4",
-                "no_difference": "#7F8C8D",
-                "unavailable": "#98A2B3",
-            }
-        ).fillna("#98A2B3")
+        plot_data["shift_color"] = plot_data["shift_direction"].map(self._SHIFT_COLORS).fillna("#98A2B3")
 
         hover = [
             "<br>".join(
                 [
                     f"{row['organism']} | {row['drug']}",
                     f"Naive prevalence: {row['naive_prevalence_pct']:.2f}%",
-                    f"MNAR prevalence (lambda=0): {row['mnar_lambda0_prevalence_pct']:.2f}%"
+                    f"Reference-model prevalence (λ=0): {row['mnar_lambda0_prevalence_pct']:.2f}%"
                     if pd.notna(row["mnar_lambda0_prevalence_pct"])
-                    else "MNAR prevalence (lambda=0): NA",
+                    else "Reference-model prevalence (λ=0): NA",
                     f"Lower bound: {row['prevalence_lower_bound_pct']:.2f}%",
                     f"Upper bound: {row['prevalence_upper_bound_pct']:.2f}%",
-                    f"Shift: {row['mnar_lambda0_shift_from_naive_pct']:.2f} percentage points"
+                    f"Naive minus reference estimate: {row['mnar_lambda0_shift_from_naive_pct']:.2f} percentage points"
                     if pd.notna(row["mnar_lambda0_shift_from_naive_pct"])
                     else "Shift: NA",
                     f"rho independent/cascade: {row['rho_independent_vs_cascade']:.2f}" if pd.notna(row["rho_independent_vs_cascade"]) else "rho independent/cascade: NA",
@@ -99,13 +102,9 @@ class PlotlyPrevalencePlotter:
             for _, row in plot_data.iterrows()
         ]
 
-        # Classic point-estimate + CI forest plot: the MNAR estimate is the point
-        # (square = a direction with a shift, so it reads next to its CI at a
-        # glance), the model-free eligible-denominator bounds are its whisker,
-        # and naive prevalence rides alongside as a small open reference marker
-        # on the same row -- not a second, disconnected point with no CI of its
-        # own, and not a dumbbell (there is no meaningful "before/after" pairing
-        # here since the naive value has no uncertainty interval to pair with).
+        # Neutral horizontal lines are model-free bounds. The coloured segment
+        # links tested-row prevalence to the lambda=0 reference-model estimate;
+        # colour encodes the sign of naive minus reference, not uncertainty.
         fig = go.Figure()
         for _, row in plot_data.iterrows():
             lo, hi = row["prevalence_lower_bound_pct"], row["prevalence_upper_bound_pct"]
@@ -115,18 +114,41 @@ class PlotlyPrevalencePlotter:
                         x=[lo, hi],
                         y=[row["label"], row["label"]],
                         mode="lines",
-                        line={"color": row["shift_color"], "width": 2},
+                        line={"color": self._BOUNDS_COLOR, "width": 2},
+                        hoverinfo="skip",
+                        showlegend=False,
+                    )
+                )
+            naive = row.get("naive_prevalence_pct")
+            reference = row.get("mnar_lambda0_prevalence_pct")
+            if pd.notna(naive) and pd.notna(reference):
+                fig.add_trace(
+                    go.Scatter(
+                        x=[naive, reference],
+                        y=[row["label"], row["label"]],
+                        mode="lines",
+                        line={"color": row["shift_color"], "width": 3},
                         hoverinfo="skip",
                         showlegend=False,
                     )
                 )
         fig.add_trace(
             go.Scatter(
+                x=[None],
+                y=[None],
+                mode="lines",
+                line={"color": self._BOUNDS_COLOR, "width": 2},
+                name="Eligible-denominator bounds",
+                hoverinfo="skip",
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
                 x=plot_data["naive_prevalence_pct"],
                 y=plot_data["label"],
                 mode="markers",
                 marker={"size": 8, "symbol": "circle-open", "color": "#667085", "line": {"width": 1.5}},
-                name="Naive prevalence (reference)",
+                name="Naive tested-row prevalence",
                 text=hover,
                 hovertemplate="%{text}<extra></extra>",
             )
@@ -151,18 +173,13 @@ class PlotlyPrevalencePlotter:
                     hovertemplate="%{text}<extra></extra>",
                 )
             )
-        # Font/margin values below are pre-print-scale: PlotlyFigureExporter
-        # multiplies every font size AND every margin value by PRINT_FONT_SCALE
-        # (2.6x) for static exports, so these must be sized for the scaled
-        # result, not the on-screen appearance -- see plotly_model_plotters.py
-        # _apply_standard_layout for the same convention.
         fig.update_layout(
             template=self._template,
             title={
                 "text": (
-                    f"Prevalence Shift Under Selective Testing — {format_organism_label(single_organism)}"
+                    f"<b>Eligible-denominator resistance summaries — {format_organism_label(single_organism)}</b>"
                     if single_organism
-                    else "Prevalence Shift Under Selective Testing"
+                    else "<b>Eligible-denominator resistance summaries</b>"
                 ),
                 "font": {"size": 16},
             },
@@ -173,27 +190,16 @@ class PlotlyPrevalencePlotter:
             legend={
                 "orientation": "h",
                 "yanchor": "top",
-                "y": -0.12,
+                "y": -0.08,
                 "xanchor": "center",
                 "x": 0.5,
-                "font": {"size": 12},
+                "font": {"size": 10},
             },
             width=self._width,
-            height=max(self._height, 75 * len(plot_data) + 560),
-            margin={"l": 170, "r": 100, "t": 90, "b": 290},
-            annotations=[
-                {
-                    "text": "Square = MNAR estimate at lambda=0; horizontal bar = model-free<br>eligible-denominator bounds. Open circle = naive tested-row prevalence<br>(reference, no interval of its own). Colour = direction of shift from<br>naive (see legend). n = eligible episode-drug pairs.",
-                    "showarrow": False,
-                    "x": 0.0,
-                    "y": -0.55,
-                    "xref": "paper",
-                    "yref": "paper",
-                    "xanchor": "left",
-                    "align": "left",
-                    "font": {"size": 10.5, "color": "#475467"},
-                }
-            ],
+            height=max(self._height, 58 * len(plot_data) + 260),
+            margin={"l": 190, "r": 120, "t": 100, "b": 120},
+            plot_bgcolor="white",
+            paper_bgcolor="white",
         )
         for _, row in plot_data.iterrows():
             n_val = row.get("eligible_n")
@@ -207,7 +213,7 @@ class PlotlyPrevalencePlotter:
         return fig
 
     def _write_static(self, results: pd.DataFrame, fmt: str, path: Path) -> None:
-        fig, ax = plt.subplots(figsize=(20, max(8, 0.55 * max(len(results), 1) + 4.0)))
+        fig, ax = plt.subplots(figsize=(12, max(6.8, 0.48 * max(len(results), 1) + 2.6)))
         if results.empty:
             ax.axis("off")
             ax.text(
@@ -228,12 +234,6 @@ class PlotlyPrevalencePlotter:
             plot_data = plot_data.sort_values("mnar_lambda0_prevalence_pct", ascending=True).reset_index(drop=True)
             y_positions = list(range(len(plot_data)))
             plot_data["shift_direction"] = plot_data["mnar_lambda0_shift_from_naive"].map(self._shift_direction)
-            direction_colors = {
-                "naive_overestimates": "#C0392B",
-                "naive_underestimates": "#1F77B4",
-                "no_difference": "#7F8C8D",
-                "unavailable": "#98A2B3",
-            }
             for y, lo, hi in zip(
                 y_positions,
                 pd.to_numeric(plot_data["prevalence_lower_bound_pct"], errors="coerce"),
@@ -241,50 +241,77 @@ class PlotlyPrevalencePlotter:
                 strict=False,
             ):
                 if pd.notna(lo) and pd.notna(hi):
-                    ax.hlines(y, lo, hi, color="#DDE2E8", linewidth=2.5, zorder=1)
-            # Dumbbell: one naive-to-MNAR connector per row, colored by shift
-            # direction, matching the interactive figure's encoding.
-            seen_directions: set[str] = set()
+                    ax.hlines(y, lo, hi, color=self._BOUNDS_COLOR, linewidth=2.2, zorder=1)
             for y, row in zip(y_positions, plot_data.itertuples(), strict=False):
                 direction = row.shift_direction
-                color = direction_colors.get(direction, "#98A2B3")
+                color = self._SHIFT_COLORS.get(direction, "#98A2B3")
                 naive_v = pd.to_numeric(pd.Series([row.naive_prevalence_pct]), errors="coerce").iloc[0]
-                mnar_v = pd.to_numeric(pd.Series([row.mnar_lambda0_prevalence_pct]), errors="coerce").iloc[0]
-                if pd.notna(naive_v) and pd.notna(mnar_v):
-                    ax.plot([naive_v, mnar_v], [y, y], color=color, linewidth=2.5, zorder=2)
-                label = self._SHIFT_DIRECTION_LABELS.get(direction, direction) if direction not in seen_directions else None
-                seen_directions.add(direction)
+                reference_v = pd.to_numeric(pd.Series([row.mnar_lambda0_prevalence_pct]), errors="coerce").iloc[0]
+                if pd.notna(naive_v) and pd.notna(reference_v):
+                    ax.plot([naive_v, reference_v], [y, y], color=color, linewidth=2.5, zorder=2)
                 if pd.notna(naive_v):
                     ax.scatter([naive_v], [y], s=70, facecolors="none", edgecolors="#667085", linewidths=1.5, zorder=3)
-                if pd.notna(mnar_v):
-                    ax.scatter([mnar_v], [y], s=110, c=color, edgecolors="#344054", linewidths=1.0, zorder=4, label=label)
-            ax.scatter([], [], s=70, facecolors="none", edgecolors="#667085", linewidths=1.5, label="Naive prevalence")
+                if pd.notna(reference_v):
+                    ax.scatter([reference_v], [y], marker="s", s=80, c=color, edgecolors="#344054", linewidths=0.8, zorder=4)
+                n_val = getattr(row, "eligible_n", np.nan)
+                bound_end = getattr(row, "prevalence_upper_bound_pct", np.nan)
+                if pd.notna(n_val) and pd.notna(bound_end):
+                    ax.annotate(
+                        f"n={int(n_val):,}",
+                        (bound_end, y),
+                        xytext=(7, 0),
+                        textcoords="offset points",
+                        va="center",
+                        fontsize=8.5,
+                        color="#667085",
+                    )
             ax.set_yticks(y_positions)
             ax.set_yticklabels(plot_data["label"], fontsize=13)
             ax.set_xlabel("Resistance prevalence (%)", fontsize=15)
             ax.set_ylabel("Drug" if single_organism else "Organism | Drug", fontsize=15)
             ax.set_title(
-                f"Prevalence Shift Under Selective Testing — {format_organism_label(single_organism)}"
+                f"Eligible-denominator resistance summaries — {format_organism_label(single_organism)}"
                 if single_organism
-                else "Prevalence Shift Under Selective Testing",
-                fontsize=20,
+                else "Eligible-denominator resistance summaries",
+                fontsize=16,
                 fontweight="bold",
+                pad=14,
             )
             ax.tick_params(axis="x", labelsize=13)
             ax.grid(axis="x", color="#E8EEF5", linewidth=0.9)
             ax.set_axisbelow(True)
             ax.spines["top"].set_visible(False)
             ax.spines["right"].set_visible(False)
-            ax.legend(loc="lower right", fontsize=13)
-            fig.text(
-                0.02,
-                0.03,
-                "Open circle = naive prevalence; filled circle = MNAR estimate at lambda=0, connected by a line colored by shift direction (see legend). Pale line = model-free eligible-denominator bounds.",
-                fontsize=12,
-                color="#475467",
-                wrap=True,
+            present_directions = set(plot_data["shift_direction"].dropna().astype(str))
+            legend_handles = [
+                Line2D([0], [0], color=self._BOUNDS_COLOR, linewidth=2.2, label="Eligible-denominator bounds"),
+                Line2D([0], [0], marker="o", linestyle="None", markerfacecolor="none", markeredgecolor="#667085",
+                       markersize=7, label="Naive tested-row prevalence"),
+            ]
+            for direction in self._SHIFT_DIRECTION_LABELS:
+                if direction not in present_directions:
+                    continue
+                legend_handles.append(
+                    Line2D(
+                        [0],
+                        [0],
+                        marker="s",
+                        linestyle="None",
+                        markerfacecolor=self._SHIFT_COLORS[direction],
+                        markeredgecolor="#344054",
+                        markersize=7,
+                        label=self._SHIFT_DIRECTION_LABELS[direction],
+                    )
+                )
+            fig.legend(
+                handles=legend_handles,
+                loc="lower center",
+                bbox_to_anchor=(0.5, 0.025),
+                ncol=2,
+                frameon=False,
+                fontsize=9.5,
             )
-        fig.tight_layout(rect=(0.0, 0.09, 1.0, 1.0))
+        fig.subplots_adjust(left=0.25, right=0.94, top=0.88, bottom=0.20)
         fig.savefig(path, format=fmt, dpi=300, bbox_inches="tight")
         plt.close(fig)
 
@@ -313,7 +340,7 @@ class PlotlyPrevalencePlotter:
         data = data.sort_values("cascade_trigger_fraction", ascending=True)
         fig = go.Figure(go.Bar(
             x=data["cascade_trigger_fraction"] * 100, y=data["drug"], orientation="h",
-            marker={"color": data["cascade_trigger_fraction"], "colorscale": [[0, "#CBD5E1"], [1, "#1F4E9C"]], "cmin": 0, "cmax": 100 * data["cascade_trigger_fraction"].max()},
+            marker={"color": "#1F4E9C"},
             text=[f"{v:.0%}" for v in data["cascade_trigger_fraction"]], textposition="outside",
             hovertemplate="<b>%{y}</b><br>kappa = %{x:.1f}% of observed tests followed a validated upstream trigger<extra></extra>",
         ))
@@ -328,7 +355,13 @@ class PlotlyPrevalencePlotter:
             yaxis={"title": ""}, margin={"l": 200, "r": 60, "t": 100, "b": 60},
             plot_bgcolor="white", paper_bgcolor="white", showlegend=False,
         )
-        return self._exporter.write(fig, output_stem, formats)
+        return self._exporter.write(
+            fig,
+            output_stem,
+            formats,
+            static_fallback=lambda fmt, path: self._write_kappa_static(data, fmt, path),
+            prefer_static_fallback=True,
+        )
 
     def export_cascade_vs_independent_dumbbell(self, results: pd.DataFrame, output_stem: Path, formats: tuple[str, ...]) -> dict[str, Path]:
         """Dumbbell: resistance prevalence among cascade-triggered vs. independently-tested episodes, per drug."""
@@ -389,11 +422,17 @@ class PlotlyPrevalencePlotter:
         # that cluster an unreadable pile-up. Identity comes from hover (HTML)
         # and the labelled table this figure accompanies, not an always-on label.
         fig = go.Figure(go.Scatter(
-            x=data["cascade_trigger_fraction"] * 100, y=data["_enrichment"], mode="markers",
+            x=data["cascade_trigger_fraction"] * 100, y=data["_enrichment"], mode="markers", text=data["drug"],
             marker={
                 "size": np.clip(data["_bound_width"] * 1.6, 8, 55),
                 "color": data["_bound_width"], "colorscale": [[0, "#27AE60"], [0.5, "#F5CBA7"], [1, "#C0392B"]],
-                "showscale": True, "colorbar": {"title": {"text": "Bound<br>width (pp)"}}, "line": {"width": 1, "color": "white"},
+                "showscale": True,
+                "colorbar": {
+                    "title": {"text": "Bound width<br>(percentage points)"},
+                    "thickness": 18,
+                    "len": 0.72,
+                },
+                "line": {"width": 1, "color": "white"},
             },
             hovertemplate="<b>%{text}</b><br>kappa %{x:.1f}%<br>Enrichment %{y:.1f}pp<extra></extra>",
         ))
@@ -401,16 +440,128 @@ class PlotlyPrevalencePlotter:
         fig.update_layout(
             template=self._template, width=self._width, height=max(self._height, 700),
             title={
-                "text": "<b>Surveillance-sensitivity map</b>"
-                        "<br><sup>x = cascade-trigger concentration (κ); y = cascade-triggered minus independent prevalence; "
-                        "point size/colour = eligible-denominator bound width. Top-right, large points warrant the most caution reading naive prevalence.</sup>",
+                "text": (
+                    "<b>Surveillance-sensitivity map</b>"
+                    "<br><sup>Selective observation, resistance enrichment, "
+                    "and eligible-denominator uncertainty by drug</sup>"
+                ),
                 "font": {"size": 15},
             },
-            xaxis={"title": {"text": "Cascade-trigger fraction, κ (%)"}},
-            yaxis={"title": {"text": "Cascade-triggered − independent prevalence (percentage points)"}},
-            margin={"l": 90, "r": 40, "t": 120, "b": 70}, plot_bgcolor="white", paper_bgcolor="white", showlegend=False,
+            xaxis={
+                "title": {"text": "Cascade-trigger fraction, κ (%)"}
+            },
+            yaxis={
+                "title": {"text": "Resistance enrichment (percentage points)"}
+            },
+            margin={"l": 110, "r": 100, "t": 110, "b": 80},
+            plot_bgcolor="white",
+            paper_bgcolor="white",
+            showlegend=False,
         )
-        return self._exporter.write(fig, output_stem, formats)
+        return self._exporter.write(
+            fig,
+            output_stem,
+            formats,
+            static_fallback=lambda fmt, path: self._write_surveillance_sensitivity_map_static(data, fmt, path),
+            prefer_static_fallback=True,
+        )
+
+    @staticmethod
+    def _write_kappa_static(data: pd.DataFrame, fmt: str, path: Path) -> None:
+        fig, ax = plt.subplots(figsize=(11, max(6.2, 0.40 * max(len(data), 1) + 1.8)))
+        values = pd.to_numeric(data["cascade_trigger_fraction"], errors="coerce").to_numpy() * 100
+        positions = np.arange(len(data))
+        ax.barh(positions, values, color="#1F4E9C", alpha=0.92)
+        ax.set_yticks(positions)
+        ax.set_yticklabels(data["drug"], fontsize=10)
+        ax.set_xlim(0, 105)
+        ax.set_xlabel("Cascade-trigger fraction, κ (%)", fontsize=11)
+        ax.set_title("Cascade-trigger concentration by drug", fontsize=15, fontweight="bold", pad=22)
+        ax.text(
+            0.0,
+            1.01,
+            "Share of observed tests occurring after a validated upstream resistant trigger",
+            transform=ax.transAxes,
+            fontsize=9.5,
+            color="#475467",
+        )
+        for position, value in zip(positions, values, strict=True):
+            ax.text(min(value + 1.0, 102), position, f"{value:.0f}%", va="center", fontsize=9, color="#344054")
+        ax.grid(axis="x", color="#E8EEF5", linewidth=0.8)
+        ax.set_axisbelow(True)
+        ax.spines[["top", "right", "left"]].set_visible(False)
+        fig.tight_layout()
+        fig.savefig(path, format=fmt, dpi=300, bbox_inches="tight")
+        plt.close(fig)
+
+    @staticmethod
+    def _write_surveillance_sensitivity_map_static(data: pd.DataFrame, fmt: str, path: Path) -> None:
+        fig, ax = plt.subplots(figsize=(11, 7))
+        x_values = pd.to_numeric(data["cascade_trigger_fraction"], errors="coerce").to_numpy() * 100
+        y_values = pd.to_numeric(data["_enrichment"], errors="coerce").to_numpy()
+        bound_width = pd.to_numeric(data["_bound_width"], errors="coerce").to_numpy()
+        sizes = np.clip(bound_width * 10.0, 70, 560)
+        color_map = LinearSegmentedColormap.from_list(
+            "surveillance_sensitivity",
+            ["#27AE60", "#F5CBA7", "#C0392B"],
+        )
+        color_min = float(np.nanmin(bound_width))
+        color_max = float(np.nanmax(bound_width))
+        if np.isclose(color_min, color_max):
+            color_max = color_min + 1.0
+        scatter = ax.scatter(
+            x_values,
+            y_values,
+            s=sizes,
+            c=bound_width,
+            cmap=color_map,
+            norm=Normalize(vmin=color_min, vmax=color_max),
+            edgecolors="white",
+            linewidths=1.0,
+            alpha=0.90,
+            zorder=3,
+        )
+        ax.axhline(0, color="#94A3B8", linewidth=1.0, zorder=1)
+        ax.grid(color="#E8EEF5", linewidth=0.8)
+        ax.set_axisbelow(True)
+        ax.set_xlabel("Cascade-trigger fraction, κ (%)", fontsize=11)
+        ax.set_ylabel("Resistance enrichment (percentage points)", fontsize=11)
+        ax.set_title("Surveillance-sensitivity map", fontsize=16, fontweight="bold", pad=24)
+        ax.text(
+            0.0,
+            1.01,
+            "Selective observation, resistance enrichment, and eligible-denominator uncertainty by drug",
+            transform=ax.transAxes,
+            fontsize=9.5,
+            color="#475467",
+        )
+        colorbar = fig.colorbar(scatter, ax=ax, fraction=0.045, pad=0.03)
+        colorbar.set_label("Bound width (percentage points)", fontsize=9.5)
+
+        if len(data) <= 12:
+            label_indices = list(range(len(data)))
+        else:
+            label_indices_set: set[int] = set()
+            for values in (x_values, y_values, bound_width):
+                label_indices_set.update(np.argsort(values)[-4:].tolist())
+            label_indices = sorted(label_indices_set)
+        offsets = ((6, 6), (6, -11), (-6, 7), (-6, -12))
+        for order, index in enumerate(label_indices):
+            offset_x, offset_y = offsets[order % len(offsets)]
+            ax.annotate(
+                str(data.iloc[index]["drug"]),
+                (x_values[index], y_values[index]),
+                xytext=(offset_x, offset_y),
+                textcoords="offset points",
+                ha="left" if offset_x > 0 else "right",
+                fontsize=8,
+                color="#1F2937",
+                bbox={"boxstyle": "round,pad=0.14", "facecolor": "white", "edgecolor": "none", "alpha": 0.70},
+            )
+        ax.spines[["top", "right"]].set_visible(False)
+        fig.tight_layout()
+        fig.savefig(path, format=fmt, dpi=300, bbox_inches="tight")
+        plt.close(fig)
 
     @staticmethod
     def _empty_figure(message: str) -> go.Figure:

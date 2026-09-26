@@ -304,3 +304,30 @@ def test_operational_eligibility_requires_parseable_time_column() -> None:
 
     with pytest.raises(ValueError, match="could not parse any years"):
         service.build_episode_eligibility(culture_episodes, culture_drug_episodes)
+
+
+def test_benzylpenicillin_reference_entry_marks_penicillin_g_intrinsic_for_e_coli() -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    settings = ConfigLoader(project_root).load("mac")
+    service = EligibilityService(settings, PathManager(project_root, settings).paths.reference)
+    episode = {
+        "anon_id": "A1",
+        "pat_enc_csn_id_coded": "1",
+        "order_proc_id_coded": "2",
+        "order_time_jittered": "2024-01-01",
+        "organism": "ESCHERICHIA COLI",
+        "source_site": "armd",
+    }
+    culture_drug_episodes = pd.DataFrame(
+        [
+            {**episode, "antibiotic": "PENICILLIN G", "susceptibility": "RESISTANT"},
+            {**episode, "antibiotic": "CEFTRIAXON", "susceptibility": "SUSCEPTIBLE"},
+        ]
+    )
+
+    eligibility = service.build_episode_eligibility(pd.DataFrame([episode]), culture_drug_episodes)
+    by_drug = eligibility.set_index("antibiotic")
+
+    assert by_drug.loc["PENICILLIN G", "is_intrinsic_resistance"] == 1
+    assert by_drug.loc["PENICILLIN G", "is_eligible"] == 0
+    assert by_drug.loc["CEFTRIAXON", "is_eligible"] == 1

@@ -25,6 +25,8 @@ normalized ``microorganism`` column.
 
 from __future__ import annotations
 
+import re
+
 from amr_cascade_platform.core.utils.text import normalize_label
 
 ORGANISM_NAME_ALIASES: dict[str, str] = {
@@ -40,6 +42,17 @@ ORGANISM_NAME_ALIASES: dict[str, str] = {
     "STAPHYLOCOCCUS AUREUS BIOTYPE 1": "STAPHYLOCOCCUS AUREUS",
     "STAPHYLOCOCCUS AUREUS BIOTYPE 2": "STAPHYLOCOCCUS AUREUS",
     "ENTEROCOCCUS FAECIUM - VANCO RESISTANT": "ENTEROCOCCUS FAECIUM",
+    # Escherichia coli written with a resistance phenotype or a biotype (UTSW
+    # records ESBL producers under their own label; Stanford marks carbapenem
+    # resistance in the label). These are E. coli isolates: the annotation is a
+    # result, not a different organism, and leaving them out would drop the most
+    # resistant episodes from the E. coli cohort.
+    "ESBL ESCHERICHIA COLI": "ESCHERICHIA COLI",
+    "ESCHERICHIA COLI (CARBAPENEM RESISTANT)": "ESCHERICHIA COLI",
+    "ESCHERICHIA COLI BIOTYPE 1": "ESCHERICHIA COLI",
+    "ESCHERICHIA COLI BIOTYPE 2": "ESCHERICHIA COLI",
+    "ESCHERICHIA COLI BIO TYPE 1": "ESCHERICHIA COLI",
+    "ESCHERICHIA COLI BIO TYPE 2": "ESCHERICHIA COLI",
     "ESBL KLEBSIELLA PNEUMONIAE": "KLEBSIELLA PNEUMONIAE",
     "KLEBSIELLA PNEUMONIAE (CARBAPENEM RESISTANT)": "KLEBSIELLA PNEUMONIAE",
     "KLEBSIELLA PNEUMONIAE CARBAPENEMASE PRODUCER": "KLEBSIELLA PNEUMONIAE",
@@ -92,3 +105,55 @@ def normalize_organism_label(value: str | None) -> str:
     """
     normalized = normalize_label(value)
     return ORGANISM_NAME_ALIASES.get(normalized, normalized)
+
+
+def matches_requested_organism(label: object, requested: str) -> bool:
+    """Whether a raw organism label belongs to the organism an analysis requests.
+
+    A request for a species (a name that is already canonical, e.g.
+    "ESCHERICHIA COLI") includes every raw label that resolves to it through
+    ``ORGANISM_NAME_ALIASES`` -- resistance-phenotype ("ESBL ...",
+    "... (CARBAPENEM RESISTANT)"), biotype and colony-variant spellings -- since
+    those annotations describe the isolate, not a different organism. A request
+    for an annotated label itself (e.g. "STAPH AUREUS {MRSA}") keeps exactly
+    that label, so a phenotype-specific analysis stays phenotype-specific.
+    """
+    if not isinstance(label, str):
+        return False
+    requested_label = normalize_label(requested)
+    canonical = normalize_organism_label(requested)
+    if requested_label != canonical:
+        return normalize_label(label) == requested_label
+    return normalize_organism_label(label) == canonical
+
+
+# Words some raw labels put before the genus (phenotype, test result or grouping).
+_NON_GENUS_WORDS = frozenset(
+    {
+        "ALPHA", "ANAEROBIC", "BETA", "COAG", "COAGULASE", "ESBL", "GRAM", "GROUP",
+        "HAEMOLYTIC", "HEMOLYTIC", "METHICILLIN", "METHICILLINSENSITIVE", "MUCOID",
+        "NEGATIVE", "NONMUCOID", "POSITIVE", "RESISTANT", "SENSITIVE", "VIRIDANS",
+    }
+)
+# Genus abbreviations in the extracts; the prior-infection extract writes
+# coagulase-negative staphylococci as "CONS".
+_GENUS_ABBREVIATIONS = {"CONS": "STAPHYLOCOCCUS", "STAPH": "STAPHYLOCOCCUS", "STREP": "STREPTOCOCCUS"}
+
+
+def organism_genus(label: object) -> str:
+    """Genus of an organism label, for comparisons at genus level ("" if none).
+
+    The prior-infection extracts record prior organisms at genus level
+    ("Escherichia", "CONS") while culture episodes carry species labels
+    ("ESCHERICHIA COLI", "COAG NEGATIVE STAPHYLOCOCCUS"), so "same organism"
+    history can only be established at genus level. The label is first
+    alias-resolved, then the first word that is not a phenotype or grouping
+    qualifier is taken, with legacy "ZZZ" prefixes and abbreviations resolved.
+    """
+    if not isinstance(label, str):
+        return ""
+    for word in re.split(r"[^A-Z]+", normalize_organism_label(label)):
+        word = _GENUS_ABBREVIATIONS.get(word.removeprefix("ZZZ"), word.removeprefix("ZZZ"))
+        if word and word not in _NON_GENUS_WORDS:
+            return word
+    return ""

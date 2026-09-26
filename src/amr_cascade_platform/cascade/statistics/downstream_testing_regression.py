@@ -7,7 +7,6 @@ import math
 
 import numpy as np
 import pandas as pd
-from scipy.optimize import minimize
 from scipy.special import expit
 from scipy.stats import norm
 
@@ -54,7 +53,6 @@ class DownstreamTestingRegression:
         "cov_er_status",
         "cov_prior_abx_any_90d",
         "cov_calendar_year",
-        "cov_calendar_month",
         "cov_age_bin",
         "cov_sex",
         "cov_prior_same_organism_any_90d",
@@ -122,9 +120,10 @@ class DownstreamTestingRegression:
     _QUASI_SEP_OR_LOWER_THRESHOLD: float = 1.0 / _QUASI_SEP_OR_THRESHOLD
     _MIN_PROCEDURE_COMPONENT_BRANCH_SUPPORT: int = 5
 
-    def __init__(self, settings: Settings, path_manager: PathManager) -> None:
+    def __init__(self, settings: Settings, path_manager: PathManager, ridge_penalty: float | None = None) -> None:
         self._settings = settings
         self._covariate_builder = CascadeCovariateBuilder(settings, path_manager)
+        self._ridge_penalty = self._RIDGE_PENALTY if ridge_penalty is None else float(ridge_penalty)
 
     def analyze(
         self,
@@ -134,8 +133,16 @@ class DownstreamTestingRegression:
     ) -> pd.DataFrame:
         if drug_pairs.empty or escalation_results.empty:
             return self._empty_results()
+        return self.analyze_with_covariates(drug_pairs, escalation_results, self._covariate_builder.build(culture_episodes))
 
-        covariates = self._covariate_builder.build(culture_episodes)
+    def analyze_with_covariates(
+        self,
+        drug_pairs: pd.DataFrame,
+        escalation_results: pd.DataFrame,
+        covariates: pd.DataFrame,
+    ) -> pd.DataFrame:
+        if drug_pairs.empty or escalation_results.empty:
+            return self._empty_results()
         candidate_edges = escalation_results[escalation_results["passes_support_threshold"]].loc[
             :, ["upstream_antibiotic", "downstream_antibiotic"]
         ]
@@ -343,7 +350,7 @@ class DownstreamTestingRegression:
         y = target.to_numpy(dtype=float)
         weights_array = np.ones(len(target), dtype=float)
         feature_names = list(design_matrix.columns)
-        ridge = self._RIDGE_PENALTY
+        ridge = self._ridge_penalty
 
         # Penalised regression with parameter-of-interest exemption
         # (motivation: Belloni, Chernozhukov & Hansen 2014, ReStud).
@@ -357,39 +364,20 @@ class DownstreamTestingRegression:
         if _poi_idx is not None:
             _ridge_mask[_poi_idx] = False  # parameter of interest: exempt from penalty
 
-        def objective(beta: np.ndarray) -> float:
-            eta = X @ beta
-            probability = np.clip(expit(eta), 1e-8, 1.0 - 1e-8)
-            penalty = ridge * float(np.square(beta[_ridge_mask]).sum())
-            log_likelihood = weights_array * (y * np.log(probability) + (1.0 - y) * np.log(1.0 - probability))
-            return float(-log_likelihood.sum() + penalty)
-
-        def gradient(beta: np.ndarray) -> np.ndarray:
-            probability = expit(X @ beta)
-            grad = X.T @ (weights_array * (probability - y))
-            grad[_ridge_mask] += 2.0 * ridge * beta[_ridge_mask]
-            return grad
-
-        optimization = minimize(
-            objective,
-            x0=np.zeros(X.shape[1], dtype=float),
-            jac=gradient,
-            method="BFGS",
-        )
-        if not optimization.success:
+        beta, iterations, converged = self._penalized_newton(X, y, _ridge_mask, ridge)
+        if not converged:
             logger.warning(
-                "BFGS did not converge (message=%r, nit=%d, nfev=%d): pair dropped from adjusted-OR output.",
-                optimization.message, optimization.nit, optimization.nfev,
+                "Penalised Newton did not converge in %d iterations: pair dropped from adjusted-OR output.",
+                iterations,
             )
             return None
 
-        beta = optimization.x
         probability = np.clip(expit(X @ beta), 1e-8, 1.0 - 1e-8)
         model_weights = weights_array * probability * (1.0 - probability)
         hessian = X.T @ (X * model_weights[:, None])
         # Penalty matrix for the bread must match _ridge_mask so that the
         # sandwich SE for upstream_positive uses the same regularisation level
-        # (zero) as the BFGS objective.  Using a flat non-intercept penalty here
+        # (zero) as the fitting objective.  Using a flat non-intercept penalty here
         # would over-regularise the upstream_positive standard error, producing
         # CIs that are slightly too conservative for the parameter of interest.
         penalty = np.diag(np.where(_ridge_mask, 2.0 * ridge, 0.0))
@@ -432,13 +420,64 @@ class DownstreamTestingRegression:
             "adjustment_model_type": model_type,
         }
 
+    _NEWTON_MAX_ITERATIONS = 100
+    _NEWTON_TOLERANCE = 1e-10
+
+    @classmethod
+    def _penalized_newton(
+        cls,
+        X: np.ndarray,
+        y: np.ndarray,
+        ridge_mask: np.ndarray,
+        ridge: float,
+    ) -> tuple[np.ndarray, int, bool]:
+        """Minimise the ridge-penalised logistic loss by Newton-Raphson with step halving.
+
+        The loss is convex, so Newton steps from zero reach the unique minimum; step halving
+        only guards the first iterations. Convergence is declared when the relative decrease
+        of the penalised objective falls below _NEWTON_TOLERANCE, or when no step along the
+        Newton direction lowers it further (the minimum at floating-point precision).
+        Quasi-separation shows up as a diverging upstream coefficient, which the
+        adjusted-OR bounds then flag. Returns (coefficients, iterations, converged).
+        """
+        penalty = np.where(ridge_mask, 2.0 * ridge, 0.0)
+
+        def objective(beta: np.ndarray) -> float:
+            eta = X @ beta
+            return float(np.sum(np.logaddexp(0.0, eta) - y * eta) + ridge * np.square(beta[ridge_mask]).sum())
+
+        beta = np.zeros(X.shape[1], dtype=float)
+        value = objective(beta)
+        for iteration in range(1, cls._NEWTON_MAX_ITERATIONS + 1):
+            probability = expit(X @ beta)
+            gradient = X.T @ (probability - y) + penalty * beta
+            hessian = X.T @ (X * (probability * (1.0 - probability))[:, None]) + np.diag(penalty)
+            try:
+                step = np.linalg.solve(hessian, gradient)
+            except np.linalg.LinAlgError:
+                step = np.linalg.lstsq(hessian, gradient, rcond=None)[0]
+            step_size = 1.0
+            while True:
+                candidate = beta - step_size * step
+                candidate_value = objective(candidate)
+                if np.isfinite(candidate_value) and candidate_value <= value:
+                    break
+                step_size *= 0.5
+                if step_size < 2.0**-30:
+                    return beta, iteration, True
+            converged = value - candidate_value <= cls._NEWTON_TOLERANCE * (abs(candidate_value) + 0.1)
+            beta, value = candidate, candidate_value
+            if converged:
+                return beta, iteration, True
+        return beta, cls._NEWTON_MAX_ITERATIONS, False
+
     @staticmethod
     def _safe_exp(x: float) -> float:
         """Return exp(x) without raising OverflowError.
 
         For very large coefficients (|x| > 709) Python's math.exp raises
-        OverflowError and scipy BFGS can occasionally produce such values for
-        near-separated groups even with a ridge penalty.  This wrapper returns
+        OverflowError, and the unpenalised upstream coefficient diverges for
+        near-separated groups even with a ridge penalty on the other coefficients.  This wrapper returns
         math.inf for any x that would overflow so the downstream quasi-separation
         check (OR > _QUASI_SEP_OR_THRESHOLD) fires correctly and the result is
         nulled, rather than crashing the whole cascade analysis.
@@ -466,6 +505,7 @@ class DownstreamTestingRegression:
             "cov_specimen_type",
             "cov_age_bin",
             "cov_sex",
+            "cov_calendar_year",
         ]
         categorical_columns = [column for column in categorical_columns if column in design.columns]
         for column in categorical_columns:
@@ -535,7 +575,7 @@ class DownstreamTestingRegression:
         *,
         protected: tuple[str, ...],
     ) -> pd.DataFrame:
-        """Z-scale nuisance columns so ridge penalty and BFGS are well conditioned."""
+        """Z-scale nuisance columns so the ridge penalty and Newton steps are well conditioned."""
         scaled = design_matrix.copy()
         protected_set = set(protected)
         for column in scaled.columns:

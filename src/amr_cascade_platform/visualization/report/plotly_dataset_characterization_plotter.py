@@ -18,6 +18,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
+from amr_cascade_platform.core.utils.site_labels import ALL_SITES, scope_order, site_label
 from amr_cascade_platform.visualization.report.plotly_exporter import PlotlyFigureExporter
 
 # ── Palette ───────────────────────────────────────────────────────────────────
@@ -30,6 +31,33 @@ _REF   = "#888888"
 _HIGH  = "#C0392B"   # high imbalance (|SMD| ≥ 0.1)
 _LOW   = "#27AE60"   # acceptable balance
 _BG    = "white"  # static PNG/PDF exports composite transparency onto black in some viewers/renderers -- explicit white matches every other figure module in this codebase
+# Opportunity-space colours shared with figure_opportunity_space (validated as a set).
+_ELIGIBLE      = "#1c5cab"
+_NOT_AVAILABLE = "#a8861a"
+_INTRINSIC     = "#7b68b5"
+_FUNNEL        = ["#86b6ef", "#3987e5", "#1c5cab"]  # one hue, darker as the space narrows
+_BLUE_RAMP     = [[0.0, "#cde2fb"], [0.25, "#86b6ef"], [0.5, "#3987e5"], [0.75, "#1c5cab"], [1.0, "#0d366b"]]
+
+# Adjusted-model covariates and what counts as recorded for each (the same
+# definitions as Table V): "known" = a category other than unknown; "flag" =
+# the covariate builder's record indicator; "adi" = the ADI record indicator
+# with a positive score (the builder writes 0 where the source lacks it).
+_COVARIATE_RECORDS = (
+    ("Age", "cov_age_bin", "known"),
+    ("Sex", "cov_sex", "known"),
+    ("Ordering context", "cov_ordering_mode", "known"),
+    ("Specimen type", "cov_specimen_type", "known"),
+    ("Emergency-department status", "cov_er_available", "flag"),
+    ("Intensive-care status", "cov_icu_available", "flag"),
+    ("Medication record before culture", "cov_prior_abx_available", "flag"),
+    ("Earlier culture record", "cov_prior_organism_available", "flag"),
+    ("Nursing-home record", "cov_nursing_home_available", "flag"),
+    ("Procedure record", "cov_prior_procedure_available", "flag"),
+    ("Comorbidity data", "cov_comorbidity_available", "flag"),
+    ("Area Deprivation Index", "cov_adi_available", "adi"),
+    ("Laboratory values", "cov_labs_available", "flag"),
+    ("Vital signs", "cov_vitals_available", "flag"),
+)
 
 
 def _empty(template: str, w: int, h: int, msg: str) -> go.Figure:
@@ -45,6 +73,47 @@ def _empty(template: str, w: int, h: int, msg: str) -> go.Figure:
 
 def _clean_num(series: pd.Series) -> pd.Series:
     return pd.to_numeric(series, errors="coerce")
+
+
+def _flag(frame: pd.DataFrame, column: str) -> pd.Series:
+    if column not in frame.columns:
+        return pd.Series(False, index=frame.index)
+    return _clean_num(frame[column]).fillna(0).astype(int).eq(1)
+
+
+def _recorded(frame: pd.DataFrame, column: str, kind: str) -> pd.Series | None:
+    """Which episodes have the covariate recorded (see _COVARIATE_RECORDS); None when the column is absent."""
+    if column not in frame.columns:
+        return None
+    if kind == "known":
+        return frame[column].astype("string").fillna("unknown").str.lower().ne("unknown")
+    recorded = _flag(frame, column)
+    if kind == "adi" and "cov_adi_score" in frame.columns:
+        recorded &= _clean_num(frame["cov_adi_score"]).gt(0)
+    return recorded
+
+
+def _scopes(frame: pd.DataFrame) -> list[tuple[str, pd.DataFrame]]:
+    """(display label, rows) for all sites, then each site present, in the configured order."""
+    sites = frame["source_site"].astype(str) if "source_site" in frame.columns else pd.Series("", index=frame.index)
+    scopes = [(site_label(ALL_SITES), frame)]
+    for site in scope_order((), sites.unique())[1:]:
+        part = frame.loc[sites.eq(site).to_numpy()]
+        if not part.empty:
+            scopes.append((site_label(site), part))
+    return scopes
+
+
+def _box_stats(values: pd.Series) -> dict[str, float] | None:
+    """Tukey box statistics (whiskers at the most extreme values within 1.5 IQR), precomputed so the figure stays small."""
+    values = _clean_num(values).dropna()
+    if values.empty:
+        return None
+    q1, median, q3 = (float(v) for v in values.quantile([0.25, 0.5, 0.75]))
+    iqr = q3 - q1
+    inside = values[(values >= q1 - 1.5 * iqr) & (values <= q3 + 1.5 * iqr)]
+    return {"q1": q1, "median": median, "q3": q3, "mean": float(values.mean()),
+            "lowerfence": float(inside.min()), "upperfence": float(inside.max()), "n": int(len(values))}
 
 
 class DatasetCharacterizationPlotter:
@@ -99,6 +168,11 @@ class DatasetCharacterizationPlotter:
             output_dir / "dataset_eligibility_funnel",
             formats,
         ))
+        outputs.update(self.export_eligibility_by_site(
+            eligible_pairs,
+            output_dir / "dataset_eligibility_by_site",
+            formats,
+        ))
         outputs.update(self.export_eligible_vs_observed_by_drug(
             eligible_pairs,
             output_dir / "dataset_eligible_vs_observed",
@@ -142,7 +216,28 @@ class DatasetCharacterizationPlotter:
         ))
         return outputs
 
-    # ── Figure 0: Eligibility funnel (biological vs. operational exclusion) ──
+    # ── Figure 0: Eligibility funnel and its split by site ────────────────────
+
+    _ELIGIBILITY_COLUMNS = {"is_eligible", "is_intrinsic_resistance", "is_operationally_available", "source_site"}
+
+    @staticmethod
+    def _eligibility_segments(frame: pd.DataFrame) -> tuple[int, int, int]:
+        """(intrinsic, operationally unavailable, eligible) rows.
+
+        is_eligible is definitionally (is_intrinsic_resistance == 0) AND
+        (is_operationally_available == 1) under the primary denominator
+        (Methods, Denominator construction), so the three counts partition the
+        candidate space exactly -- by construction, not by rounding.
+        """
+        total = len(frame)
+        intrinsic = int(frame["is_intrinsic_resistance"].eq(1).sum())
+        biologically_eligible = frame.loc[frame["is_intrinsic_resistance"].eq(0)]
+        operationally_unavailable = int(biologically_eligible["is_operationally_available"].eq(0).sum())
+        eligible = int(frame["is_eligible"].eq(1).sum())
+        assert intrinsic + operationally_unavailable + eligible == total, (
+            "eligibility segments must partition the candidate space exactly"
+        )
+        return intrinsic, operationally_unavailable, eligible
 
     def export_eligibility_funnel(
         self,
@@ -150,142 +245,120 @@ class DatasetCharacterizationPlotter:
         output_stem: Path,
         formats: tuple[str, ...],
     ) -> dict[str, Path]:
-        """Two-panel view of how the candidate episode-antibiotic space narrows
+        """Funnel of the two sequential gates from the candidate episode-antibiotic space
+        to the eligible opportunity space: biological (intrinsic resistance), then
+        operational (the drug was reported at the site in that era).
 
-        to the eligible opportunity space: a funnel of the two sequential
-        gates (biological, then operational), and a per-site stacked bar
-        showing the same three-way split so a reader can see, at a glance,
-        that biological exclusion is essentially fixed across sites while
-        operational exclusion is not -- the actual driver of any site-level
-        eligible-rate gap. Both traces are native Plotly geometry (Funnel,
-        Bar) rather than manually positioned shapes/annotations, so there is
-        no risk of the label-collision failure mode
-        export_eligible_vs_observed_by_drug's neighbour, PlotlyConsortPlotter,
-        works around with a Matplotlib fallback -- funnels and stacked bars
-        lay themselves out.
-
-        is_eligible is definitionally (is_intrinsic_resistance == 0) AND
-        (is_operationally_available == 1) under the primary denominator
-        (Methods, Denominator construction), so intrinsic-resistance count,
-        operationally-unavailable count (among the biologically eligible
-        remainder), and eligible count partition the candidate space exactly
-        -- the three segments always sum to the total by construction, not by
-        rounding.
+        The split by site is export_eligibility_by_site, a figure of its own.
         """
-        required = {"is_eligible", "is_intrinsic_resistance", "is_operationally_available", "source_site"}
-        if eligible_pairs.empty or not required.issubset(eligible_pairs.columns):
+        if eligible_pairs.empty or not self._ELIGIBILITY_COLUMNS.issubset(eligible_pairs.columns):
             return self._exporter.write(
                 _empty(self._template, self._width, self._height,
                        "Eligibility funnel unavailable — required columns missing"),
                 output_stem, formats,
             )
-
-        def _segments(frame: pd.DataFrame) -> tuple[int, int, int]:
-            total = len(frame)
-            intrinsic = int(frame["is_intrinsic_resistance"].eq(1).sum())
-            biologically_eligible = frame.loc[frame["is_intrinsic_resistance"].eq(0)]
-            operationally_unavailable = int(biologically_eligible["is_operationally_available"].eq(0).sum())
-            eligible = int(frame["is_eligible"].eq(1).sum())
-            assert intrinsic + operationally_unavailable + eligible == total, (
-                "eligibility funnel segments must partition the candidate space exactly"
-            )
-            return intrinsic, operationally_unavailable, eligible
-
         total_n = len(eligible_pairs)
-        intrinsic_n, operational_n, eligible_n = _segments(eligible_pairs)
-        biologically_eligible_n = total_n - intrinsic_n
-
-        site_rows = []
-        for site, group in eligible_pairs.groupby("source_site", observed=True):
-            site_intrinsic, site_operational, site_eligible = _segments(group)
-            site_total = len(group)
-            if site_total == 0:
-                continue
-            site_rows.append({
-                "source_site": site,
-                "total": site_total,
-                "intrinsic_pct": 100 * site_intrinsic / site_total,
-                "operational_pct": 100 * site_operational / site_total,
-                "eligible_pct": 100 * site_eligible / site_total,
-                "eligible_n": site_eligible,
-            })
-        site_df = pd.DataFrame(site_rows).sort_values("eligible_pct", ascending=True)
-
-        fig = make_subplots(
-            rows=1, cols=2,
-            specs=[[{"type": "funnel"}, {"type": "bar"}]],
-            subplot_titles=["Candidate space → eligible", "Eligible share by site"],
-            column_widths=[0.42, 0.58],
-            horizontal_spacing=0.12,
-        )
-        for annotation in fig.layout.annotations:
-            annotation.font = {"size": 11}
-
-        fig.add_trace(
-            go.Funnel(
-                y=["Candidate episode–antibiotic pairs", "Biologically eligible", "Eligible (biological + operational)"],
-                x=[total_n, biologically_eligible_n, eligible_n],
-                textinfo="value+percent initial",
-                # Dark blue -> lighter blue -> green: the first two stages are
-                # both still "in the funnel" (not yet a final categorisation),
-                # so they share the same hue at different tints; only the last
-                # stage is the true final outcome and gets the distinct
-                # success colour. Two full-strength greens in a row would
-                # wrongly read as two separate "done" states.
-                marker=dict(color=[_SITE[0], "rgba(44,111,172,0.5)", _LOW]),
-                connector=dict(line=dict(color=_REF, width=1)),
-                showlegend=False,
-                hovertemplate="<b>%{y}</b><br>N = %{x:,}<extra></extra>",
-            ),
-            row=1, col=1,
-        )
-
-        for name, color, key in [
-            ("Intrinsic resistance (biological)", _HIGH, "intrinsic_pct"),
-            ("Operationally unavailable", _UNOBS, "operational_pct"),
-            ("Eligible", _LOW, "eligible_pct"),
-        ]:
-            fig.add_trace(
-                go.Bar(
-                    name=name,
-                    y=site_df["source_site"],
-                    x=site_df[key],
-                    orientation="h",
-                    marker_color=color,
-                    hovertemplate=f"<b>%{{y}}</b><br>{name}: %{{x:.1f}}%<extra></extra>",
-                ),
-                row=1, col=2,
-            )
-
-        for _, row in site_df.iterrows():
-            fig.add_annotation(
-                x=101, y=row["source_site"],
-                xref="x2", yref="y2",
-                text=f"{row['eligible_n']:,} eligible",
-                showarrow=False,
-                font=dict(size=10, color=_TEXT),
-                xanchor="left",
-            )
-
-        h = max(self._height, 70 * max(len(site_df), 3))
+        intrinsic_n, _, eligible_n = self._eligibility_segments(eligible_pairs)
+        stages = [
+            "Candidate episode–antibiotic pairs",
+            "Biologically eligible<br>(no intrinsic resistance)",
+            "Eligible<br>(also reported at the site in that era)",
+        ]
+        fig = go.Figure(go.Funnel(
+            y=stages,
+            x=[total_n, total_n - intrinsic_n, eligible_n],
+            textinfo="value+percent initial",
+            texttemplate="%{value:,}<br>%{percentInitial:.1%} of candidates",
+            textposition="inside",
+            textfont=dict(size=15, color="white"),
+            marker=dict(color=_FUNNEL),
+            connector=dict(line=dict(color=_REF, width=1)),
+            showlegend=False,
+            hovertemplate="<b>%{y}</b><br>N = %{x:,}<extra></extra>",
+        ))
         fig.update_layout(
             template=self._template,
-            width=self._width,
-            height=h,
+            width=1400,
+            height=620,
             paper_bgcolor=_BG,
             plot_bgcolor=_BG,
-            barmode="stack",
             title=dict(
-                text="<b>Eligible Opportunity Space</b><br>"
+                text="<b>Eligible opportunity space</b><br>"
                      "<sup>Biological exclusion is fixed by organism–drug identity; "
-                     "operational exclusion varies by site × era</sup>",
+                     "operational exclusion varies by site and era</sup>",
                 font=dict(size=16, color=_TEXT),
                 x=0.01, xanchor="left",
             ),
-            xaxis2=dict(title="Share of candidate space (%)", range=[0, 122], gridcolor=_GRID),
-            yaxis2=dict(title=""),
-            legend=dict(orientation="h", yanchor="top", y=0.96, xanchor="left", x=0.44),
-            margin=dict(l=20, r=40, t=160, b=50),
+            yaxis=dict(title="", tickfont=dict(size=13)),
+            margin=dict(l=40, r=40, t=110, b=30),
+        )
+        return self._exporter.write(fig, output_stem, formats)
+
+    def export_eligibility_by_site(
+        self,
+        eligible_pairs: pd.DataFrame,
+        output_stem: Path,
+        formats: tuple[str, ...],
+    ) -> dict[str, Path]:
+        """Share of each site's candidate space that is eligible, not operationally
+        available, or intrinsically resistant; all sites first.
+
+        Biological exclusion is essentially fixed across sites while operational
+        exclusion is not -- the actual driver of any site-level eligible-rate gap.
+        """
+        if eligible_pairs.empty or not self._ELIGIBILITY_COLUMNS.issubset(eligible_pairs.columns):
+            return self._exporter.write(
+                _empty(self._template, self._width, self._height,
+                       "Eligibility by site unavailable — required columns missing"),
+                output_stem, formats,
+            )
+        rows = []
+        for label, group in _scopes(eligible_pairs):
+            intrinsic, unavailable, eligible = self._eligibility_segments(group)
+            total = len(group)
+            rows.append({"scope": label, "total": total, "eligible_n": eligible,
+                         "eligible_pct": 100 * eligible / total,
+                         "operational_pct": 100 * unavailable / total,
+                         "intrinsic_pct": 100 * intrinsic / total})
+        table = pd.DataFrame(rows)
+        fig = go.Figure()
+        for name, color, key in [
+            ("Eligible", _ELIGIBLE, "eligible_pct"),
+            ("Not operationally available", _NOT_AVAILABLE, "operational_pct"),
+            ("Intrinsic resistance", _INTRINSIC, "intrinsic_pct"),
+        ]:
+            fig.add_trace(go.Bar(
+                name=name,
+                y=table["scope"],
+                x=table[key],
+                orientation="h",
+                marker=dict(color=color, line=dict(color=_BG, width=2)),
+                hovertemplate=f"<b>%{{y}}</b><br>{name}: %{{x:.1f}}%<extra></extra>",
+            ))
+        for _, row in table.iterrows():
+            fig.add_annotation(
+                x=100, y=row["scope"], xref="x", yref="y", xanchor="left", xshift=10,
+                text=f"{row['eligible_pct']:.1f}% eligible<br>{row['eligible_n']:,} of {row['total']:,}",
+                showarrow=False, align="left", font=dict(size=12, color=_TEXT),
+            )
+        fig.update_layout(
+            template=self._template,
+            width=1600,
+            height=max(460, 110 * len(table) + 220),
+            paper_bgcolor=_BG,
+            plot_bgcolor=_BG,
+            barmode="stack",
+            bargap=0.35,
+            title=dict(
+                text="<b>Eligible share of the candidate space, by site</b><br>"
+                     "<sup>Candidate episode–antibiotic pairs split into the three mutually exclusive categories</sup>",
+                font=dict(size=16, color=_TEXT),
+                x=0.01, xanchor="left",
+            ),
+            xaxis=dict(title="Share of candidate pairs (%)", range=[0, 100], gridcolor=_GRID, ticksuffix="%"),
+            yaxis=dict(title="", autorange="reversed", tickfont=dict(size=13)),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0, traceorder="normal"),
+            margin=dict(l=40, r=160, t=120, b=60),
         )
         return self._exporter.write(fig, output_stem, formats)
 
@@ -899,7 +972,7 @@ class DatasetCharacterizationPlotter:
         )
         return self._exporter.write(fig, output_stem, formats)
 
-    # ── Figure 6: Covariate comparison (tested vs. untested) ─────────────────
+    # ── Figure 6: Comorbidity and deprivation by site ─────────────────────────
 
     def export_covariate_comparison(
         self,
@@ -908,77 +981,56 @@ class DatasetCharacterizationPlotter:
         output_stem: Path,
         formats: tuple[str, ...],
     ) -> dict[str, Path]:
-        """Two-panel figure: comorbidity count and ADI score, tested vs. untested.
+        """Comorbidity count and ADI score by site, among episodes with the covariate recorded.
 
-        Both panels show the distribution separately for tested (blue) and
-        untested (orange) episodes so the severity-driven selection into testing
-        is immediately visible.
+        Expects the adjusted model's covariates (CascadeCovariateBuilder) merged onto
+        culture_episodes. The earlier tested-versus-untested split was dropped:
+        nearly every culture episode has at least one reported result, so its
+        "untested" group was empty. eligible_pairs is accepted for interface
+        compatibility.
         """
-        ep_keys = [c for c in ["anon_id", "pat_enc_csn_id_coded", "order_proc_id_coded"]
-                   if c in eligible_pairs.columns and c in culture_episodes.columns]
-        comorb_col = next((c for c in culture_episodes.columns
-                           if "comorbidity_count" in c.lower()), None)
-        adi_col    = next((c for c in culture_episodes.columns
-                           if "adi_score" in c.lower() or "adi_state_rank" in c.lower()), None)
-
-        if not ep_keys or (comorb_col is None and adi_col is None):
+        panels = [
+            ("Comorbidity count", "cov_comorbidity_count", "cov_comorbidity_available", "flag"),
+            ("Area Deprivation Index score", "cov_adi_score", "cov_adi_available", "adi"),
+        ]
+        panels = [panel for panel in panels if panel[1] in culture_episodes.columns and panel[2] in culture_episodes.columns]
+        if culture_episodes.empty or not panels:
             return self._exporter.write(
                 _empty(self._template, self._width, self._height,
-                       "Covariate comparison unavailable — episode key or covariate columns not found"),
+                       "Covariate comparison unavailable — the adjusted model's covariates were not supplied"),
                 output_stem, formats,
             )
-
-        # Determine tested status per episode: tested if ANY drug was tested
-        tested_episodes = (
-            eligible_pairs[eligible_pairs["is_observed_tested"].eq(1)][ep_keys]
-            .drop_duplicates()
-            .assign(_tested=1)
-        )
-        episodes = culture_episodes[ep_keys + [c for c in [comorb_col, adi_col]
-                                               if c is not None]].drop_duplicates()
-        episodes = episodes.merge(tested_episodes, on=ep_keys, how="left")
-        episodes["_tested"] = episodes["_tested"].fillna(0).astype(int)
-        episodes["_group"] = episodes["_tested"].map({1: "Tested", 0: "Untested"})
-
-        cols_to_plot = [(c, label) for c, label in [
-            (comorb_col, "Comorbidity count"),
-            (adi_col, "ADI score"),
-        ] if c is not None]
-        n_panels = len(cols_to_plot)
-
-        fig = make_subplots(rows=1, cols=n_panels,
-                            subplot_titles=[label for _, label in cols_to_plot],
-                            horizontal_spacing=0.12)
-
-        for idx, (col, label) in enumerate(cols_to_plot, start=1):
-            for group, color in [("Tested", _OBS), ("Untested", _UNOBS)]:
-                vals = _clean_num(episodes.loc[episodes["_group"].eq(group), col]).dropna()
-                fig.add_trace(
-                    go.Box(
-                        y=vals,
-                        name=group,
-                        marker_color=color,
-                        boxmean=True,
-                        showlegend=(idx == 1),
-                        legendgroup=group,
-                        hovertemplate=f"<b>{group}</b><br>{label}: %{{y:.1f}}<extra></extra>",
-                    ),
-                    row=1, col=idx,
-                )
-
+        fig = make_subplots(rows=len(panels), cols=1, subplot_titles=[label for label, *_ in panels], vertical_spacing=0.24)
+        for row, (label, value_column, record_column, kind) in enumerate(panels, start=1):
+            for scope_label, part in _scopes(culture_episodes):
+                recorded = _recorded(part, record_column, kind)
+                stats = _box_stats(part.loc[recorded, value_column]) if recorded is not None else None
+                if stats is None:
+                    continue
+                pooled = scope_label == site_label(ALL_SITES)
+                fig.add_trace(go.Box(
+                    y=[f"{scope_label} (n = {stats['n']:,})"], q1=[stats["q1"]], median=[stats["median"]], q3=[stats["q3"]],
+                    lowerfence=[stats["lowerfence"]], upperfence=[stats["upperfence"]], mean=[stats["mean"]],
+                    orientation="h", boxmean=True, boxpoints=False, name=scope_label, showlegend=False,
+                    marker_color=_TEXT if pooled else _OBS, line=dict(width=2),
+                    fillcolor="rgba(26,26,46,0.12)" if pooled else "rgba(44,111,172,0.18)",
+                    hovertemplate=f"<b>{scope_label}</b><br>{label}: median %{{median}}<extra></extra>",
+                ), row=row, col=1)
+            fig.update_yaxes(autorange="reversed", row=row, col=1)
+            fig.update_xaxes(gridcolor=_GRID, zeroline=False, row=row, col=1)
         fig.update_layout(
             template=self._template,
-            width=self._width,
-            height=self._height,
+            width=1600,
+            height=260 + 300 * len(panels),
             paper_bgcolor=_BG,
             plot_bgcolor=_BG,
             title=dict(
-                text="<b>Severity Covariates: Tested vs. Untested Episodes</b>",
-                font=dict(size=15, color=_TEXT),
+                text="<b>Comorbidity and deprivation by site</b><br>"
+                     "<sup>Episodes with the covariate recorded (n per row); box = quartiles, "
+                     "whiskers = most extreme values within 1.5 IQR, dashed line = mean</sup>",
+                font=dict(size=16, color=_TEXT), x=0.01, xanchor="left",
             ),
-            boxmode="group",
-            legend=dict(title=""),
-            margin=dict(l=60, r=40, t=80, b=50),
+            margin=dict(l=40, r=40, t=110, b=50),
         )
         return self._exporter.write(fig, output_stem, formats)
 
@@ -1069,11 +1121,12 @@ class DatasetCharacterizationPlotter:
         output_stem: Path,
         formats: tuple[str, ...],
     ) -> dict[str, Path]:
-        """Horizontal bar chart: % of episodes with each covariate available.
+        """Heatmap: share of culture episodes with each adjusted-model covariate recorded, by site.
 
-        Uses the ``cov_*_available`` indicator columns where present; falls back
-        to non-null rate otherwise. Sorted ascending so least-available covariates
-        appear at top.
+        Expects the covariates (CascadeCovariateBuilder) merged onto
+        culture_episodes; "recorded" follows Table V (see _COVARIATE_RECORDS).
+        Rows keep a fixed conceptual order: demographics, care context,
+        history, comorbidity and deprivation, then measurements.
         """
         if culture_episodes.empty:
             return self._exporter.write(
@@ -1081,62 +1134,46 @@ class DatasetCharacterizationPlotter:
                        "Missing data profile unavailable — culture_episodes is empty"),
                 output_stem, formats,
             )
-
-        rows: list[dict[str, object]] = []
-        cov_cols = [c for c in culture_episodes.columns if c.startswith("cov_")]
-
-        # Prefer _available flags; fall back to non-null rate of the raw covariate
-        availability_flags = {c for c in cov_cols if c.endswith("_available")}
-        base_covariates    = {c for c in cov_cols if not c.endswith("_available")}
-
-        for col in sorted(base_covariates):
-            flag = col + "_available"
-            label = col.replace("cov_", "").replace("_", " ").title()
-            if flag in availability_flags:
-                rate = _clean_num(culture_episodes[flag]).mean()
-            else:
-                rate = culture_episodes[col].notna().mean()
-            if pd.notna(rate):
-                rows.append({"covariate": label, "availability": float(rate)})
-
+        scopes = _scopes(culture_episodes)
+        rows, shares, texts = [], [], []
+        for label, column, kind in _COVARIATE_RECORDS:
+            if column not in culture_episodes.columns:
+                continue
+            row_shares = []
+            for _, part in scopes:
+                recorded = _recorded(part, column, kind)
+                row_shares.append(float(recorded.mean()) if recorded is not None and len(part) else math.nan)
+            rows.append(label)
+            shares.append(row_shares)
+            texts.append([f"{value:.0%}" if not math.isnan(value) else "—" for value in row_shares])
         if not rows:
             return self._exporter.write(
                 _empty(self._template, self._width, self._height,
-                       "No cov_* columns found in culture_episodes"),
+                       "Missing data profile unavailable — the adjusted model's covariates were not supplied"),
                 output_stem, formats,
             )
-
-        summary = (
-            pd.DataFrame(rows)
-            .sort_values("availability", ascending=True)
-            .reset_index(drop=True)
-        )
-        colors = [_HIGH if v < 0.80 else _OBS for v in summary["availability"]]
-        h = max(self._height, 35 * len(summary))
-
-        fig = go.Figure(go.Bar(
-            y=summary["covariate"],
-            x=summary["availability"] * 100,
-            orientation="h",
-            marker_color=colors,
-            text=[f"{v:.0%}" for v in summary["availability"]],
-            textposition="outside",
-            hovertemplate="<b>%{y}</b><br>Available: %{x:.1f}%<extra></extra>",
+        columns = [f"{label}<br>n = {len(part):,}" for label, part in scopes]
+        # Every cell prints its share, so no colour bar: the colour only groups
+        # similar cells for the eye.
+        fig = go.Figure(go.Heatmap(
+            z=shares, x=columns, y=rows, zmin=0, zmax=1, colorscale=_BLUE_RAMP, showscale=False,
+            text=texts, texttemplate="%{text}", textfont=dict(size=13),
+            xgap=3, ygap=3, hoverongaps=False,
+            hovertemplate="<b>%{y}</b><br>%{x}<br>recorded for %{z:.1%} of episodes<extra></extra>",
         ))
-        fig.add_vline(x=80, line=dict(color=_HIGH, dash="dash", width=1.2),
-                      annotation_text="80% threshold", annotation_position="top right")
-
         fig.update_layout(
             template=self._template,
-            width=self._width,
-            height=h,
+            width=1600,
+            height=max(640, 58 * len(rows) + 260),
             paper_bgcolor=_BG,
             plot_bgcolor=_BG,
-            title=dict(text="<b>Covariate Availability Profile</b>",
-                       font=dict(size=15, color=_TEXT)),
-            xaxis=dict(title="Episodes with covariate available (%)",
-                       range=[0, 110], gridcolor=_GRID),
-            yaxis=dict(title="", tickfont=dict(size=11)),
-            margin=dict(l=200, r=80, t=60, b=50),
+            title=dict(
+                text="<b>Covariate availability by site</b><br>"
+                     "<sup>Share of culture episodes with each adjusted-model covariate recorded</sup>",
+                font=dict(size=16, color=_TEXT), x=0.01, xanchor="left",
+            ),
+            xaxis=dict(title="", side="top", tickfont=dict(size=13), tickangle=0),
+            yaxis=dict(title="", autorange="reversed", tickfont=dict(size=13)),
+            margin=dict(l=40, r=40, t=110, b=30),
         )
         return self._exporter.write(fig, output_stem, formats)

@@ -58,7 +58,8 @@ Options:
                                manuscript-facing outputs are generated.
   --run-readiness-audit        Run publication-readiness audit after each organism's
                                report outputs are generated.
-  --run-publication-package    Shortcut for --run-site-cascade --run-features
+  --run-publication-package    Shortcut for --run-site-cascade
+                               --include-site-comparison-figures --run-features
                                --run-training --run-eskape --run-all-figures
                                --run-audit --run-readiness-audit.
   --eskape-targets T1,T2        Default: Enterococcus,Staphylococcus,Klebsiella,
@@ -532,7 +533,7 @@ READINESS_AUDIT_TIME="${READINESS_AUDIT_TIME:-01:00:00}"
 
 REPORT_FIGURE_ARGS=""
 if [[ "${RUN_ALL_FIGURES}" -eq 1 ]]; then
-  REPORT_FIGURE_ARGS="--fail-on-missing-figures --figure cascade_directional --figure cascade_evidence_scatter --figure cascade_consequence_summary --figure operational_availability_suite --figure prevalence_shift_forest --figure prevalence_shift_curves --figure mnar_tipping_point --figure upstream_contribution_forest --figure downstream_trigger_forest --figure threshold_sensitivity --figure model_metrics_comparison --figure model_pr_curve --figure model_roc_curve --figure model_calibration --figure model_threshold_analysis --figure validation_diagnostics --figure er_landscape --figure mnar_prevalence_shift_distribution --figure validation_funnel --figure panel_bundling --figure temporal_stability --figure consort_diagram --figure dataset_characterization"
+  REPORT_FIGURE_ARGS="--fail-on-missing-figures --figure cascade_directional --figure cascade_evidence_scatter --figure cascade_consequence_summary --figure operational_availability_suite --figure observation_coverage --figure descriptive_summaries --figure prevalence_shift_forest --figure prevalence_shift_curves --figure mnar_tipping_point --figure upstream_contribution_forest --figure downstream_trigger_forest --figure threshold_sensitivity --figure model_metrics_comparison --figure model_pr_curve --figure model_roc_curve --figure model_calibration --figure model_threshold_analysis --figure validation_diagnostics --figure er_landscape --figure mnar_prevalence_shift_distribution --figure validation_funnel --figure panel_bundling --figure temporal_stability --figure consort_diagram --figure dataset_characterization"
   if [[ "${RUN_SITE_CASCADE}" -eq 1 || "${RUN_SITE_COMPARISON_FIGURES}" -eq 1 ]]; then
     REPORT_FIGURE_ARGS="${REPORT_FIGURE_ARGS} --figure site_vs_combined_summary --figure cross_site_concordance"
   fi
@@ -579,7 +580,7 @@ backup_stale_dir() {
   if [[ -z "${STALE_BACKUP_DIR}" ]]; then
     STALE_BACKUP_DIR="${PROJECT_ROOT}/stale_backup_$(date +%Y%m%d_%H%M%S)"
   fi
-  local dest="${STALE_BACKUP_DIR}/${label}"
+  local dest="${STALE_BACKUP_DIR}/${DATA_ROOT_DIR}/${label}"
   # --dry-run must never actually move anything: unlike job submission (which
   # --dry-run already makes safe by construction, since sbatch is simply never
   # called), a real mv here would silently mutate state on a call meant only

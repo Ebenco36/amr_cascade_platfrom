@@ -105,7 +105,9 @@ class ArmdEskapeCascadeRunner:
         eligible_pairs.to_parquet(gold_dir / "eligible_pairs.parquet", index=False)
         drug_pair_episodes.to_parquet(gold_dir / "drug_pair_episodes.parquet", index=False)
 
-        filtered_pairs, cotesting_pairs = self._cotesting_filter.filter(drug_pair_episodes)
+        filtered_pairs, cotesting_pairs, cotesting_probabilities = self._cotesting_filter.filter_with_probabilities(
+            drug_pair_episodes
+        )
 
         # ESKAPE family analysis pools organism variants only for the conditional
         # edge-estimation step. Keep filtered_pairs itself on the original organism
@@ -145,6 +147,7 @@ class ArmdEskapeCascadeRunner:
             dependence_results=dependence_results,
             rule_concordance=rule_concordance,
             cotesting_pairs=cotesting_pairs,
+            cotesting_probabilities=cotesting_probabilities,
             output_dir=output_dir,
         )
         outputs.update(

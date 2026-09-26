@@ -387,7 +387,9 @@ class CascadeValidationAnalyzer:
 
             elapsed = time.monotonic() - run_start
             avg_per_edge = elapsed / local_idx
-            eta = avg_per_edge * (total_edges - global_idx)
+            # Time left for the edges this call processes (a shard's own slice),
+            # not for every edge across all shards.
+            eta = avg_per_edge * (len(edges) - local_idx)
             logger.info(
                 "[%d/%d] %s -> %s | perm=%.1fs boot=%.1fs site=%.1fs temporal=%.1fs btwn=%.1fs "
                 "| raw_p_status=%s | elapsed=%s eta=%s",
@@ -601,13 +603,43 @@ class CascadeValidationAnalyzer:
             "era_stratified_n_permutable_rows",
             "era_stratified_fraction_fixed_rows",
         ]
-        if drug_pairs.empty or edges.empty:
-            return pd.DataFrame(columns=_era_columns)
+        return self._summarize_edges(drug_pairs, edges, self.permutation_summary_era_stratified, _era_columns)
 
+    def patient_cluster_bootstrap_summary(
+        self,
+        subset: pd.DataFrame,
+        observed_er: float,
+        upstream_antibiotic: str,
+        downstream_antibiotic: str,
+    ) -> dict[str, float]:
+        """Bootstrap sign stability with patients (anon_id), not episodes, resampled within site."""
+        summary = self._bootstrap_summary(
+            subset, observed_er, upstream_antibiotic, downstream_antibiotic, cluster_columns=("anon_id",), salt=71
+        )
+        return {
+            "patient_bootstrap_sign_stability": summary["bootstrap_sign_stability"],
+            "n_rows": float(len(subset)),
+            "n_patients": float(subset.loc[:, ["source_site", "anon_id"]].drop_duplicates().shape[0]),
+        }
+
+    def patient_cluster_sensitivity_summary(self, drug_pairs: pd.DataFrame, edges: pd.DataFrame) -> pd.DataFrame:
+        """Run patient_cluster_bootstrap_summary over every row in `edges` (the robust set)."""
+        columns = [
+            "upstream_antibiotic",
+            "downstream_antibiotic",
+            "observed_escalation_ratio",
+            "patient_bootstrap_sign_stability",
+            "n_rows",
+            "n_patients",
+        ]
+        return self._summarize_edges(drug_pairs, edges, self.patient_cluster_bootstrap_summary, columns)
+
+    def _summarize_edges(self, drug_pairs: pd.DataFrame, edges: pd.DataFrame, summarize, columns: list[str]) -> pd.DataFrame:
+        if drug_pairs.empty or edges.empty:
+            return pd.DataFrame(columns=columns)
         prepared = self._prepare_pairs(drug_pairs)
         if prepared.empty:
-            return pd.DataFrame(columns=_era_columns)
-
+            return pd.DataFrame(columns=columns)
         grouped = prepared.groupby(
             ["upstream_antibiotic", "downstream_antibiotic"], dropna=False, observed=True
         )
@@ -618,16 +650,15 @@ class CascadeValidationAnalyzer:
                 continue
             subset = grouped.get_group(key).reset_index(drop=True)
             observed_er = self._coerce_ratio(getattr(edge, "escalation_ratio", math.nan))
-            result = self.permutation_summary_era_stratified(subset, observed_er, *key)
             rows.append(
                 {
                     "upstream_antibiotic": key[0],
                     "downstream_antibiotic": key[1],
                     "observed_escalation_ratio": observed_er,
-                    **result,
+                    **summarize(subset, observed_er, *key),
                 }
             )
-        return pd.DataFrame(rows).reindex(columns=_era_columns)
+        return pd.DataFrame(rows).reindex(columns=columns)
 
     def _bootstrap_summary(
         self,
@@ -635,6 +666,9 @@ class CascadeValidationAnalyzer:
         observed_er: float,
         upstream_antibiotic: str,
         downstream_antibiotic: str,
+        *,
+        cluster_columns: tuple[str, ...] | None = None,
+        salt: int = 31,
     ) -> dict[str, float]:
         iterations = self._config.bootstrap_iterations
         if iterations <= 0 or pd.isna(observed_er):
@@ -646,10 +680,10 @@ class CascadeValidationAnalyzer:
                 "bootstrap_retention_rate": math.nan,
             }
 
-        rng = np.random.default_rng(self._edge_seed(upstream_antibiotic, downstream_antibiotic, salt=31))
+        rng = np.random.default_rng(self._edge_seed(upstream_antibiotic, downstream_antibiotic, salt=salt))
         boot_values: list[float] = []
         for i in range(iterations):
-            resampled = self._resample_within_sites(subset, rng)
+            resampled = self._resample_within_sites(subset, rng, cluster_columns=cluster_columns)
             boot_values.append(self._compute_escalation_ratio(resampled))
             del resampled
             if i % 50 == 49:
@@ -1054,10 +1088,15 @@ class CascadeValidationAnalyzer:
             result[np.concatenate(episode_groups)] = np.repeat(episode_labels, sizes)
         return pd.Series(result, index=values.index)
 
-    def _resample_within_sites(self, subset: pd.DataFrame, rng: np.random.Generator) -> pd.DataFrame:
+    def _resample_within_sites(
+        self,
+        subset: pd.DataFrame,
+        rng: np.random.Generator,
+        cluster_columns: tuple[str, ...] | None = None,
+    ) -> pd.DataFrame:
         episode_key_columns = [
             column
-            for column in self._settings.gold.episode_key_columns
+            for column in (cluster_columns or self._settings.gold.episode_key_columns)
             if column in subset.columns
         ]
         if subset.empty:

@@ -5,19 +5,48 @@ from __future__ import annotations
 import csv
 import json
 import math
+from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 
 from amr_cascade_platform.core.config.config_models import Settings
 from amr_cascade_platform.core.logging.logger_factory import LoggerFactory
 from amr_cascade_platform.core.paths.path_manager import PathManager
 from amr_cascade_platform.core.utils.scopes import scoped_output_dir
+from amr_cascade_platform.core.utils.text import safe_feature_name
 from amr_cascade_platform.cascade.outputs.cascade_comparison_builder import CascadeComparisonBuilder
 from amr_cascade_platform.cascade.statistics.cascade_covariate_builder import CascadeCovariateBuilder
 from amr_cascade_platform.infrastructure.storage.dataset_store import DatasetStore
+from amr_cascade_platform.reporting.builders import descriptive_summaries
 from amr_cascade_platform.reporting.builders.covariate_correlation_builder import CovariateCorrelationBuilder
 from amr_cascade_platform.visualization.report.antibiotic_classification import AntibioticClassificationResolver
+
+
+@dataclass(frozen=True)
+class AnalysisFrames:
+    """Lean per-scope frames shared by the descriptive tables (see descriptive_summaries)."""
+
+    episodes: pd.DataFrame
+    opportunities: pd.DataFrame
+    results: pd.DataFrame
+
+    @property
+    def empty(self) -> bool:
+        return self.episodes.empty or self.opportunities.empty
+
+
+_OPPORTUNITY_COLUMNS = [
+    "availability_era",
+    "antibiotic",
+    "is_intrinsic_resistance",
+    "is_operationally_available",
+    "is_eligible",
+    "is_observed_tested",
+    "availability_support_n",
+]
 
 
 class ManuscriptTableBuilder:
@@ -33,6 +62,75 @@ class ManuscriptTableBuilder:
         )
         self._cascade_covariates = CascadeCovariateBuilder(settings, path_manager)
         self._covariate_correlation_builder = CovariateCorrelationBuilder(settings)
+        # One report run asks for the same scope's covariates and gold frames from
+        # several tables; the covariate build reads every per-patient source table,
+        # so it is done once per scope rather than once per table.
+        self._covariate_cache: dict[tuple[str, str | None, str | None], pd.DataFrame] = {}
+        self._frames_cache: dict[tuple[str, str | None, str | None], AnalysisFrames] = {}
+
+    def _episode_covariates(
+        self, scope: str, site: str | None, organism: str | None, culture_episodes: pd.DataFrame
+    ) -> pd.DataFrame:
+        """CascadeCovariateBuilder's output for this scope's culture episodes, built once per run."""
+        key = (scope, site, organism)
+        if key not in self._covariate_cache:
+            self._covariate_cache[key] = self._cascade_covariates.build(culture_episodes)
+        return self._covariate_cache[key]
+
+    def culture_episodes_with_covariates(self, scope: str, site: str | None, culture_episodes: pd.DataFrame, organism: str | None = None) -> pd.DataFrame:
+        """culture_episodes with the adjusted model's episode covariates (cov_*) joined on the episode key."""
+        if culture_episodes.empty:
+            return culture_episodes
+        covariates = self._episode_covariates(scope, site, organism, culture_episodes)
+        episode_keys = [column for column in self._settings.gold.episode_key_columns if column in culture_episodes.columns]
+        if covariates.empty or not episode_keys:
+            return culture_episodes
+        covariates = covariates.drop(columns=[c for c in covariates.columns if c in culture_episodes.columns and c not in episode_keys])
+        return culture_episodes.merge(covariates.drop_duplicates(episode_keys), on=episode_keys, how="left", validate="many_to_one")
+
+    def analysis_frames(self, scope: str, site: str | None, organism: str | None = None) -> AnalysisFrames:
+        """Episodes, eligibility-grid rows and observed results for one scope, keyed by an episode id.
+
+        The gold tables share the episode key columns; replacing them with one
+        integer id here keeps the 10M-row eligibility grid small in memory and
+        lets every descriptive table join on the same key.
+        """
+        key = (scope, site, organism)
+        if key in self._frames_cache:
+            return self._frames_cache[key]
+        episode_keys = list(self._settings.gold.episode_key_columns)
+        gold_dir = scoped_output_dir(self._paths.paths.gold, scope, site=site, organism=organism)
+        culture = self._safe_read(gold_dir / "culture_episodes.parquet")
+        eligible = self._safe_read(gold_dir / "eligible_pairs.parquet", columns=episode_keys + _OPPORTUNITY_COLUMNS)
+        results = self._safe_read(gold_dir / "culture_drug_episodes.parquet", columns=episode_keys + ["antibiotic", "susceptibility"])
+        if culture.empty or eligible.empty:
+            frames = AnalysisFrames(pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
+            self._frames_cache[key] = frames
+            return frames
+        episodes = culture.drop_duplicates(episode_keys).reset_index(drop=True)
+        episodes["episode_id"] = np.arange(len(episodes), dtype="int64")
+        time_column = self._settings.gold.eligibility.availability_time_column
+        episodes["episode_time"] = (
+            pd.to_datetime(episodes[time_column], errors="coerce", format="mixed", utc=True)
+            if time_column in episodes.columns
+            else pd.Series(pd.NaT, index=episodes.index, dtype="datetime64[ns, UTC]")
+        )
+        description = episodes["culture_description"] if "culture_description" in episodes.columns else pd.Series(pd.NA, index=episodes.index)
+        episodes["specimen_group"] = descriptive_summaries.specimen_group(description.map(CascadeCovariateBuilder._specimen_type_category))
+        index = episodes.loc[:, episode_keys + ["episode_id"]]
+        opportunities = eligible.merge(index, on=episode_keys, how="left", validate="many_to_one")
+        unmatched = int(opportunities["episode_id"].isna().sum())
+        if unmatched:
+            raise ValueError(f"{unmatched:,} eligibility rows have no culture episode in {gold_dir}; the gold tables are from different builds.")
+        opportunities = opportunities.drop(columns=[column for column in episode_keys if column != "source_site"])
+        results = results.merge(index, on=episode_keys, how="inner", validate="many_to_one").loc[:, ["episode_id", "antibiotic", "susceptibility"]]
+        frames = AnalysisFrames(
+            episodes=episodes.loc[:, ["episode_id", "source_site", "anon_id", "episode_time", "specimen_group"]],
+            opportunities=opportunities,
+            results=results,
+        )
+        self._frames_cache[key] = frames
+        return frames
 
     def build_provenance_table(self, scope: str, site: str | None, organism: str | None = None) -> pd.DataFrame:
         sites = self._resolve_sites(scope, site)
@@ -81,9 +179,14 @@ class ManuscriptTableBuilder:
         # Same _site_row_count-only usage as build_provenance_table above -- project
         # just source_site to avoid materializing the full tables.
         combined_culture = self._safe_read(combined_gold_dir / "culture_episodes.parquet", columns=["source_site"])
-        combined_observed = self._safe_read(combined_gold_dir / "culture_drug_episodes.parquet", columns=["source_site"])
+        # One row per distinct observed episode x antibiotic: antibiotic-name normalisation can leave
+        # two rows for one result (or conflicting results), which the eligibility grid counts once.
+        combined_observed = self._observed_episode_drugs(combined_gold_dir / "culture_drug_episodes.parquet")
         combined_eligible = self._safe_read(combined_gold_dir / "eligible_pairs.parquet", columns=["source_site", "is_eligible"])
-        combined_pairs = self._safe_read(combined_gold_dir / "drug_pair_episodes.parquet", columns=["source_site", "downstream_eligible"])
+        combined_pairs = self._safe_read(
+            combined_gold_dir / "drug_pair_episodes.parquet",
+            columns=["source_site", "downstream_eligible", "upstream_susceptibility"],
+        )
 
         for current_site in sites:
             raw_dir = self._paths.paths.raw / current_site
@@ -91,7 +194,11 @@ class ManuscriptTableBuilder:
             raw_ast_rows = self._count_csv_rows(cohort_candidates[0]) if cohort_candidates else 0
             site_gold_dir = scoped_output_dir(self._paths.paths.gold, "site", site=current_site, organism=organism)
             culture_n = self._site_row_count(combined_culture, "source_site", current_site, site_gold_dir / "culture_episodes.parquet")
-            observed_n = self._site_row_count(combined_observed, "source_site", current_site, site_gold_dir / "culture_drug_episodes.parquet")
+            observed_n = (
+                int((combined_observed["source_site"] == current_site).sum())
+                if not combined_observed.empty
+                else len(self._observed_episode_drugs(site_gold_dir / "culture_drug_episodes.parquet"))
+            )
             # "eligible_episode_drug_rows"/"eligible_directed_pair_rows" must mean
             # is_eligible/downstream_eligible == 1 (see _site_eligible_row_count) --
             # both source files are written unfiltered, so a plain row count here
@@ -100,6 +207,9 @@ class ManuscriptTableBuilder:
             # contradicted build_eligibility_table's eligible_rows for the same data.
             eligible_n = self._site_eligible_row_count(combined_eligible, "source_site", "is_eligible", current_site, site_gold_dir / "eligible_pairs.parquet")
             pair_n = self._site_eligible_row_count(combined_pairs, "source_site", "downstream_eligible", current_site, site_gold_dir / "drug_pair_episodes.parquet")
+            # The resistant-versus-susceptible contrast uses only these rows; rows with an
+            # intermediate upstream result stay in the pair table for the co-testing screen.
+            binary_pair_n = self._site_binary_upstream_pair_count(combined_pairs, current_site, site_gold_dir / "drug_pair_episodes.parquet")
             rows.extend(
                 [
                     {"site": current_site, "stage": "raw_ast_rows", "row_count": raw_ast_rows},
@@ -107,31 +217,26 @@ class ManuscriptTableBuilder:
                     {"site": current_site, "stage": "observed_episode_drug_rows", "row_count": observed_n},
                     {"site": current_site, "stage": "eligible_episode_drug_rows", "row_count": eligible_n},
                     {"site": current_site, "stage": "eligible_directed_pair_rows", "row_count": pair_n},
+                    {"site": current_site, "stage": "binary_upstream_pair_rows", "row_count": binary_pair_n},
                 ]
             )
         return pd.DataFrame(rows)
 
     def build_eligibility_table(self, scope: str, site: str | None, organism: str | None = None) -> pd.DataFrame:
-        eligible_pairs = self._load_scope_gold(scope, site, filename="eligible_pairs.parquet", organism=organism)
-        if eligible_pairs.empty:
+        """Table B: the episode x antibiotic grid split into intrinsic, not available, eligible observed and unobserved.
+
+        See descriptive_summaries.opportunity_space. The unobserved eligible
+        rows are counted within the eligible category: an intrinsic drug can
+        carry a recorded result, so subtracting all observed rows from the
+        eligible rows would undercount them.
+        """
+        frames = self.analysis_frames(scope, site, organism)
+        if frames.empty:
             return pd.DataFrame()
-        grouped = (
-            eligible_pairs.groupby("source_site", observed=True)
-            .agg(
-                total_episode_drug_rows=("antibiotic", "size"),
-                eligible_rows=("is_eligible", "sum"),
-                structural_omission_rows=("is_intrinsic_resistance", "sum"),
-                observed_tested_rows=("is_observed_tested", "sum"),
-            )
-            .reset_index()
-            .rename(columns={"source_site": "site"})
-        )
-        grouped["unobserved_but_eligible_rows"] = (
-            grouped["eligible_rows"] - grouped["observed_tested_rows"]
-        )
-        grouped["intrinsic_reference_file"] = self._settings.platform.reference_files["intrinsic_resistance"]
-        grouped["canonical_map_file"] = self._settings.platform.reference_files["canonical_table_map"]
-        return grouped
+        table = descriptive_summaries.opportunity_space(frames.opportunities, self._resolve_sites(scope, site))
+        table["intrinsic_reference_file"] = self._settings.platform.reference_files["intrinsic_resistance"]
+        table["canonical_map_file"] = self._settings.platform.reference_files["canonical_table_map"]
+        return table
 
     def build_episode_audit_table(self, scope: str, site: str | None, organism: str | None = None) -> pd.DataFrame:
         """Patients, encounters, culture orders, and culture episodes per site.
@@ -167,65 +272,92 @@ class ManuscriptTableBuilder:
             })
         return pd.DataFrame(rows)
 
-    def build_cohort_characteristics_table(self, scope: str, site: str | None, organism: str | None = None) -> pd.DataFrame:
-        """Episode-level cohort characteristics (age, care setting, specimen, comorbidity burden, prior exposure).
+    def build_cohort_characteristics_tables(
+        self, scope: str, site: str | None, organism: str | None = None
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """Table V: the adjusted model's episode-level covariates by site, with how often each was not evaluable.
 
-        Reads ``model_ready_pair_features.parquet`` -- built for the adjusted
-        cascade models, one row per (episode, upstream drug, downstream drug)
-        pair -- and de-duplicates to one row per episode before summarising,
-        since every demographic/clinical column is constant within an episode
-        across its pair-rows. This is a real gap the platform's own figures
-        never surfaced: the covariates already computed for adjustment were
-        never reported as a descriptive cohort table.
-
-        Sex/gender is deliberately excluded: ``demo_gender_female``,
-        ``demo_gender_male``, and ``demo_gender_category`` are constant
-        (0/0/0) for every episode in the archived run checked while building
-        this method, with ``demo_gender_unknown`` universally 1 -- a feature-
-        join defect upstream of this table, not a real 100%-unknown cohort.
-        Re-add it once that join is fixed; do not report it as-is.
+        Built from CascadeCovariateBuilder -- the covariates the adjusted models
+        actually use -- over every culture episode of the analysis set, not
+        from the prediction feature table. Returns the long table (counts,
+        denominators, shares, quartiles) and the display table.
         """
-        organism_slug = organism.lower().replace(" ", "_") if organism else ""
-        base = self._paths.paths.features / (site if scope == "site" and site else "combined")
-        feature_path = base / "organisms" / organism_slug / "model_ready_pair_features.parquet"
-        columns = [
-            "anon_id", "pat_enc_csn_id_coded", "order_proc_id_coded", "source_site",
-            "demo_age", "ward_hosp_ward_ip", "ward_hosp_ward_op", "ward_hosp_ward_er", "ward_hosp_ward_icu",
-            "comorbidity_count", "history_abx_any_90d", "history_abx_available",
-            "culture_description",
-        ]
-        pair_features = self._safe_read(feature_path, columns=columns)
-        if pair_features.empty:
+        culture_episodes = self._load_scope_gold(scope, site, filename="culture_episodes.parquet", organism=organism)
+        if culture_episodes.empty:
+            return pd.DataFrame(), pd.DataFrame()
+        covariates = self._episode_covariates(scope, site, organism, culture_episodes)
+        if covariates.empty:
+            return pd.DataFrame(), pd.DataFrame()
+        return descriptive_summaries.cohort_characteristics(
+            covariates, self._resolve_sites(scope, site), self._settings.gold.eligibility.availability_era_years
+        )
+
+    def build_cohort_characteristics_table(self, scope: str, site: str | None, organism: str | None = None) -> pd.DataFrame:
+        """The display form of build_cohort_characteristics_tables."""
+        return self.build_cohort_characteristics_tables(scope, site, organism)[1]
+
+    def build_availability_exposure_tables(
+        self, scope: str, site: str | None, organism: str | None = None
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """Eligible opportunities resting on thin or out-of-window availability evidence (summary, strata)."""
+        frames = self.analysis_frames(scope, site, organism)
+        if frames.empty:
+            return pd.DataFrame(), pd.DataFrame()
+        return descriptive_summaries.availability_exposure(
+            frames.opportunities, frames.episodes, self._resolve_sites(scope, site), self._settings.reporting.thin_availability_support
+        )
+
+    def build_panel_breadth_tables(self, scope: str, site: str | None, organism: str | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """Antibiotics observed and eligible per culture episode (summary, distribution)."""
+        frames = self.analysis_frames(scope, site, organism)
+        if frames.empty:
+            return pd.DataFrame(), pd.DataFrame()
+        return descriptive_summaries.panel_breadth(frames.opportunities, frames.episodes, self._resolve_sites(scope, site))
+
+    def build_coverage_by_era_table(self, availability_table: pd.DataFrame, scope: str, site: str | None) -> pd.DataFrame:
+        """Observed share of the eligible space per scope and era, pooled and per antibiotic (from table U)."""
+        return descriptive_summaries.coverage_by_era(availability_table, self._resolve_sites(scope, site), self._classification)
+
+    def build_antibiogram_table(self, scope: str, site: str | None, organism: str | None = None) -> pd.DataFrame:
+        """Observed S/I/R per antibiotic and scope, with a first-isolate-per-patient-year column."""
+        frames = self.analysis_frames(scope, site, organism)
+        if frames.empty or frames.results.empty:
             return pd.DataFrame()
-        episodes = pair_features.drop_duplicates(subset=["anon_id", "pat_enc_csn_id_coded", "order_proc_id_coded"])
-        n = len(episodes)
-        if n == 0:
+        return descriptive_summaries.antibiogram(
+            frames.results, frames.episodes, self._resolve_sites(scope, site), self._classification,
+            self._settings.reporting.antibiogram_min_tested,
+        )
+
+    def build_episodes_per_patient_table(self, scope: str, site: str | None, organism: str | None = None) -> pd.DataFrame:
+        """Culture episodes per patient, by scope."""
+        frames = self.analysis_frames(scope, site, organism)
+        if frames.episodes.empty:
             return pd.DataFrame()
+        return descriptive_summaries.episodes_per_patient(frames.episodes, self._resolve_sites(scope, site))
 
-        def pct(mask: pd.Series) -> float:
-            return round(100.0 * float(mask.sum()) / n, 1)
+    def build_exclusion_flow_table(
+        self, scope: str, site: str | None, organism: str | None, flow_table: pd.DataFrame
+    ) -> tuple[pd.DataFrame, list[str]]:
+        """Every AST row from the source extract to the observed results, by exclusion reason.
 
-        age_q1, age_med, age_q3 = episodes["demo_age"].quantile([0.25, 0.5, 0.75])
-        como_q1, como_med, como_q3 = episodes["comorbidity_count"].quantile([0.25, 0.5, 0.75])
-        specimen_counts = episodes["culture_description"].value_counts()
-        evaluable_abx = episodes.loc[episodes["history_abx_available"] == 1, "history_abx_any_90d"]
-
-        rows = [
-            {"characteristic": "Episodes, N", "value": f"{n:,}"},
-            {"characteristic": "Age (years), median [IQR]", "value": f"{age_med:.0f} [{age_q1:.0f}\u2013{age_q3:.0f}]"},
-            {"characteristic": "Care setting: inpatient, N (%)", "value": f"{int(episodes['ward_hosp_ward_ip'].sum()):,} ({pct(episodes['ward_hosp_ward_ip'] == 1)})"},
-            {"characteristic": "Care setting: outpatient, N (%)", "value": f"{int(episodes['ward_hosp_ward_op'].sum()):,} ({pct(episodes['ward_hosp_ward_op'] == 1)})"},
-            {"characteristic": "Care setting: emergency department, N (%)", "value": f"{int(episodes['ward_hosp_ward_er'].sum()):,} ({pct(episodes['ward_hosp_ward_er'] == 1)})"},
-            {"characteristic": "Care setting: ICU, N (%)", "value": f"{int(episodes['ward_hosp_ward_icu'].sum()):,} ({pct(episodes['ward_hosp_ward_icu'] == 1)})"},
-            {"characteristic": "Specimen: urine, N (%)", "value": f"{int(specimen_counts.get('URINE', 0)):,} ({pct(episodes['culture_description'] == 'URINE')})"},
-            {"characteristic": "Specimen: blood, N (%)", "value": f"{int(specimen_counts.get('BLOOD', 0)):,} ({pct(episodes['culture_description'] == 'BLOOD')})"},
-            {"characteristic": "Specimen: respiratory, N (%)", "value": f"{int(specimen_counts.get('RESPIRATORY', 0)):,} ({pct(episodes['culture_description'] == 'RESPIRATORY')})"},
-            {"characteristic": "Comorbidity count, median [IQR]", "value": f"{como_med:.0f} [{como_q1:.0f}\u2013{como_q3:.0f}]"},
-            {"characteristic": "Prior antibiotic exposure (90d), N (%) of evaluable", "value": (
-                f"{int(evaluable_abx.sum()):,} ({round(100.0 * evaluable_abx.mean(), 1) if len(evaluable_abx) else float('nan')})"
-            )},
-        ]
-        return pd.DataFrame(rows)
+        Combines the source extract's row count (the row-flow table), the silver
+        cohort cleaning metadata and the gold build's observation ledger.
+        Returns the long table and any reconciliation failures.
+        """
+        suffix = site if scope == "site" and site else "combined"
+        if organism:
+            suffix = f"{suffix}__{safe_feature_name(organism)}"
+        metadata = self._read_json(self._paths.paths.metadata / "datasets" / "gold" / f"gold_build_{suffix}.json")
+        ledger = metadata.get("observation_ledger")
+        if not ledger:
+            return pd.DataFrame(), ["the gold build metadata has no observation_ledger; rebuild the gold layer"]
+        raw_rows: dict[str, int] = {}
+        if not flow_table.empty:
+            raw = flow_table.loc[flow_table["stage"].eq("raw_ast_rows")]
+            raw_rows = {str(row.site): int(row.row_count) for row in raw.itertuples(index=False)}
+        sites = self._resolve_sites(scope, site)
+        cleaning = {current: self._read_silver_metadata(current, "cohort") for current in sites}
+        return descriptive_summaries.exclusion_flow(ledger, raw_rows, cleaning, sites)
 
     def build_operational_availability_table(self, scope: str, site: str | None, organism: str | None = None) -> pd.DataFrame:
         """Site x era x antibiotic operational-availability grid.
@@ -264,7 +396,7 @@ class ManuscriptTableBuilder:
         if culture_episodes.empty or eligible_pairs.empty:
             return pd.DataFrame()
 
-        covariates = self._cascade_covariates.build(culture_episodes)
+        covariates = self._episode_covariates(scope, site, organism, culture_episodes)
         if covariates.empty:
             return pd.DataFrame()
 
@@ -289,7 +421,7 @@ class ManuscriptTableBuilder:
             ("cov_er_available", "Emergency-department data available"),
             ("cov_prior_abx_any_90d", "Any prior antibiotic exposure (90d)"),
             ("cov_prior_abx_available", "Prior antibiotic data available"),
-            ("cov_prior_same_organism_any_90d", "Prior same-organism history (90d)"),
+            ("cov_prior_same_organism_any_90d", "Prior same-genus infection (90d)"),
             ("cov_prior_organism_available", "Prior organism-history data available"),
             ("cov_comorbidity_available", "Comorbidity data available"),
             ("cov_adi_available", "ADI data available"),
@@ -413,7 +545,6 @@ class ManuscriptTableBuilder:
             "cov_ordering_mode",
             "cov_specimen_type",
             "cov_calendar_year",
-            "cov_calendar_month",
             "cov_age_bin",
             "cov_sex",
             "cov_icu_status",
@@ -450,7 +581,7 @@ class ManuscriptTableBuilder:
             if column in culture_episodes.columns and column not in episode_keys
         ]
         base = culture_episodes.loc[:, episode_keys + direct_context_columns].drop_duplicates().copy()
-        covariates = self._cascade_covariates.build(culture_episodes)
+        covariates = self._episode_covariates(scope, site, organism, culture_episodes)
         if not covariates.empty:
             overlapping_columns = [column for column in covariates.columns if column in base.columns and column not in episode_keys]
             if overlapping_columns:
@@ -540,8 +671,9 @@ class ManuscriptTableBuilder:
             "conf_strength",
             "conf_strength_ci",
             "total_support",
-            "permutation_p_value",
-            "permutation_fdr_q_value",
+            "permutation_p_two_sided",
+            "permutation_q_two_sided",
+            "permutation_p_one_sided",
             "bootstrap_sign_stability",
             "site_replication_n",
             "site_direction_agreement_rate",
@@ -573,8 +705,9 @@ class ManuscriptTableBuilder:
             "adjusted_or_e_value",
             "adjusted_or_ci_e_value",
             "total_support_n",
+            "permutation_p_value_two_sided",
+            "permutation_fdr_q_value_two_sided",
             "permutation_p_value",
-            "permutation_fdr_q_value",
             "bootstrap_sign_stability",
             "site_replication_n",
             "site_direction_agreement_rate",
@@ -592,6 +725,9 @@ class ManuscriptTableBuilder:
                 "adjusted_or_e_value": "conf_strength",
                 "adjusted_or_ci_e_value": "conf_strength_ci",
                 "total_support_n": "total_support",
+                "permutation_p_value_two_sided": "permutation_p_two_sided",
+                "permutation_fdr_q_value_two_sided": "permutation_q_two_sided",
+                "permutation_p_value": "permutation_p_one_sided",
             }
         )
         validation_rank = {"robust": 0, "supported": 1, "mixed": 2, "insufficient": 3}
@@ -1364,6 +1500,15 @@ class ManuscriptTableBuilder:
         )
         return annotated
 
+    def _observed_episode_drugs(self, path: Path) -> pd.DataFrame:
+        """``source_site`` of each distinct observed episode x antibiotic (every row when the keys are absent)."""
+        if not path.exists():
+            return pd.DataFrame()
+        columns = list(dict.fromkeys([*self._settings.gold.episode_key_columns, "antibiotic"]))
+        if set(columns) <= set(pq.read_schema(path).names):
+            return self._dataset_store.read_pandas(path, columns=columns).drop_duplicates().loc[:, ["source_site"]]
+        return self._dataset_store.read_pandas(path, columns=["source_site"])
+
     def _site_row_count(
         self,
         dataframe: pd.DataFrame,
@@ -1402,6 +1547,18 @@ class ManuscriptTableBuilder:
         if fallback.empty or eligibility_column not in fallback.columns:
             return len(fallback)
         return int((fallback[eligibility_column] == 1).sum())
+
+    def _site_binary_upstream_pair_count(self, pairs: pd.DataFrame, site: str, fallback_path: Path) -> int:
+        """Downstream-eligible pair rows whose upstream result is resistant or susceptible."""
+        columns = ["source_site", "downstream_eligible", "upstream_susceptibility"]
+        if pairs.empty or not set(columns) <= set(pairs.columns):
+            pairs = self._safe_read(fallback_path, columns=columns[1:])
+            if pairs.empty:
+                return 0
+        else:
+            pairs = pairs.loc[pairs["source_site"] == site]
+        binary = {self._settings.cascade.upstream_result_positive, self._settings.cascade.upstream_result_negative}
+        return int((pairs["downstream_eligible"].eq(1) & pairs["upstream_susceptibility"].isin(binary)).sum())
 
     @staticmethod
     def _edge_presence_label(row: pd.Series) -> str:

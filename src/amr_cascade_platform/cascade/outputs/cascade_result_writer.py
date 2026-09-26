@@ -27,6 +27,7 @@ class CascadeResultWriter:
         dependence_results: pd.DataFrame,
         rule_concordance: pd.DataFrame,
         cotesting_pairs: pd.DataFrame,
+        cotesting_probabilities: pd.DataFrame,
         output_dir: Path,
     ) -> dict[str, Path]:
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -39,6 +40,7 @@ class CascadeResultWriter:
             "dependence_results": output_dir / "dependence_results.parquet",
             "rule_concordance": output_dir / "rule_concordance.parquet",
             "cotesting_pairs": output_dir / "cotesting_pairs.parquet",
+            "cotesting_probabilities": output_dir / "cotesting_probabilities.parquet",
             "summary": output_dir / self._settings.cascade.outputs.summary_filename,
         }
         conditional_probabilities.to_parquet(outputs["conditional_probabilities"], index=False)
@@ -49,6 +51,7 @@ class CascadeResultWriter:
         dependence_results.to_parquet(outputs["dependence_results"], index=False)
         rule_concordance.to_parquet(outputs["rule_concordance"], index=False)
         cotesting_pairs.to_parquet(outputs["cotesting_pairs"], index=False)
+        cotesting_probabilities.to_parquet(outputs["cotesting_probabilities"], index=False)
 
         summary = {
             "generated_at_utc": datetime.now(UTC).isoformat(),
@@ -65,6 +68,7 @@ class CascadeResultWriter:
                 "dependence_results": len(dependence_results),
                 "rule_concordance": len(rule_concordance),
                 "cotesting_pairs": len(cotesting_pairs),
+                "cotesting_probabilities": len(cotesting_probabilities),
             },
         }
         with outputs["summary"].open("w", encoding="utf-8") as handle:

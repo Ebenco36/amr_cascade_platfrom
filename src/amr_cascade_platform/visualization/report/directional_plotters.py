@@ -139,11 +139,14 @@ class DirectionalSankeyPlotter:
             },
             xaxis={"visible": False}, yaxis={"visible": False},
             legend={"orientation": "h", "x": 0.5, "xanchor": "center", "y": -0.02},
-            margin={"l": 30, "r": 30, "t": 200, "b": 50}, font={"size": 13, "family": "Arial"},
+            margin={"l": 30, "r": 30, "t": 150, "b": 50}, font={"size": 13, "family": "Arial"},
             paper_bgcolor="white", plot_bgcolor="white",
         )
-        fig.add_annotation(text="<b>Upstream drug (resistant result)</b>", x=0.0, y=1.14, xref="paper", yref="paper", showarrow=False, xanchor="left", font={"size": 12, "color": "#475467"})
-        fig.add_annotation(text="<b>Downstream drug (observed?)</b>", x=1.0, y=1.14, xref="paper", yref="paper", showarrow=False, xanchor="right", font={"size": 12, "color": "#475467"})
+        # Column headers sit just above the diagram (a pixel offset, clear of the
+        # top node's label), not at a fraction of its height above it.
+        for text, x, anchor in (("<b>Upstream drug (resistant result)</b>", 0.0, "left"), ("<b>Downstream drug (observed?)</b>", 1.0, "right")):
+            fig.add_annotation(text=text, x=x, y=1.0, xref="paper", yref="paper", showarrow=False, xanchor=anchor, yanchor="bottom",
+                               yshift=12, font={"size": 12, "color": "#475467"})
         return self._exporter.write(fig, output_stem, formats)
 
 
@@ -363,17 +366,17 @@ class DirectionalForestPlotter:
     ) -> dict[str, Path]:
         style = DIRECTION_STYLE[direction]
         pool = dv.with_effect_columns(edges.loc[edges.direction == direction]).copy()
-        # A forest plot's whole point is estimate *with* uncertainty. Ranking by
-        # |log2 ER| alone lets the sparsest, most extreme pairs -- exactly the ones
-        # whose CI is not estimable -- dominate the "strongest effects" list with a
-        # lone point and no error bar. Prefer pairs with an estimable CI first, and
-        # only fill remaining slots with CI-less pairs once those run out.
-        lo_all = pd.to_numeric(pool.get("er_ci_lower"), errors="coerce")
-        hi_all = pd.to_numeric(pool.get("er_ci_upper"), errors="coerce")
-        pool["_has_ci"] = lo_all.notna() & hi_all.notna() & (lo_all > 0) & (hi_all > 0)
+        # Pairs with no downstream observation in one branch have an ER set by the continuity correction: rank them last.
+        tested = pool[["resistant_tested_n", "susceptible_tested_n"]].apply(pd.to_numeric, errors="coerce")
+        pool["_both_branches_observed"] = tested.gt(0).all(axis=1)
+        bound = pd.to_numeric(pool["er_ci_lower" if direction == dv.ESCALATION else "er_ci_upper"], errors="coerce")
+        signed = np.log2(bound.where(bound > 0))
+        pool["_rank"] = (signed if direction == dv.ESCALATION else -signed).fillna(-np.inf)
         data = pool.sort_values(
-            ["_has_ci", "effect_magnitude", "total_support_n"], ascending=[False, False, False], kind="mergesort"
-        ).head(top_n).drop(columns="_has_ci").reset_index(drop=True)
+            ["_both_branches_observed", "_rank", "effect_magnitude", "total_support_n"],
+            ascending=[False, False, False, False],
+            kind="mergesort",
+        ).head(top_n).drop(columns=["_both_branches_observed", "_rank"]).reset_index(drop=True)
         n = len(data)
         if n == 0:
             fig = go.Figure()
@@ -487,14 +490,18 @@ class DirectionalForestPlotter:
             fig.add_annotation(x=0.5, y=y_pos[i], xref="x3", yref="y3", text=adj_text,
                                 showarrow=False, xanchor="center", font={"size": 13, "color": "#0F172A"}, row=1, col=3)
 
-        fig.add_annotation(x=0.015, y=n - 0.05, xref="x1", yref="y1", text="<b>Upstream → downstream</b>",
+        fig.add_annotation(x=0.015, y=n - 0.35, xref="x1", yref="y1", text="<b>Upstream → downstream</b>",
                             showarrow=False, xanchor="left", yanchor="bottom", font={"size": 12, "color": "#0F172A"}, row=1, col=1)
-        fig.add_annotation(x=0.985, y=n - 0.05, xref="x1", yref="y1", text="<b>Episode–pair rows</b>",
+        fig.add_annotation(x=0.985, y=n - 0.35, xref="x1", yref="y1", text="<b>Episode–pair rows</b>",
                             showarrow=False, xanchor="right", yanchor="bottom", font={"size": 12, "color": "#0F172A"}, row=1, col=1)
-        fig.add_annotation(x=0.5, y=n - 0.05, xref="x3", yref="y3", text="<b>Adj. OR</b>",
+        fig.add_annotation(x=0.5, y=n - 0.35, xref="x3", yref="y3", text="<b>Adj. OR</b>",
                             showarrow=False, xanchor="center", yanchor="bottom", font={"size": 12, "color": "#0F172A"}, row=1, col=3)
 
-        ticks = [t for t in (0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 1, 1.5, 2, 3, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000) if x_lo <= t <= x_hi]
+        wide_axis = math.log10(x_hi / x_lo) > 1.5
+        ticks = [
+            t for t in (0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 1, 1.5, 2, 3, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000)
+            if x_lo <= t <= x_hi and not (wide_axis and t in (0.7, 1.5))
+        ]
         fig.add_vline(x=1.0, line={"color": "#B91C1C", "dash": "dash", "width": 1.6}, opacity=0.85, row=1, col=2)
         fig.add_trace(
             go.Scatter(x=[None], y=[None], mode="lines", line={"color": "#B91C1C", "dash": "dash", "width": 1.6}, name="ER = 1 (no effect)", hoverinfo="skip"),
@@ -511,9 +518,9 @@ class DirectionalForestPlotter:
             tickfont={"size": 12}, gridcolor="#E2E8F0", showline=True, linecolor="#CBD5E1", zeroline=False,
             row=1, col=2,
         )
-        fig.update_yaxes(visible=False, range=[-0.8, n - 0.2], row=1, col=1)
-        fig.update_yaxes(visible=False, range=[-0.8, n - 0.2], row=1, col=2)
-        fig.update_yaxes(visible=False, range=[-0.8, n - 0.2], row=1, col=3)
+        fig.update_yaxes(visible=False, range=[-0.8, n + 0.35], row=1, col=1)
+        fig.update_yaxes(visible=False, range=[-0.8, n + 0.35], row=1, col=2)
+        fig.update_yaxes(visible=False, range=[-0.8, n + 0.35], row=1, col=3)
         fig.update_layout(
             template=self._template,
             width=2450, height=height,
@@ -521,7 +528,7 @@ class DirectionalForestPlotter:
                 "text": (
                     f"<b style='color:{style['hue']}'>{style['title']} patterns ({style['rule']})</b> — {TIER_TITLE[tier]}: strongest {n} of {n_direction}"
                     f"<br><sup>Point = ER; bar = 95% CI (log-scale, continuity-corrected). ◆ robust, ■ supported.</sup>"
-                    f"<br><sup>Marker colour = downstream drug's AWaRe tier. Ranked by |log2 ER|, largest effect first.</sup>"
+                    f"<br><sup>Marker colour = downstream drug's AWaRe tier. Ranked by the {'lower' if direction == dv.ESCALATION else 'upper'} 95% CI limit, most conservative effect first.</sup>"
                 ),
                 "x": 0.5, "xanchor": "center", "font": {"size": 16},
             },
@@ -531,9 +538,11 @@ class DirectionalForestPlotter:
             annotations=list(fig.layout.annotations) + [
                 {
                     "text": "n/e = adjusted OR not estimable (separation or sparse cells).<br>"
-                            "n.e. = ER's own CI not estimable (an upstream branch has no downstream-observed rows).<br>"
-                            "Pairs with an estimable CI are ranked first.",
-                    "showarrow": False, "x": 0.0, "y": -0.32, "xref": "paper", "yref": "paper",
+                            "Pairs with no downstream-observed episode in one upstream branch are ranked after all others:<br>"
+                            "their ER is set by the continuity correction rather than estimated from both branches.",
+                    # A fixed pixel offset under the axis title, not a fraction of the
+                    # (row-count dependent) plot height below it.
+                    "showarrow": False, "x": 0.0, "y": 0.0, "yshift": -64, "xref": "paper", "yref": "paper",
                     "xanchor": "left", "yanchor": "top", "align": "left", "font": {"size": 10.5, "color": "#475467"},
                 }
             ],

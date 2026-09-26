@@ -194,7 +194,7 @@ class PlotlyValidationDiagnosticsPlotter:
                 + " → "
                 + sub["downstream_antibiotic"].fillna("?")
             )
-            pvals = pd.to_numeric(sub.get("permutation_p_value", pd.Series(dtype=float)), errors="coerce")
+            pvals = pd.to_numeric(sub.get("permutation_p_value_two_sided", pd.Series(dtype=float)), errors="coerce")
             show_legend = status not in seen_statuses
             seen_statuses.add(status)
             fig.add_trace(
@@ -222,7 +222,7 @@ class PlotlyValidationDiagnosticsPlotter:
                         "Observed ER: %{customdata[1]}<br>"
                         "Null boundary ER: %{customdata[2]}<br>"
                         "Direction: %{customdata[3]}<br>"
-                        "Permutation p: %{customdata[4]}<extra></extra>"
+                        "Two-sided permutation p: %{customdata[4]}<extra></extra>"
                     ),
                 ),
                 row=1, col=1,

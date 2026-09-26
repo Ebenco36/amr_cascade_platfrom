@@ -7,6 +7,16 @@ import pandas as pd
 from amr_cascade_platform.core.config.config_models import Settings
 
 
+_PAIR_PROBABILITY_COLUMNS = [
+    "upstream_antibiotic",
+    "downstream_antibiotic",
+    "p_downstream_given_upstream",
+    "p_upstream_given_downstream",
+    "support_n",
+    "reverse_support_n",
+]
+
+
 class CoTestingFilterAnalyzer:
     """Remove symmetric high-probability co-testing pairs that are unlikely to reflect escalation."""
 
@@ -14,23 +24,23 @@ class CoTestingFilterAnalyzer:
         self._settings = settings
 
     def filter(self, drug_pairs: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+        filtered, flagged, _ = self.filter_with_probabilities(drug_pairs)
+        return filtered, flagged
+
+    def filter_with_probabilities(self, drug_pairs: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        """Also return the co-observation probabilities of every ordered pair with eligible rows.
+
+        The reverse-direction columns are empty for a pair whose reverse direction has no
+        downstream-eligible rows; such a pair cannot meet the screen's two-sided rule.
+        """
         if drug_pairs.empty or not self._settings.cascade.filter_symmetric_cotesting:
-            return drug_pairs.copy(), pd.DataFrame(
-                columns=[
-                    "upstream_antibiotic",
-                    "downstream_antibiotic",
-                    "p_downstream_given_upstream",
-                    "p_upstream_given_downstream",
-                    "support_n",
-                    "reverse_support_n",
-                ]
-            )
+            return drug_pairs.copy(), pd.DataFrame(columns=_PAIR_PROBABILITY_COLUMNS), self._empty_assessed()
 
         frame = drug_pairs.copy()
         if self._settings.cascade.require_downstream_eligible and "downstream_eligible" in frame.columns:
             frame = frame.loc[frame["downstream_eligible"] == 1].copy()
         if frame.empty:
-            return drug_pairs.copy(), pd.DataFrame()
+            return drug_pairs.copy(), pd.DataFrame(), self._empty_assessed()
 
         pair_probabilities = (
             frame.groupby(["upstream_antibiotic", "downstream_antibiotic"], dropna=False, observed=True)
@@ -48,21 +58,22 @@ class CoTestingFilterAnalyzer:
                 "support_n": "reverse_support_n",
             }
         )
-        flagged = pair_probabilities.merge(
+        assessed = pair_probabilities.merge(
             reverse,
             on=["upstream_antibiotic", "downstream_antibiotic"],
-            how="inner",
+            how="left",
         )
         threshold = self._settings.cascade.cotesting_probability_threshold
         min_support = self._settings.cascade.min_total_support
-        flagged = flagged.loc[
-            flagged["p_downstream_given_upstream"].ge(threshold)
-            & flagged["p_upstream_given_downstream"].ge(threshold)
-            & flagged["support_n"].ge(min_support)
-            & flagged["reverse_support_n"].ge(min_support)
-        ].copy()
+        assessed["flagged"] = (
+            assessed["p_downstream_given_upstream"].ge(threshold)
+            & assessed["p_upstream_given_downstream"].ge(threshold)
+            & assessed["support_n"].ge(min_support)
+            & assessed["reverse_support_n"].ge(min_support)
+        )
+        flagged = assessed.loc[assessed["flagged"]].drop(columns="flagged").copy()
         if flagged.empty:
-            return drug_pairs.copy(), flagged
+            return drug_pairs.copy(), flagged, assessed
 
         filtered = drug_pairs.merge(
             flagged.loc[:, ["upstream_antibiotic", "downstream_antibiotic"]],
@@ -82,4 +93,8 @@ class CoTestingFilterAnalyzer:
         for column in ("upstream_antibiotic", "downstream_antibiotic"):
             if column in drug_pairs.columns and isinstance(drug_pairs[column].dtype, pd.CategoricalDtype):
                 filtered[column] = filtered[column].astype(drug_pairs[column].dtype)
-        return filtered, flagged.reset_index(drop=True)
+        return filtered, flagged.reset_index(drop=True), assessed
+
+    @staticmethod
+    def _empty_assessed() -> pd.DataFrame:
+        return pd.DataFrame(columns=[*_PAIR_PROBABILITY_COLUMNS, "flagged"])

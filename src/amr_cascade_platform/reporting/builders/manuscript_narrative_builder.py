@@ -258,7 +258,7 @@ class ManuscriptNarrativeBuilder:
                 "Primary retained edges are based on directly observed AST only. "
                 "n_R and n_S denote resistant and susceptible upstream support counts within the eligible denominator. "
                 "The escalation ratio is the unadjusted descriptive effect measure, while adjusted OR is estimated separately from a logistic downstream-testing model. "
-                "Current adjusted models include organism, source site, ICU status, prior antibiotic exposure within 90 days, calendar year/month, age bin, sex, prior same-organism infection within 90 days, and comorbidity count, with availability indicators where needed."
+                "Adjusted models include source site, specimen type, ordering context, emergency-department presentation, ICU status, prior antibiotic exposure within 90 days, calendar year, age band, sex, prior infection with the same genus within 90 days, comorbidity burden, area deprivation index, nursing-home residence within 90 days, and prior procedures within 90 days, with availability indicators where source information is partial."
             ),
             "table_d_concordance_summary.csv": (
                 "Concordance summarizes alignment between empirical retained edges and structural eligibility logic. "

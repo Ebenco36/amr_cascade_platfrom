@@ -117,3 +117,31 @@ def test_history_feature_builder_excludes_post_culture_history_rows(tmp_path: Pa
     assert int(row["history_prior_organism_count"]) == 1
     assert float(row["history_prior_organism_min_days"]) == 30.0
     assert int(row["history_prior_same_organism_any_30d"]) == 1
+
+
+def test_history_prior_same_organism_uses_the_genus_level_prior_extract(tmp_path: Path) -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    settings = ConfigLoader(project_root).load("mac")
+    paths = PathManager(tmp_path, settings)
+    site_dir = paths.paths.harmonized / "site_aligned" / "armd"
+    site_dir.mkdir(parents=True, exist_ok=True)
+    episodes = [
+        {"anon_id": f"p{i}", "pat_enc_csn_id_coded": f"e{i}", "order_proc_id_coded": f"o{i}",
+         "order_time_jittered": "2024-03-15T10:00:00Z", "source_site": "armd", "organism": "ESCHERICHIA COLI"}
+        for i in (1, 2)
+    ]
+    pd.DataFrame(
+        [
+            {**episodes[0], "prior_organism": "Escherichia", "prior_infecting_organism_days_to_culture": 12},
+            {**episodes[1], "prior_organism": "Proteus", "prior_infecting_organism_days_to_culture": 12},
+        ]
+    ).to_parquet(site_dir / "prior_infecting_organism.parquet", index=False)
+
+    def load_site_table(site: str, table: str) -> pd.DataFrame:
+        path = site_dir / f"{table}.parquet"
+        return pd.read_parquet(path) if path.exists() else pd.DataFrame()
+
+    result = HistoryFeatureBuilder(settings).build(pd.DataFrame(episodes), load_site_table).set_index("anon_id")
+
+    assert result["history_prior_same_organism_any_30d"].astype(int).to_dict() == {"p1": 1, "p2": 0}
+    assert result["history_prior_organism_any_30d"].astype(int).to_dict() == {"p1": 1, "p2": 1}

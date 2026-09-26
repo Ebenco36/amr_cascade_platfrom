@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import math
 import os
 import re
@@ -17,35 +16,8 @@ import plotly.io as pio
 from matplotlib import patches
 from matplotlib import pyplot as plt
 
-# Every static export (PDF into a ~6.5in LaTeX column, or PNG viewed at anything
-# but 1:1) shrinks a figure authored at a screen-oriented canvas (typically
-# width=1600) down to a small fraction of its native size -- text authored to
-# read well on that canvas becomes illegible once shrunk. Scaling every font
-# up before static export, while leaving the interactive HTML export (which
-# the viewer can zoom) untouched, fixes this once for every Plotly figure in
-# the platform instead of hand-tuning fontsize= in each of the ~25 plotters.
-PRINT_FONT_SCALE = 2.6
-
-
-def _scale_font_sizes(node: object, parent_key: str | None, factor: float) -> None:
-    """Recursively multiply every Plotly font-object ``size`` value in place.
-
-    Plotly names every font-bearing key with "font" somewhere in it (font,
-    tickfont, textfont, hoverlabel.font, title.font, ...), so gating on the
-    immediate parent key containing "font" finds every title/axis/legend/
-    annotation/colorbar/trace font reliably without also touching unrelated
-    "size" keys such as marker.size or a Scatter trace's own size array.
-    """
-    if isinstance(node, dict):
-        if parent_key and "font" in parent_key.lower():
-            size = node.get("size")
-            if isinstance(size, (int, float)):
-                node["size"] = size * factor
-        for key, value in node.items():
-            _scale_font_sizes(value, key, factor)
-    elif isinstance(node, list):
-        for item in node:
-            _scale_font_sizes(item, parent_key, factor)
+# PRINT_FONT_SCALE is re-exported: print-geometry plotters size their marks with it.
+from amr_cascade_platform.visualization.report.plotly_print import PRINT_FONT_SCALE, prepare_for_print  # noqa: F401
 
 
 class PlotlyFigureExporter:
@@ -56,25 +28,13 @@ class PlotlyFigureExporter:
         self._height = height
 
     @staticmethod
-    def _print_scaled(figure: go.Figure) -> go.Figure:
-        """A deep copy of *figure* with every font enlarged for static export.
+    def _print_scaled(figure: go.Figure, width: int, height: int) -> go.Figure:
+        """A print-ready copy of *figure*: text enlarged and the layout repaired around it.
 
-        Also grows the layout margin proportionally: a title/legend/axis-title
-        area sized to fit the ORIGINAL (small) font overlaps its neighbours the
-        moment that font is scaled up, so margin has to scale with it rather
-        than stay fixed. Generous margins are harmless (blank space); tight
-        ones are exactly the collision this whole fix exists to prevent.
+        See plotly_print.prepare_for_print. The copy carries its own (possibly
+        grown) canvas size, which the static export must use.
         """
-        scaled = copy.deepcopy(figure.to_plotly_json())
-        layout = scaled.get("layout", {})
-        _scale_font_sizes(layout, None, PRINT_FONT_SCALE)
-        _scale_font_sizes(scaled.get("data", []), None, PRINT_FONT_SCALE)
-        margin = layout.get("margin")
-        if isinstance(margin, dict):
-            for side in ("t", "b", "l", "r"):
-                if isinstance(margin.get(side), (int, float)):
-                    margin[side] = margin[side] * PRINT_FONT_SCALE
-        return go.Figure(scaled)
+        return go.Figure(prepare_for_print(figure.to_plotly_json(), width, height))
 
     def write(
         self,
@@ -98,8 +58,10 @@ class PlotlyFigureExporter:
             else:
                 try:
                     if print_figure is None:
-                        print_figure = self._print_scaled(figure)
-                    print_figure.write_image(path, format=fmt, width=width, height=height, scale=2)
+                        print_figure = self._print_scaled(figure, width, height)
+                    print_figure.write_image(
+                        path, format=fmt, width=int(print_figure.layout.width), height=int(print_figure.layout.height), scale=2
+                    )
                 except Exception as exc:
                     if static_fallback is None:
                         self.write_matplotlib_static_fallback(figure, path, fmt, width=width, height=height)

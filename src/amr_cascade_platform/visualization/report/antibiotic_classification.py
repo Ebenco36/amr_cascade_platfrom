@@ -266,23 +266,8 @@ class AntibioticClassificationResolver:
                 "abbreviation": abbreviation,
                 "reference_labels": reference_labels,
             }
-            labels = [
-                row.get("Abbreviation"),
-                row.get("Antibiotic Name"),
-                row.get("Antibiotic Name German"),
-                row.get("Full Name"),
-            ]
-            for label in labels:
-                if label is None or pd.isna(label):
-                    continue
-                normalized = self.normalize_label(str(label))
-                if normalized:
-                    lookup[normalized] = payload
-                if " - " in str(label):
-                    trailing = str(label).split(" - ", maxsplit=1)[-1]
-                    normalized_trailing = self.normalize_label(trailing)
-                    if normalized_trailing:
-                        lookup[normalized_trailing] = payload
+            for normalized in self._row_label_keys(row):
+                lookup[normalized] = payload
             # Register display_label itself so re-resolution of already-canonicalized
             # names (e.g. after _canonicalize_pair_table) still resolves correctly.
             display_normalized = self.normalize_label(display_label)
@@ -296,6 +281,27 @@ class AntibioticClassificationResolver:
                 canonical_payload["reference_labels"] = tuple(sorted(labels))
                 lookup[alias] = canonical_payload
         return lookup
+
+    @classmethod
+    def _row_label_keys(cls, row: pd.Series) -> list[str]:
+        """Normalized spellings under which one reference row can be looked up."""
+        keys: list[str] = []
+        for label in (row.get("Abbreviation"), row.get("Antibiotic Name"), row.get("Antibiotic Name German"), row.get("Full Name")):
+            if label is None or pd.isna(label):
+                continue
+            candidates = [str(label)]
+            if " - " in str(label):
+                candidates.append(str(label).split(" - ", maxsplit=1)[-1])
+            keys.extend(normalized for normalized in map(cls.normalize_label, candidates) if normalized)
+        return list(dict.fromkeys(keys))
+
+    def reference_label_owners(self) -> dict[str, set[int]]:
+        """Every normalized reference spelling and the reference rows that claim it."""
+        owners: dict[str, set[int]] = {}
+        for index, row in pd.read_csv(self._classification_path).iterrows():
+            for key in self._row_label_keys(row):
+                owners.setdefault(key, set()).add(int(index))
+        return owners
 
     def _reference_labels(
         self,

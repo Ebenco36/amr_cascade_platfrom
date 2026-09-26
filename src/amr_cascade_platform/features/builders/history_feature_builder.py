@@ -7,7 +7,7 @@ from typing import Callable
 import pandas as pd
 
 from amr_cascade_platform.core.config.config_models import Settings
-from amr_cascade_platform.core.utils.text import normalize_label
+from amr_cascade_platform.core.utils.organism_names import organism_genus
 
 
 class HistoryFeatureBuilder:
@@ -138,12 +138,13 @@ class HistoryFeatureBuilder:
             how="left",
             validate="many_to_one",
         )
-        table["prior_organism_normalized"] = table["prior_organism"].map(normalize_label)
-        table["episode_organism_normalized"] = table["organism"].map(normalize_label)
+        # The prior-infection extracts record genus ("Escherichia", "CONS") and episodes
+        # record species ("ESCHERICHIA COLI"), so same-organism history is matched at
+        # genus level; comparing the labels directly would never match.
+        table["prior_genus"] = table["prior_organism"].map(organism_genus)
+        table["episode_genus"] = table["organism"].map(organism_genus)
         table["same_organism"] = (
-            table["prior_organism_normalized"].notna()
-            & table["episode_organism_normalized"].notna()
-            & (table["prior_organism_normalized"] == table["episode_organism_normalized"])
+            table["prior_genus"].ne("") & table["prior_genus"].eq(table["episode_genus"])
         ).astype(int)
         grouped = table.groupby(join_keys, dropna=False)
         result = grouped.agg(

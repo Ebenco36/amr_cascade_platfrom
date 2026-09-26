@@ -144,6 +144,8 @@ class ConfigLoader:
                     culture_episode_columns=tuple(raw["gold"]["culture_episode_columns"]),
                     culture_drug_columns=tuple(raw["gold"]["culture_drug_columns"]),
                     testing_matrix_prefix=raw["gold"]["testing_matrix_prefix"],
+                    observed_result_values=tuple(raw["gold"]["observed_result_values"]),
+                    excluded_assay_labels=tuple(raw["gold"]["excluded_assay_labels"]),
                     eligibility=EligibilityConfig(**raw["gold"]["eligibility"]),
                 ),
                 cascade=CascadeConfig(
@@ -183,6 +185,12 @@ class ConfigLoader:
                     plotly_template=raw["reporting"]["plotly_template"],
                     image_width=raw["reporting"]["image_width"],
                     image_height=raw["reporting"]["image_height"],
+                    thin_availability_support=int(raw["reporting"].get("thin_availability_support", 5)),
+                    antibiogram_min_tested=int(raw["reporting"].get("antibiogram_min_tested", 30)),
+                    availability_sensitivity_environments=tuple(
+                        (str(label), str(environment))
+                        for label, environment in (raw["reporting"].get("availability_sensitivity_environments") or {}).items()
+                    ),
                 ),
                 feature_build=FeatureBuildConfig(
                     combined_output_filename=raw["features"]["combined_output_filename"],

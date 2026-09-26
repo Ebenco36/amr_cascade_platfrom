@@ -1,0 +1,43 @@
+# End-to-end test environment on the synthetic replica of data/raw built by
+# scripts/create_raw_replica_dataset.py (run it first; then
+# bash scripts/run_replica_end_to_end.sh). Every analysis setting is the
+# production one from configs/base; only these differ:
+#   - data_root test_replica, with raw processing allowed: the replica is
+#     synthetic, so the local raw-data guard does not apply;
+#   - 200 permutation and bootstrap iterations (production: 1000), so a full
+#     run fits on a laptop;
+#   - bronze ingestion switches to dask above 0.5 MB (production: 25 MB), so the
+#     replica's larger files take the same partitioned path the full-size
+#     extracts take on the cluster;
+#   - comorbidity pre-aggregation and silver feature sources are separate
+#     stages, as on the cluster (hpc.yaml);
+#   - reports go under test_replica/outputs, never the project's outputs/.
+environment:
+  name: test_replica
+  data_root: test_replica
+  execution_mode: local
+  default_data_layer: raw
+  allow_raw_processing: true
+
+ingestion:
+  csv_read:
+    use_dask_threshold_mb: 0.5
+    dask_blocksize: 4MB
+
+features:
+  auto_build_comorbidity: false
+  auto_prepare_silver_feature_sources: false
+
+cascade:
+  validation:
+    permutation_iterations: 200
+    bootstrap_iterations: 200
+
+reporting:
+  tables_dir: test_replica/outputs/tables
+  figures_dir: test_replica/outputs/figures
+  reports_dir: test_replica/outputs/reports
+  availability_sensitivity_environments:
+    support_5: test_replica_availability_sensitivity
+    one_year_era: test_replica_availability_annual_sensitivity
+    joint: test_replica_availability_joint_sensitivity

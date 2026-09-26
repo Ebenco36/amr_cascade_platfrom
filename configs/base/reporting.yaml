@@ -44,7 +44,18 @@ reporting:
     - cross_site_concordance
     - consort_diagram
     - operational_availability_suite
+    - observation_coverage
+    - descriptive_summaries
     # - dataset_characterization   # opt-in: reads the full drug_pair_episodes.parquet (100M+ rows combined scope) -- ran this platform out of memory in local testing; request with --figure dataset_characterization on a machine with headroom, not as part of the default run
   plotly_template: plotly_white
   image_width: 1600
   image_height: 900
+  # Eligible opportunities in site-era strata with fewer observed results than this
+  # are counted as resting on thin availability evidence; 5 is the stricter
+  # availability sensitivity's minimum (gold.eligibility.availability_min_observed).
+  thin_availability_support: 5
+  # CLSI M39: percentages from fewer than 30 tested isolates are marked, not relied on.
+  antibiogram_min_tested: 30
+  # Availability-denominator sensitivity runs the supplement compares with this run
+  # (label -> environment). Set per environment; empty means none were run.
+  availability_sensitivity_environments: {}

@@ -217,3 +217,49 @@ class TestBootstrapSignStability:
         # ER = 1.0 → positive_effect = True → fraction ≥ 1.0
         # boot = [0.9, 1.0, 1.1] → 2 of 3 ≥ 1.0  →  2/3
         assert abs(_sign_stability(1.0, [0.9, 1.0, 1.1]) - 2.0 / 3.0) < 1e-12
+
+
+# ── patient-cluster bootstrap (Supplementary Table S7) ─────────────────────────
+
+
+def _patients_with_repeat_episodes() -> pd.DataFrame:
+    """Two sites; each patient contributes 1-4 episodes, one pair row per episode."""
+    rows = []
+    for site in ("A", "B"):
+        for patient in range(6):
+            for episode in range(1 + patient % 4):
+                rows.append({
+                    "source_site": site,
+                    "anon_id": f"{site}-p{patient}",
+                    "pat_enc_csn_id_coded": f"{site}-p{patient}-e{episode}",
+                    "order_proc_id_coded": f"{site}-p{patient}-o{episode}",
+                    "upstream_result_group": "positive" if patient < 3 else "negative",
+                    "downstream_tested": 1 if patient < 3 else 0,
+                })
+    return pd.DataFrame(rows)
+
+
+class TestPatientClusterBootstrap:
+    def test_patients_are_resampled_whole_within_their_site(self) -> None:
+        az = _analyzer()
+        subset = _patients_with_repeat_episodes()
+        rows_per_patient = subset.groupby("anon_id").size()
+        rng = np.random.default_rng(3)
+        for _ in range(20):
+            resampled = az._resample_within_sites(subset, rng, cluster_columns=("anon_id",))
+            drawn = resampled.groupby("anon_id").size()
+            assert (drawn % rows_per_patient.loc[drawn.index]).eq(0).all()
+            for site in ("A", "B"):
+                assert resampled.loc[resampled["source_site"] == site, "anon_id"].str.startswith(site).all()
+                n_patients = subset.loc[subset["source_site"] == site, "anon_id"].nunique()
+                assert (drawn[drawn.index.str.startswith(site)] / rows_per_patient.loc[drawn.index[drawn.index.str.startswith(site)]]).sum() == n_patients
+
+    def test_summary_reports_patient_and_row_counts_and_stability(self) -> None:
+        az = _analyzer()
+        subset = _patients_with_repeat_episodes()
+
+        result = az.patient_cluster_bootstrap_summary(subset, observed_er=5.0, upstream_antibiotic="U", downstream_antibiotic="D")
+
+        assert result["n_rows"] == len(subset)
+        assert result["n_patients"] == 12
+        assert result["patient_bootstrap_sign_stability"] == 1.0

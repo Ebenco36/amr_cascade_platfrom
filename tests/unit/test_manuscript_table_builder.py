@@ -577,15 +577,20 @@ def test_data_quality_flow_table_reports_eligible_not_total_rows() -> None:
     pd.DataFrame(
         {"source_site": ["site_a"] * 4, "is_eligible": [1, 1, 1, 0]}
     ).to_parquet(combined_gold_dir / "eligible_pairs.parquet", index=False)
-    # 6 rows for site_a: only 2 are eligible.
+    # 6 rows for site_a: only 2 are eligible, and one of those has an intermediate upstream result.
     pd.DataFrame(
-        {"source_site": ["site_a"] * 6, "downstream_eligible": [1, 1, 0, 0, 0, 0]}
+        {
+            "source_site": ["site_a"] * 6,
+            "downstream_eligible": [1, 1, 0, 0, 0, 0],
+            "upstream_susceptibility": ["RESISTANT", "INTERMEDIATE", "SUSCEPTIBLE", "RESISTANT", "SUSCEPTIBLE", "RESISTANT"],
+        }
     ).to_parquet(combined_gold_dir / "drug_pair_episodes.parquet", index=False)
 
     table = builder.build_data_quality_flow_table("site", "site_a", organism)
     rows = table.set_index("stage")["row_count"]
     assert int(rows["eligible_episode_drug_rows"]) == 3
     assert int(rows["eligible_directed_pair_rows"]) == 2
+    assert int(rows["binary_upstream_pair_rows"]) == 1
 
 
 def test_upstream_selection_balance_table_summarizes_tested_vs_untested_groups(tmp_path: Path) -> None:
@@ -776,43 +781,41 @@ def test_operational_availability_table_groups_to_one_row_per_site_era_drug() ->
     assert row["observed_n"] == 1
 
 
-def test_cohort_characteristics_table_deduplicates_pair_rows_to_one_row_per_episode() -> None:
-    """model_ready_pair_features.parquet is one row per (episode, upstream
-
-    drug, downstream drug) pair; every demographic/clinical column is constant
-    within an episode across its pair-rows, so summarising without first
-    de-duplicating on the episode key would count one real episode several
-    times over -- once per pair it happens to participate in.
-    """
+def test_validated_primary_cascade_table_reports_the_governing_two_sided_evidence(tmp_path: Path) -> None:
     project_root = Path(__file__).resolve().parents[2]
     settings = ConfigLoader(project_root).load("mac")
     path_manager = PathManager(project_root, settings)
     builder = ManuscriptTableBuilder(settings, path_manager)
-
-    organism = "unit_test_cohort_characteristics"
-    features_dir = path_manager.paths.features / "combined" / "organisms" / organism
-    features_dir.mkdir(parents=True, exist_ok=True)
-    # One real episode (E1) appears twice, as two different drug pairs; one
-    # more (E2). A naive row count would see 3 "episodes" instead of 2.
+    artifact_dir = (
+        path_manager.paths.artifacts
+        / settings.cascade.outputs.result_dir
+        / "combined"
+        / "organisms"
+        / "unit_test_two_sided"
+    )
+    artifact_dir.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(
-        {
-            "anon_id": ["P1", "P1", "P2"],
-            "pat_enc_csn_id_coded": ["E1", "E1", "E2"],
-            "order_proc_id_coded": ["O1", "O1", "O2"],
-            "source_site": ["armd", "armd", "armd"],
-            "demo_age": [60.0, 60.0, 40.0],
-            "ward_hosp_ward_ip": [1, 1, 0],
-            "ward_hosp_ward_op": [0, 0, 1],
-            "ward_hosp_ward_er": [0, 0, 0],
-            "ward_hosp_ward_icu": [0, 0, 0],
-            "comorbidity_count": [5, 5, 2],
-            "history_abx_any_90d": [1, 1, 0],
-            "history_abx_available": [1, 1, 1],
-            "culture_description": ["URINE", "URINE", "BLOOD"],
-        }
-    ).to_parquet(features_dir / "model_ready_pair_features.parquet", index=False)
+        [
+            {
+                "upstream_antibiotic": "A",
+                "downstream_antibiotic": "B",
+                "positive_support_n": 10,
+                "negative_support_n": 20,
+                "positive_probability": 0.4,
+                "negative_probability": 0.1,
+                "escalation_ratio": 4.0,
+                "adjusted_odds_ratio": 2.0,
+                "total_support_n": 30,
+                "validation_status": "robust",
+                "permutation_p_value": 0.004,
+                "permutation_p_value_two_sided": 0.008,
+                "permutation_fdr_q_value_two_sided": 0.03,
+            }
+        ]
+    ).to_parquet(artifact_dir / "edge_report.parquet", index=False)
 
-    table = builder.build_cohort_characteristics_table("combined", None, organism)
-    rows = table.set_index("characteristic")["value"]
-    assert rows["Episodes, N"] == "2"
-    assert rows["Age (years), median [IQR]"] == "50 [45–55]"
+    row = builder.build_validated_primary_cascade_table("combined", None, "unit_test_two_sided").iloc[0]
+
+    assert row["permutation_q_two_sided"] == 0.03
+    assert row["permutation_p_two_sided"] == 0.008
+    assert row["permutation_p_one_sided"] == 0.004

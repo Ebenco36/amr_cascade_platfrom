@@ -121,7 +121,7 @@ class CascadeAnalysisWorkflow:
         # eligible_pairs is intentionally not loaded here: DownstreamTestingRegression.analyze()
         # never needed it -- it builds its own covariates from culture_episodes. Loading the
         # full multi-million-row file just to discard it would waste tens of GB of peak memory.
-        filtered_pairs, cotesting_pairs = self._cotesting_filter.filter(drug_pairs)
+        filtered_pairs, cotesting_pairs, cotesting_probabilities = self._cotesting_filter.filter_with_probabilities(drug_pairs)
         del drug_pairs
         gc.collect()
         _log_stage("cotesting_filter", start_time)
@@ -194,6 +194,7 @@ class CascadeAnalysisWorkflow:
             dependence_results=dependence_results,
             rule_concordance=rule_concordance,
             cotesting_pairs=cotesting_pairs,
+            cotesting_probabilities=cotesting_probabilities,
             output_dir=output_dir,
         )
         _log_stage("result_writer", start_time)

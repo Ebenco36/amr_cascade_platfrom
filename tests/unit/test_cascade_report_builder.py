@@ -1,6 +1,8 @@
+import math
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from amr_cascade_platform.cascade.outputs.cascade_report_builder import CascadeReportBuilder
 
@@ -251,3 +253,68 @@ def test_report_builder_preserves_cascade_direction_after_validation_merge(tmp_p
     assert "cascade_direction_x" not in edge_report.columns
     assert "cascade_direction_y" not in edge_report.columns
     assert edge_report.iloc[0]["cascade_direction"] == "escalation"
+
+
+def _retained_edge(**overrides: object) -> pd.DataFrame:
+    row = {
+        "upstream_antibiotic": "A",
+        "downstream_antibiotic": "B",
+        "escalation_ratio": 2.0,
+        "adjusted_odds_ratio": 1.5,
+        "total_support_n": 50,
+        "positive_probability": 0.6,
+        "negative_probability": 0.3,
+        "positive_support_n": 20,
+        "negative_support_n": 30,
+        "positive_tested_n": 12,
+        "negative_tested_n": 9,
+        "passes_support_threshold": True,
+        "is_retained_edge": True,
+    }
+    row.update(overrides)
+    return pd.DataFrame([row])
+
+
+def test_er_confidence_interval_is_reported_when_one_branch_has_no_downstream_observations(tmp_path: Path) -> None:
+    escalation_ratio = (4.5 / 21) / (0.5 / 31)
+    retained_edges = _retained_edge(
+        escalation_ratio=escalation_ratio,
+        positive_tested_n=4,
+        negative_tested_n=0,
+        positive_probability=0.2,
+        negative_probability=0.0,
+    )
+
+    outputs = CascadeReportBuilder().export(retained_edges, pd.DataFrame(), tmp_path)
+    row = pd.read_parquet(outputs["edge_report_path"]).iloc[0]
+
+    se = (1 / 4.5 - 1 / 21 + 1 / 0.5 - 1 / 31) ** 0.5
+    assert row["er_ci_lower"] == pytest.approx(escalation_ratio * math.exp(-1.96 * se))
+    assert row["er_ci_upper"] == pytest.approx(escalation_ratio * math.exp(1.96 * se))
+
+
+def test_edge_report_carries_the_two_sided_permutation_evidence_that_governs_labels(tmp_path: Path) -> None:
+    validation_results = pd.DataFrame(
+        [
+            {
+                "upstream_antibiotic": "A",
+                "downstream_antibiotic": "B",
+                "permutation_p_value": 0.01,
+                "permutation_fdr_q_value": 0.02,
+                "permutation_fdr_supported": True,
+                "permutation_p_value_two_sided": 0.03,
+                "permutation_fdr_q_value_two_sided": 0.04,
+                "permutation_fdr_supported_two_sided": True,
+                "validation_status": "robust",
+            }
+        ]
+    )
+
+    outputs = CascadeReportBuilder().export(
+        _retained_edge(), pd.DataFrame(), tmp_path, validation_results=validation_results
+    )
+    row = pd.read_parquet(outputs["edge_report_path"]).iloc[0]
+
+    assert row["permutation_p_value_two_sided"] == 0.03
+    assert row["permutation_fdr_q_value_two_sided"] == 0.04
+    assert bool(row["permutation_fdr_supported_two_sided"]) is True

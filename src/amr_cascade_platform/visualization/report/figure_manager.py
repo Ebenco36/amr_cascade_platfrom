@@ -44,8 +44,14 @@ from amr_cascade_platform.visualization.report.plotly_validation_funnel_plotter 
 from amr_cascade_platform.visualization.report.plotly_panel_bundling_plotter import PlotlyPanelBundlingPlotter
 from amr_cascade_platform.visualization.report.plotly_temporal_stability_plotter import PlotlyTemporalStabilityPlotter
 from amr_cascade_platform.visualization.report.plotly_cross_site_concordance_plotter import PlotlyCrossSiteConcordancePlotter
+from amr_cascade_platform.visualization.report.cohort_rules import CohortRules
 from amr_cascade_platform.visualization.report.plotly_consort_plotter import PlotlyConsortPlotter
 from amr_cascade_platform.visualization.report.plotly_dataset_characterization_plotter import DatasetCharacterizationPlotter
+from amr_cascade_platform.visualization.report.plotly_observation_coverage_plotter import (
+    PlotlyObservationCoveragePlotter,
+    observation_coverage_table,
+)
+from amr_cascade_platform.visualization.report.plotly_descriptive_plotters import PlotlyDescriptivePlotter
 
 
 class FigureManager:
@@ -185,6 +191,7 @@ class FigureManager:
             template=settings.reporting.plotly_template,
             width=settings.reporting.image_width,
             height=settings.reporting.image_height,
+            rules=CohortRules.from_settings(settings),
         )
         self._temporal_stability_plotter = PlotlyTemporalStabilityPlotter(
             exporter=exporter,
@@ -203,7 +210,16 @@ class FigureManager:
             template=settings.reporting.plotly_template,
             width=settings.reporting.image_width,
             height=settings.reporting.image_height,
+            rules=CohortRules.from_settings(settings),
         )
+        self._observation_coverage_plotter = PlotlyObservationCoveragePlotter(
+            exporter=exporter, template=settings.reporting.plotly_template,
+        )
+        self._descriptive_plotter = PlotlyDescriptivePlotter(
+            exporter=exporter, template=settings.reporting.plotly_template,
+            min_tested=settings.reporting.antibiogram_min_tested,
+        )
+        self._sites = tuple(settings.platform.sites)
         self._dataset_characterization_plotter = DatasetCharacterizationPlotter(
             exporter=exporter,
             template=settings.reporting.plotly_template,
@@ -450,9 +466,13 @@ class FigureManager:
         return self._validation_funnel_plotter.export(edge_report, output_stem, formats)
 
     def export_panel_bundling(
-        self, edge_report: pd.DataFrame, output_stem: Path, formats: tuple[str, ...]
+        self,
+        cotesting_probabilities: pd.DataFrame,
+        edge_report: pd.DataFrame,
+        output_stem: Path,
+        formats: tuple[str, ...],
     ) -> dict[str, Path]:
-        return self._panel_bundling_plotter.export(edge_report, output_stem, formats)
+        return self._panel_bundling_plotter.export(cotesting_probabilities, edge_report, output_stem, formats)
 
     def export_temporal_stability(
         self, edge_report: pd.DataFrame, output_stem: Path, formats: tuple[str, ...]
@@ -470,8 +490,62 @@ class FigureManager:
         edge_report: pd.DataFrame,
         output_stem: Path,
         formats: tuple[str, ...],
+        *,
+        escalation_results: pd.DataFrame | None = None,
+        cotesting_pairs: pd.DataFrame | None = None,
     ) -> dict[str, Path]:
-        return self._consort_plotter.export(flow_table, edge_report, output_stem, formats)
+        return self._consort_plotter.export(
+            flow_table,
+            edge_report,
+            output_stem,
+            formats,
+            escalation_results=escalation_results,
+            cotesting_pairs=cotesting_pairs,
+        )
+
+    # ── Observation coverage of the eligible opportunity space ────────────────
+
+    def observation_coverage_table(self, eligible_pairs: pd.DataFrame) -> pd.DataFrame:
+        """Eligible and observed episode-drug opportunities per antibiotic, by site and for all sites."""
+        return observation_coverage_table(eligible_pairs, self._classification, self._sites)
+
+    def export_observation_coverage(
+        self, coverage: pd.DataFrame, output_stem: Path, formats: tuple[str, ...],
+    ) -> dict[str, Path]:
+        """Two-panel layout: totals by site, then per antibiotic with one marker per site."""
+        return self._observation_coverage_plotter.export(coverage, output_stem, formats)
+
+    def export_observation_coverage_by_site(
+        self, coverage: pd.DataFrame, output_stem: Path, formats: tuple[str, ...],
+    ) -> dict[str, Path]:
+        """Small multiples: one column per scope (all sites, then each site)."""
+        return self._observation_coverage_plotter.export_by_site(coverage, output_stem, formats)
+
+    # ── Descriptive summaries of the analysis set ─────────────────────────────
+
+    def export_opportunity_space(
+        self, opportunity_space: pd.DataFrame, output_stem: Path, formats: tuple[str, ...],
+    ) -> dict[str, Path]:
+        """The episode x antibiotic grid per scope: eligible observed / not observed, not available, intrinsic."""
+        return self._descriptive_plotter.export_opportunity_space(opportunity_space, output_stem, formats)
+
+    def export_panel_breadth(
+        self, summary: pd.DataFrame, distribution: pd.DataFrame, output_stem: Path, formats: tuple[str, ...],
+    ) -> dict[str, Path]:
+        """Antibiotics with a result per culture episode, by specimen group and scope."""
+        return self._descriptive_plotter.export_panel_breadth(summary, distribution, output_stem, formats)
+
+    def export_observation_coverage_by_era(
+        self, coverage_by_era: pd.DataFrame, output_stem: Path, formats: tuple[str, ...],
+    ) -> dict[str, Path]:
+        """Observed share of the eligible space per antibiotic and availability era, one heatmap per scope."""
+        return self._descriptive_plotter.export_coverage_by_era(coverage_by_era, output_stem, formats)
+
+    def export_antibiogram(
+        self, antibiogram: pd.DataFrame, output_stem: Path, formats: tuple[str, ...],
+    ) -> dict[str, Path]:
+        """Resistant and intermediate shares among tested episodes, per antibiotic and scope."""
+        return self._descriptive_plotter.export_antibiogram(antibiogram, output_stem, formats)
 
     # ── Dataset characterisation suite ────────────────────────────────────────
 

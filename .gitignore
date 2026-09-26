@@ -119,13 +119,19 @@ database/
 relationship_diagram_for_data.mmd
 # scripts/legacy/
 test_dataset/
+# Synthetic replica of data/raw and its end-to-end runs (scripts/create_raw_replica_dataset.py)
+test_replica/
+test_replica_availability_*/
 test_dataset_large/
 playing.ipynb
 diagnostics/
 paper1_detection_validation/
 paper2_prevalence_surveillance/
+manuscript_edit_log/
 export_archives/
 
 data_availability_annual_sensitivity/
 data_availability_joint_sensitivity/
 data_availability_sensitivity/
+amr_cascade_hpc_outputs_20260906_093614/
+duplicate_keynote_shared.pdf

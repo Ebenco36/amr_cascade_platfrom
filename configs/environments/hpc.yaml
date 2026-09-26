@@ -13,3 +13,12 @@ cascade:
   validation:
     permutation_iterations: 1000
     bootstrap_iterations: 1000
+
+reporting:
+  # The availability-denominator sensitivity runs queued by
+  # scripts/submit_everything_hpc.sh; build_supplementary_tables.py compares
+  # each with this run in the Supplement's availability-sensitivity table.
+  availability_sensitivity_environments:
+    support_5: hpc_availability_sensitivity
+    one_year_era: hpc_availability_annual_sensitivity
+    joint: hpc_availability_joint_sensitivity

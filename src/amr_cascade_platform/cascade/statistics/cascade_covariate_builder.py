@@ -8,7 +8,8 @@ import pandas as pd
 
 from amr_cascade_platform.core.config.config_models import Settings
 from amr_cascade_platform.core.paths.path_manager import PathManager
-from amr_cascade_platform.core.utils.text import normalize_label, safe_feature_name
+from amr_cascade_platform.core.utils.organism_names import organism_genus
+from amr_cascade_platform.core.utils.text import safe_feature_name
 from amr_cascade_platform.features.builders.acute_feature_builder import AcuteFeatureBuilder
 from amr_cascade_platform.features.builders.demographics_feature_builder import DemographicsFeatureBuilder
 from amr_cascade_platform.infrastructure.storage.dataset_store import DatasetStore
@@ -473,12 +474,13 @@ class CascadeCovariateBuilder:
                 how="inner",
                 validate="many_to_many",
             )
-            table["prior_organism_normalized"] = table["prior_organism"].map(normalize_label)
-            table["episode_organism_normalized"] = table["organism"].map(normalize_label)
+            # The prior-infection extracts record genus ("Escherichia", "CONS") and episodes
+            # record species ("ESCHERICHIA COLI"), so same-organism history is matched at
+            # genus level; comparing the labels directly would never match.
+            table["prior_genus"] = table["prior_organism"].map(organism_genus)
+            table["episode_genus"] = table["organism"].map(organism_genus)
             table["same_organism"] = (
-                table["prior_organism_normalized"].notna()
-                & table["episode_organism_normalized"].notna()
-                & table["prior_organism_normalized"].eq(table["episode_organism_normalized"])
+                table["prior_genus"].ne("") & table["prior_genus"].eq(table["episode_genus"])
             ).astype(int)
             grouped = (
                 table.loc[:, episode_keys]

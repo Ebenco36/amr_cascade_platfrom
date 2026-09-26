@@ -5,7 +5,9 @@ cascade:
   continuity_correction: 0.5
   min_total_support: 25
   min_result_support: 5
-  min_total_tested_events_for_retention: 1
+  # A pattern resting on a handful of downstream observations has an escalation ratio set
+  # mostly by the continuity correction, so retention requires as many as each branch needs.
+  min_total_tested_events_for_retention: 5
   sensitivity_min_total_supports:
     - 10
     - 25
@@ -41,7 +43,8 @@ cascade:
     minimum_replicated_sites: 2
     minimum_site_direction_agreement_rate: 0.67
     i_squared_threshold: 50.0
-    between_site_permutation_enabled: true
+    # A diagnostic neither paper reports; set true to compute it.
+    between_site_permutation_enabled: false
   outputs:
     result_dir: cascade
     summary_filename: cascade_summary.json

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -22,6 +23,8 @@ from amr_cascade_platform.surveillance.workflows.prevalence_shift_workflow impor
 from amr_cascade_platform.visualization.report.antibiotic_classification import AntibioticClassificationResolver
 from amr_cascade_platform.visualization.report.figure_manager import FigureManager
 from amr_cascade_platform.infrastructure.storage.dataset_store import DatasetStore
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -100,9 +103,28 @@ class ReportExportWorkflow:
         operational_availability = self._table_builder.build_operational_availability_table(
             request.scope, request.site, request.organism
         )
-        cohort_characteristics = self._table_builder.build_cohort_characteristics_table(
+        cohort_characteristics_long, cohort_characteristics = self._table_builder.build_cohort_characteristics_tables(
             request.scope, request.site, request.organism
         )
+        frames = self._table_builder.analysis_frames(request.scope, request.site, request.organism)
+        # Table W: share of the eligible opportunity space observed, per antibiotic and site.
+        observation_coverage = (
+            self._figure_manager.observation_coverage_table(frames.opportunities) if not frames.empty else pd.DataFrame()
+        )
+        availability_exposure, availability_strata = self._table_builder.build_availability_exposure_tables(
+            request.scope, request.site, request.organism
+        )
+        panel_breadth, panel_breadth_distribution = self._table_builder.build_panel_breadth_tables(
+            request.scope, request.site, request.organism
+        )
+        coverage_by_era = self._table_builder.build_coverage_by_era_table(operational_availability, request.scope, request.site)
+        antibiogram = self._table_builder.build_antibiogram_table(request.scope, request.site, request.organism)
+        episodes_per_patient = self._table_builder.build_episodes_per_patient_table(request.scope, request.site, request.organism)
+        exclusion_flow, exclusion_flow_problems = self._table_builder.build_exclusion_flow_table(
+            request.scope, request.site, request.organism, table_a_flow
+        )
+        for problem in exclusion_flow_problems:
+            logger.warning("Exclusion flow: %s", problem)
 
         table_map = {
             "table_a_provenance.csv": table_a,
@@ -142,6 +164,20 @@ class ReportExportWorkflow:
             table_map["table_u_operational_availability.csv"] = operational_availability
         if not cohort_characteristics.empty:
             table_map["table_v_cohort_characteristics.csv"] = cohort_characteristics
+            table_map["table_v_cohort_characteristics_long.csv"] = cohort_characteristics_long
+        if not observation_coverage.empty:
+            table_map["table_w_observation_coverage.csv"] = observation_coverage
+        descriptive_tables = {
+            "table_a_exclusion_flow.csv": exclusion_flow,
+            "table_t_episodes_per_patient.csv": episodes_per_patient,
+            "table_u_availability_exposure.csv": availability_exposure,
+            "table_u_availability_exposure_strata.csv": availability_strata,
+            "table_w_panel_breadth.csv": panel_breadth,
+            "table_w_panel_breadth_distribution.csv": panel_breadth_distribution,
+            "table_w_observation_coverage_by_era.csv": coverage_by_era,
+            "table_k_antibiogram.csv": antibiogram,
+        }
+        table_map.update({name: frame for name, frame in descriptive_tables.items() if not frame.empty})
         required_schema_tables = {
             "table_c_primary_cascade.csv",
             "table_l_validated_primary_cascade.csv",
@@ -170,6 +206,10 @@ class ReportExportWorkflow:
         )
         edge_report = self._dataset_store.read_pandas(scope_artifact_dir / "edge_report.parquet")
         escalation_results = self._dataset_store.read_pandas(scope_artifact_dir / "escalation_results.parquet")
+        # Written by the cascade step since the co-testing screen began recording every pair it
+        # assessed; older artifact directories lack them and the two figures say so.
+        cotesting_pairs = self._read_if_exists(scope_artifact_dir / "cotesting_pairs.parquet")
+        cotesting_probabilities = self._read_if_exists(scope_artifact_dir / "cotesting_probabilities.parquet")
         threshold_sensitivity = self._dataset_store.read_pandas(scope_artifact_dir / "threshold_sensitivity.parquet")
         pathway_flows = self._dataset_store.read_pandas(scope_artifact_dir / "pathway_flows.parquet")
         retained_edges = self._dataset_store.read_pandas(scope_artifact_dir / "retained_edges.parquet")
@@ -456,6 +496,51 @@ class ReportExportWorkflow:
                         tier=tier,
                     )
                 )
+        if "observation_coverage" in selected_figures and not observation_coverage.empty:
+            figure_exports.update(
+                self._figure_manager.export_observation_coverage(
+                    coverage=observation_coverage,
+                    output_stem=figures_dir / "figure_observation_coverage",
+                    formats=figure_formats,
+                )
+            )
+            figure_exports.update(
+                self._figure_manager.export_observation_coverage_by_site(
+                    coverage=observation_coverage,
+                    output_stem=figures_dir / "figure_observation_coverage_by_site",
+                    formats=figure_formats,
+                )
+            )
+        if "descriptive_summaries" in selected_figures:
+            if not table_b.empty:
+                figure_exports.update(
+                    self._figure_manager.export_opportunity_space(
+                        opportunity_space=table_b, output_stem=figures_dir / "figure_opportunity_space", formats=figure_formats
+                    )
+                )
+            if not panel_breadth_distribution.empty:
+                figure_exports.update(
+                    self._figure_manager.export_panel_breadth(
+                        summary=panel_breadth,
+                        distribution=panel_breadth_distribution,
+                        output_stem=figures_dir / "figure_panel_breadth",
+                        formats=figure_formats,
+                    )
+                )
+            if not coverage_by_era.empty:
+                figure_exports.update(
+                    self._figure_manager.export_observation_coverage_by_era(
+                        coverage_by_era=coverage_by_era,
+                        output_stem=figures_dir / "figure_observation_coverage_by_era",
+                        formats=figure_formats,
+                    )
+                )
+            if not antibiogram.empty:
+                figure_exports.update(
+                    self._figure_manager.export_antibiogram(
+                        antibiogram=antibiogram, output_stem=figures_dir / "figure_antibiogram", formats=figure_formats
+                    )
+                )
         if "operational_availability_suite" in selected_figures and not operational_availability.empty:
             figure_exports.update(
                 self._figure_manager.export_operational_availability_matrix(
@@ -543,9 +628,10 @@ class ReportExportWorkflow:
                     formats=figure_formats,
                 )
             )
-        if "panel_bundling" in selected_figures and not edge_report.empty:
+        if "panel_bundling" in selected_figures and not (edge_report.empty and cotesting_probabilities.empty):
             figure_exports.update(
                 self._figure_manager.export_panel_bundling(
+                    cotesting_probabilities=cotesting_probabilities,
                     edge_report=edge_report,
                     output_stem=figures_dir / "figure_panel_bundling",
                     formats=figure_formats,
@@ -579,6 +665,8 @@ class ReportExportWorkflow:
                     edge_report=edge_report if not edge_report.empty else pd.DataFrame(),
                     output_stem=figures_dir / "figure_consort_diagram",
                     formats=figure_formats,
+                    escalation_results=escalation_results,
+                    cotesting_pairs=cotesting_pairs if (scope_artifact_dir / "cotesting_pairs.parquet").exists() else None,
                 )
             )
         if "dataset_characterization" in selected_figures:
@@ -590,6 +678,11 @@ class ReportExportWorkflow:
             )
             eligible_pairs = self._dataset_store.read_pandas(gold_dir / "eligible_pairs.parquet")
             culture_episodes = self._dataset_store.read_pandas(gold_dir / "culture_episodes.parquet")
+            if culture_episodes is not None:
+                # The covariate and missing-data figures read the adjusted model's covariates.
+                culture_episodes = self._table_builder.culture_episodes_with_covariates(
+                    request.scope, request.site, culture_episodes, request.organism
+                )
             drug_pair_episodes = self._dataset_store.read_pandas(gold_dir / "drug_pair_episodes.parquet")
             char_dir = figures_dir / "dataset_characterization"
             char_dir.mkdir(parents=True, exist_ok=True)
@@ -628,6 +721,7 @@ class ReportExportWorkflow:
             "tables": table_outputs,
             "figure_exports": figure_outputs,
             "missing_figure_groups": missing_figure_groups,
+            "exclusion_flow_reconciliation": exclusion_flow_problems,
             "outputs": {name: str(path) for name, path in outputs.items()},
         }
         summary_path = reports_dir / "report_manifest.json"
@@ -686,7 +780,16 @@ class ReportExportWorkflow:
             "temporal_stability": "figure_temporal_stability",
             "cross_site_concordance": "figure_cross_site_concordance",
             "consort_diagram": "figure_consort_diagram",
+            "observation_coverage": ("figure_observation_coverage.", "figure_observation_coverage_by_site."),
+            "descriptive_summaries": (
+                "figure_opportunity_space.",
+                "figure_panel_breadth.",
+                "figure_observation_coverage_by_era.",
+                "figure_antibiogram.",
+            ),
             "dataset_characterization": (
+                "dataset_eligibility_funnel",
+                "dataset_eligibility_by_site",
                 "dataset_eligible_vs_observed",
                 "dataset_observation_rate_heatmap",
                 "dataset_testing_rate_by_upstream_result",
@@ -714,6 +817,9 @@ class ReportExportWorkflow:
             if missing_prefixes:
                 missing[group] = ", ".join(missing_prefixes)
         return missing
+
+    def _read_if_exists(self, path: Path) -> pd.DataFrame:
+        return self._dataset_store.read_pandas(path) if path.exists() else pd.DataFrame()
 
     @staticmethod
     def _validated_edge_report(edge_report: pd.DataFrame) -> pd.DataFrame:

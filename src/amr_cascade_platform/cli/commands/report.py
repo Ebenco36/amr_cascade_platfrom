@@ -43,6 +43,8 @@ def register_reporting_command(subparsers, project_root: Path, context_builder) 
         "cascade_evidence_scatter",
         "cascade_consequence_summary",
         "operational_availability_suite",
+        "observation_coverage",
+        "descriptive_summaries",
     )
     parser = subparsers.add_parser(
         "export-report",

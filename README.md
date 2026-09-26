@@ -264,6 +264,15 @@ bash scripts/run_pipeline_mac_dag.sh
 
 This runs each stage sequentially with per-site parallelism where safe. Use for development and small-data verification. Mac runs use reduced replicate budgets (`permutation_iterations=50`) for speed.
 
+### Full-wave rehearsal on a synthetic replica (laptop)
+
+```bash
+python scripts/create_raw_replica_dataset.py all --scale 0.03
+bash scripts/run_replica_end_to_end.sh
+```
+
+The first command profiles `data/raw` once (aggregates only; no record is copied) and writes synthetic extracts with the same file names, columns and value spellings to `test_replica/raw/`. The second runs every stage of `submit_everything_hpc.sh` locally on them, with production thresholds except 200 permutation and bootstrap iterations: ingestion through site and combined cascades, features, training, all figures, both audits, the three availability sensitivities, the follow-ups, the supplementary tables, and a manuscript-package dry run. Logs go to `test_replica/logs/e2e/`; `--from STEP` resumes. The replica is for testing the code, not for inference.
+
 ### Advanced: manual per-stage invocation
 
 For debugging or isolated stage re-runs, every pipeline stage can be invoked directly:

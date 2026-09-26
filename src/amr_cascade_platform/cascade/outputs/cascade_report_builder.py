@@ -69,6 +69,9 @@ class CascadeReportBuilder:
         "permutation_p_value",
         "permutation_fdr_q_value",
         "permutation_fdr_supported",
+        "permutation_p_value_two_sided",
+        "permutation_fdr_q_value_two_sided",
+        "permutation_fdr_supported_two_sided",
         "permutation_null_median_er",
         "permutation_null_q05_er",
         "permutation_null_q95_er",
@@ -270,6 +273,9 @@ class CascadeReportBuilder:
             "permutation_p_value": np.nan,
             "permutation_fdr_q_value": np.nan,
             "permutation_fdr_supported": False,
+            "permutation_p_value_two_sided": np.nan,
+            "permutation_fdr_q_value_two_sided": np.nan,
+            "permutation_fdr_supported_two_sided": False,
             "permutation_null_median_er": np.nan,
             "permutation_null_q05_er": np.nan,
             "permutation_null_q95_er": np.nan,
@@ -311,8 +317,6 @@ class CascadeReportBuilder:
         valid = (
             report["escalation_ratio"].notna()
             & report["escalation_ratio"].gt(0)
-            & report["resistant_tested_n"].gt(0)
-            & report["susceptible_tested_n"].gt(0)
             & report["resistant_support_n"].gt(0)
             & report["susceptible_support_n"].gt(0)
         )

@@ -15,17 +15,22 @@ primary pipeline outputs.
 
 Usage
 -----
-    python scripts/run_supplementary_prediction.py [--organism ESCHERICHIA_COLI]
+    python scripts/run_supplementary_prediction.py [--env hpc] [--organism ESCHERICHIA_COLI]
 
-The organism string is normalised to lower-snake for path construction; the
-default is ESCHERICHIA_COLI.
+Input and output locations follow the environment config (--env, default hpc):
+modelling artefacts and features under its data_root, figures and tables under
+its reporting.figures_dir and reporting.tables_dir. The organism string is
+normalised to lower-snake for path construction; the default is
+ESCHERICHIA_COLI.
 """
 
 from __future__ import annotations
 
 import argparse
+import sys
 import time
 import warnings
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -82,44 +87,70 @@ SPLIT_LABEL = {"train": "Train (armd)", "validation": "Validation (armd_ecuh)", 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
+@dataclass(frozen=True)
+class _Layout:
+    """Where one environment keeps its modelling inputs and report outputs."""
+
+    modeling_root: Path
+    features_root: Path
+    figures_root: Path
+    tables_root: Path
+
+
+_LAYOUT: _Layout | None = None
+
+
+def _configure_layout(environment: str) -> _Layout:
+    global _LAYOUT
+    src = str(PROJECT_ROOT / "src")
+    if src not in sys.path:
+        sys.path.insert(0, src)
+    from amr_cascade_platform.core.config.config_loader import ConfigLoader
+
+    settings = ConfigLoader(PROJECT_ROOT).load(environment)
+    data_root = PROJECT_ROOT / settings.environment.data_root
+    _LAYOUT = _Layout(
+        modeling_root=data_root / "artifacts" / settings.modeling.output_dir / settings.modeling.task_name,
+        features_root=data_root / "features",
+        figures_root=PROJECT_ROOT / settings.reporting.figures_dir,
+        tables_root=PROJECT_ROOT / settings.reporting.tables_dir,
+    )
+    return _LAYOUT
+
+
+def _layout() -> _Layout:
+    return _LAYOUT if _LAYOUT is not None else _configure_layout("hpc")
+
+
 def _org_slug(organism: str) -> str:
     return organism.lower().replace(" ", "_")
 
 
+def _model_dir(organism: str) -> Path:
+    return _layout().modeling_root / "combined/organisms" / _org_slug(organism) / "site__all_models"
+
+
 def _artifact_dir(organism: str) -> Path:
-    return (
-        PROJECT_ROOT
-        / "data/artifacts/modeling/downstream_testing/combined/organisms"
-        / _org_slug(organism)
-        / "site__all_models/full"
-    )
+    return _model_dir(organism) / "full"
 
 
 def _feat_path(organism: str) -> Path:
     return (
-        PROJECT_ROOT
-        / "data/features/combined/organisms"
+        _layout().features_root
+        / "combined/organisms"
         / _org_slug(organism)
         / "model_ready_pair_features.parquet"
     )
 
 
 def _fig_dir(organism: str) -> Path:
-    d = (
-        PROJECT_ROOT
-        / "outputs/figures/combined/organisms"
-        / _org_slug(organism)
-    )
+    d = _layout().figures_root / "combined/organisms" / _org_slug(organism)
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
 def _tab_dir(organism: str) -> Path:
-    d = (
-        PROJECT_ROOT
-        / "outputs/tables/combined/organisms"
-        / _org_slug(organism)
-    )
+    d = _layout().tables_root / "combined/organisms" / _org_slug(organism)
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -199,23 +230,13 @@ def load_predictions(organism: str) -> pd.DataFrame:
 
 def load_metrics(organism: str) -> pd.DataFrame:
     """Load the pre-computed per-split metrics parquet."""
-    path = (
-        PROJECT_ROOT
-        / "data/artifacts/modeling/downstream_testing/combined/organisms"
-        / _org_slug(organism)
-        / "site__all_models/metrics.parquet"
-    )
+    path = _model_dir(organism) / "metrics.parquet"
     return pd.read_parquet(path)
 
 
 def load_threshold_metrics(organism: str) -> pd.DataFrame:
     """Load threshold-sweep metrics parquet."""
-    path = (
-        PROJECT_ROOT
-        / "data/artifacts/modeling/downstream_testing/combined/organisms"
-        / _org_slug(organism)
-        / "site__all_models/threshold_metrics.parquet"
-    )
+    path = _model_dir(organism) / "threshold_metrics.parquet"
     return pd.read_parquet(path)
 
 
@@ -254,9 +275,9 @@ _FEATURE_RENAME = {
     "history_prior_organism_available": "Prior organism data available",
     "history_prior_organism_count": "Prior organism count",
     "history_prior_organism_min_days": "Days since prior organism",
-    "history_prior_same_organism_any_30d": "Same organism prior (30d)",
-    "history_prior_same_organism_any_90d": "Same organism prior (90d)",
-    "history_prior_same_organism_any_365d": "Same organism prior (365d)",
+    "history_prior_same_organism_any_30d": "Prior same-genus infection (30d)",
+    "history_prior_same_organism_any_90d": "Prior same-genus infection (90d)",
+    "history_prior_same_organism_any_365d": "Prior same-genus infection (365d)",
     "comorbidity_count": "Total comorbidity count",
 }
 
@@ -267,11 +288,13 @@ def _clean_feature_name(raw: str) -> str:
     if raw.startswith("comorb_"):
         name = raw[len("comorb_"):]
         name = name.replace("_", " ").title()
-        # shorten very long names
-        if len(name) > 45:
-            name = name[:43] + "…"
         return f"Comorbidity: {name}"
     return raw.replace("_", " ").title()
+
+
+def _axis_label(name: str, limit: int = 58) -> str:
+    """Shorten a feature name for a figure axis only; tables keep the full name."""
+    return name if len(name) <= limit else name[: limit - 1].rstrip() + "…"
 
 
 def fit_lr_for_coefficients(organism: str) -> pd.DataFrame:
@@ -722,7 +745,7 @@ def fig_lr_coefficients(coef_df: pd.DataFrame, fig_dir: Path) -> dict[str, Path]
 
     fig = go.Figure()
     fig.add_trace(go.Bar(
-        x=plot_df["coefficient"], y=plot_df["feature"], orientation="h",
+        x=plot_df["coefficient"], y=plot_df["feature"].map(_axis_label), orientation="h",
         marker_color=colors,
         marker_line={"color": "white", "width": 0.5},
         text=text, textposition="outside",
@@ -914,9 +937,15 @@ def main(organism: str = "ESCHERICHIA COLI") -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate supplementary prediction outputs")
     parser.add_argument(
+        "--env",
+        default="hpc",
+        help="Environment config selecting the data root and report directories (default: hpc)",
+    )
+    parser.add_argument(
         "--organism",
         default="ESCHERICHIA COLI",
         help="Organism name (default: ESCHERICHIA COLI)",
     )
     args = parser.parse_args()
+    _configure_layout(args.env)
     main(args.organism)

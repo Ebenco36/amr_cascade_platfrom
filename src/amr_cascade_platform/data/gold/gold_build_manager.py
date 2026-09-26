@@ -7,11 +7,14 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pandas as pd
+
 from amr_cascade_platform.core.config.config_models import Settings
 from amr_cascade_platform.core.exceptions.custom_exceptions import DataDiscoveryError
 from amr_cascade_platform.core.logging.logger_factory import LoggerFactory
 from amr_cascade_platform.core.paths.path_manager import PathManager
 from amr_cascade_platform.core.utils.antibiotic_names import normalize_antibiotic_label
+from amr_cascade_platform.core.utils.organism_names import matches_requested_organism
 from amr_cascade_platform.core.utils.scopes import scoped_output_dir
 from amr_cascade_platform.core.utils.text import normalize_label, safe_feature_name
 from amr_cascade_platform.data.transformations.culture_episode_builder import CultureEpisodeBuilder
@@ -48,10 +51,15 @@ class GoldBuildManager:
     def build(self, request: GoldBuildRequest) -> dict[str, Path]:
         cohort_path = self._resolve_cohort_path(request)
         cohort = self._dataset_store.read_pandas(cohort_path)
-        organism_list = (normalize_label(request.organism),) if request.organism else None
+        cohort_rows = cohort["source_site"].astype("string").fillna("unknown").value_counts()
+        organism_list = None
+        organism_labels: dict[str, int] = {}
+        if request.organism:
+            cohort, organism_labels = self._select_organism(cohort, request.organism)
+            organism_list = (normalize_label(request.organism),)
 
         culture_episodes = self._culture_episode_builder.build(cohort, organism_list=organism_list)
-        culture_drug_episodes = self._observation_space_builder.build(cohort, organism_list=organism_list)
+        culture_drug_episodes, ledger = self._observation_space_builder.build_with_ledger(cohort, organism_list=organism_list)
         # Raw site data records the same antibiotic under different spellings
         # (site-specific order-set abbreviations, alternate salts). Normalizing
         # here, at the single earliest point shared by every downstream gold
@@ -68,6 +76,7 @@ class GoldBuildManager:
             culture_drug_episodes=culture_drug_episodes,
             eligibility_space=eligible_pairs,
         )
+        observation_ledger = self._observation_ledger(ledger, cohort_rows, culture_episodes, culture_drug_episodes)
 
         output_dir = self._resolve_output_dir(request)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -86,6 +95,8 @@ class GoldBuildManager:
         self._write_metadata(
             request=request,
             outputs=outputs,
+            organism_labels=organism_labels,
+            observation_ledger=observation_ledger,
             culture_episodes=culture_episodes,
             culture_drug_episodes=culture_drug_episodes,
             drug_pair_episodes=drug_pair_episodes,
@@ -93,6 +104,74 @@ class GoldBuildManager:
             eligible_pairs=eligible_pairs,
         )
         return outputs
+
+    def _observation_ledger(
+        self,
+        ledger: pd.DataFrame,
+        cohort_rows: pd.Series,
+        culture_episodes: pd.DataFrame,
+        culture_drug_episodes: pd.DataFrame,
+    ) -> dict[str, dict[str, int]]:
+        """Per site, how many rows each rule removed between the harmonised cohort and the observed results.
+
+        Extends the observation-space builder's ledger with the rows present
+        before organism selection and with what antibiotic-name normalisation
+        exposed: rows repeating an episode, antibiotic and result, and episode
+        x antibiotic pairs holding conflicting results (counted once as
+        observed by the eligibility service; excluded from the resistant-versus-
+        susceptible upstream contrast by the pair generator). The report step
+        turns this into the exclusion-flow table, which must reconcile row for row.
+        """
+        keys = list(self._settings.gold.episode_key_columns)
+        results = culture_drug_episodes.loc[:, keys + ["antibiotic", "susceptibility"]]
+        distinct = results.drop_duplicates()
+        per_pair = distinct.groupby(keys + ["antibiotic"], observed=True, dropna=False).size().rename("results").reset_index()
+        conflicting = per_pair.loc[per_pair["results"].gt(1)]
+        observed_episodes = per_pair.loc[:, keys].drop_duplicates()
+        without_result = culture_episodes.loc[:, keys].drop_duplicates().merge(observed_episodes, on=keys, how="left", indicator=True)
+        without_result = without_result.loc[without_result["_merge"].eq("left_only")]
+
+        def by_site(frame: pd.DataFrame, weights: pd.Series | None = None) -> pd.Series:
+            sites = frame["source_site"].astype("string").fillna("unknown")
+            if weights is None:
+                return sites.value_counts()
+            return weights.groupby(sites.to_numpy()).sum()
+
+        extra = pd.DataFrame(
+            {
+                "cohort_rows": cohort_rows,
+                "same_result_duplicate_rows": by_site(results).sub(by_site(distinct), fill_value=0),
+                "conflicting_result_rows": by_site(conflicting, conflicting["results"]),
+                "conflicting_episode_drugs": by_site(conflicting),
+                "observed_episode_drugs": by_site(per_pair),
+                "culture_episodes": by_site(culture_episodes.loc[:, keys].drop_duplicates()),
+                "episodes_without_result": by_site(without_result),
+            }
+        )
+        combined = ledger.join(extra, how="outer").fillna(0).astype("int64")
+        combined = combined.loc[combined["organism_rows"].gt(0) | combined["culture_episodes"].gt(0)]
+        return {str(site): {name: int(value) for name, value in row.items()} for site, row in combined.iterrows()}
+
+    def _select_organism(self, cohort, requested: str):
+        """Rows of the requested organism, relabelled to the requested name.
+
+        Raw labels that resolve to the requested species -- e.g. "ESBL
+        ESCHERICHIA COLI" or "ESCHERICHIA COLI (CARBAPENEM RESISTANT)" for
+        "ESCHERICHIA COLI" -- are kept and written under the requested name, so
+        every gold table and every later groupby treats them as one organism
+        (see matches_requested_organism). Returns the rows and the number of
+        culture episodes contributed by each raw label.
+        """
+        labels = cohort["organism"].astype("string")
+        kept = {label for label in labels.dropna().unique() if matches_requested_organism(label, requested)}
+        selected = cohort.loc[labels.isin(kept).fillna(False)].copy()
+        episode_columns = list(self._settings.gold.episode_key_columns)
+        counts = selected.drop_duplicates(episode_columns)["organism"].astype("string").value_counts()
+        organism_labels = {str(label): int(count) for label, count in counts.items()}
+        if len(organism_labels) > 1:
+            self._logger.info("Pooled organism labels into %s: %s", normalize_label(requested), organism_labels)
+        selected["organism"] = normalize_label(requested)
+        return selected, organism_labels
 
     def _resolve_cohort_path(self, request: GoldBuildRequest) -> Path:
         if request.source_scope == "combined":
@@ -119,6 +198,8 @@ class GoldBuildManager:
         self,
         request: GoldBuildRequest,
         outputs: dict[str, Path],
+        organism_labels: dict[str, int],
+        observation_ledger: dict[str, dict[str, int]],
         culture_episodes,
         culture_drug_episodes,
         drug_pair_episodes,
@@ -133,6 +214,11 @@ class GoldBuildManager:
             "site": request.site,
             "organism": request.organism,
             "outputs": {name: str(path) for name, path in outputs.items()},
+            # Culture episodes per raw organism label pooled into this organism.
+            "organism_labels": organism_labels,
+            # Per site: rows removed by each rule from the harmonised cohort to the
+            # observed episode x antibiotic results (see _observation_ledger).
+            "observation_ledger": observation_ledger,
             "row_counts": {
                 "culture_episodes": len(culture_episodes),
                 "culture_drug_episodes": len(culture_drug_episodes),

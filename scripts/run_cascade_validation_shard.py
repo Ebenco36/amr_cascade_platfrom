@@ -116,11 +116,8 @@ def main() -> None:
         organism=args.organism,
     )
     pair_path = gold_dir / "drug_pair_episodes.parquet"
-    culture_episode_path = gold_dir / "culture_episodes.parquet"
     if not pair_path.exists():
         raise DataDiscoveryError(f"Gold drug-pair dataset not found: {pair_path}")
-    if not culture_episode_path.exists():
-        raise DataDiscoveryError(f"Gold culture-episode dataset not found: {culture_episode_path}")
 
     # ------------------------------------------------------------------ #
     # Determine output path and skip if already done                       #
@@ -153,7 +150,6 @@ def main() -> None:
     drug_pairs = dataset_store.read_pandas(
         pair_path, categorical_columns=_PAIR_TABLE_CATEGORICAL_COLUMNS
     )
-    culture_episodes = dataset_store.read_pandas(culture_episode_path)
 
     cotesting_filter = CoTestingFilterAnalyzer(settings)
     filtered_pairs, _ = cotesting_filter.filter(drug_pairs)
@@ -166,15 +162,9 @@ def main() -> None:
     escalation_analyzer = EscalationRatioAnalyzer(settings)
     escalation_results = escalation_analyzer.analyze(conditional_probabilities)
 
-    regression_analyzer = DownstreamTestingRegression(settings, path_manager)
-    adjusted_results = regression_analyzer.analyze(
-        filtered_pairs, escalation_results, culture_episodes
-    )
-    del culture_episodes
-    gc.collect()
-
+    # Retention never reads the adjusted OR, so no model is fitted here (as in CascadeAnalysisWorkflow).
     retained_edge_analyzer = RetainedEdgeAnalyzer(settings)
-    retained_edges = retained_edge_analyzer.analyze(escalation_results, adjusted_results)
+    retained_edges = retained_edge_analyzer.analyze(escalation_results, DownstreamTestingRegression._empty_results())
 
     # ------------------------------------------------------------------ #
     # Run this shard's validation slice                                    #

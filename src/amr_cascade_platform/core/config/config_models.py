@@ -135,6 +135,8 @@ class GoldConfig:
     culture_episode_columns: tuple[str, ...]
     culture_drug_columns: tuple[str, ...]
     testing_matrix_prefix: str
+    observed_result_values: tuple[str, ...]
+    excluded_assay_labels: tuple[str, ...]
     eligibility: EligibilityConfig
 
 
@@ -195,6 +197,15 @@ class ReportingConfig:
     plotly_template: str
     image_width: int
     image_height: int
+    # Eligible opportunities in site-era strata with fewer observed results than
+    # this are reported as resting on thin availability evidence (the stricter
+    # availability sensitivity's minimum).
+    thin_availability_support: int = 5
+    # CLSI M39: a cumulative antibiogram percentage needs at least 30 isolates.
+    antibiogram_min_tested: int = 30
+    # Availability-denominator sensitivity runs compared with this run in the
+    # supplement: label -> environment name. Empty where no such runs exist.
+    availability_sensitivity_environments: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)

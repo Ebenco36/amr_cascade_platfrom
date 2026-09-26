@@ -1,0 +1,28 @@
+# Replica counterpart of hpc_availability_sensitivity.yaml: test_replica.yaml with
+# minimum observed support 5 (primary: 1). Its data_root symlinks the replica's upstream layers (the
+# end-to-end runner creates the links) and keeps its own gold and artifacts,
+# so the primary replica run is never overwritten.
+environment:
+  name: test_replica_availability_sensitivity
+  data_root: test_replica_availability_sensitivity
+  execution_mode: local
+  default_data_layer: raw
+  allow_raw_processing: true
+
+features:
+  auto_build_comorbidity: false
+  auto_prepare_silver_feature_sources: false
+
+cascade:
+  validation:
+    permutation_iterations: 200
+    bootstrap_iterations: 200
+
+gold:
+  eligibility:
+    availability_min_observed: 5
+
+reporting:
+  tables_dir: test_replica_availability_sensitivity/outputs/tables
+  figures_dir: test_replica_availability_sensitivity/outputs/figures
+  reports_dir: test_replica_availability_sensitivity/outputs/reports

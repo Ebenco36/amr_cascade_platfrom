@@ -265,3 +265,42 @@ def test_comorbidity_available_is_source_availability_not_positive_count(tmp_pat
     row = result.iloc[0]
     assert int(row["comorbidity_count"]) == 0
     assert int(row["cov_comorbidity_available"]) == 1
+
+
+def test_prior_same_organism_history_is_matched_at_genus_level(tmp_path: Path) -> None:
+    """The prior-infection extracts record genus ("Escherichia", "CONS"), episodes record species."""
+    project_root = Path(__file__).resolve().parents[2]
+    settings = ConfigLoader(project_root).load("mac")
+    paths = PathManager(tmp_path, settings)
+    site_dir = paths.paths.harmonized / "site_aligned" / "armd"
+    site_dir.mkdir(parents=True, exist_ok=True)
+
+    def episode(index: int, organism: str) -> dict:
+        return {
+            "anon_id": f"p{index}",
+            "pat_enc_csn_id_coded": f"e{index}",
+            "order_proc_id_coded": f"o{index}",
+            "order_time_jittered": "2024-03-15T10:00:00Z",
+            "organism": organism,
+            "source_site": "armd",
+        }
+
+    episodes = [
+        episode(1, "ESCHERICHIA COLI"),
+        episode(2, "ESCHERICHIA COLI"),
+        episode(3, "COAG NEGATIVE STAPHYLOCOCCUS"),
+        episode(4, "ESCHERICHIA COLI"),
+    ]
+    pd.DataFrame(
+        [
+            {**episodes[0], "prior_organism": "Escherichia", "prior_infecting_organism_days_to_culture": 20},
+            {**episodes[1], "prior_organism": "Klebsiella", "prior_infecting_organism_days_to_culture": 20},
+            {**episodes[2], "prior_organism": "CONS", "prior_infecting_organism_days_to_culture": 10},
+            {**episodes[3], "prior_organism": "Escherichia", "prior_infecting_organism_days_to_culture": 200},
+        ]
+    ).to_parquet(site_dir / "prior_infecting_organism.parquet", index=False)
+
+    result = CascadeCovariateBuilder(settings, paths).build(pd.DataFrame(episodes)).set_index("anon_id")
+
+    assert result["cov_prior_same_organism_any_90d"].astype(int).to_dict() == {"p1": 1, "p2": 0, "p3": 1, "p4": 0}
+    assert result["cov_prior_organism_available"].astype(int).tolist() == [1, 1, 1, 1]

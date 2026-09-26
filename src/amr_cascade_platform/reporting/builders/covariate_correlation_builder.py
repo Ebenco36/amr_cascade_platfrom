@@ -18,7 +18,6 @@ class CovariateCorrelationBuilder:
         "cov_ordering_mode",
         "cov_specimen_type",
         "cov_calendar_year",
-        "cov_calendar_month",
         "cov_age_bin",
         "cov_sex",
     )

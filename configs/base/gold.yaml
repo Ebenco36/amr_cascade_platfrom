@@ -28,6 +28,16 @@ gold:
     - antibiotic
     - susceptibility
   testing_matrix_prefix: tested__
+  # Only these interpretations count as an observed AST result; blank and INCONCLUSIVE rows do not.
+  observed_result_values:
+    - RESISTANT
+    - SUSCEPTIBLE
+    - INTERMEDIATE
+  # Non-therapeutic assays (ESBL phenotypic confirmation) removed before eligibility and pair construction.
+  excluded_assay_labels:
+    - CEFTAZIDIME/CLAVULANIC ACID
+    - CEFOTAXIME/CLAVULANIC ACID
+    - CEFEPIME/CLAVULANIC ACID
   eligibility:
     # Options:
     # - biological: current broad denominator; non-intrinsic organism-drug pairs are eligible.

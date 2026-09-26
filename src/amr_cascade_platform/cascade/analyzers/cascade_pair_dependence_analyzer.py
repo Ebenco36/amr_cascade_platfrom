@@ -162,6 +162,8 @@ class CascadePairDependenceAnalyzer:
             reverse_support_n = pd.to_numeric(group["reverse_pair_support_n"], errors="coerce").dropna()
             smoothed_pair_rate = self._smoothed_rate(pair_tested_n.iloc[0], pair_support_n.iloc[0], cc) if not pair_tested_n.empty and not pair_support_n.empty else math.nan
             smoothed_reverse_rate = self._smoothed_rate(reverse_tested_n.iloc[0], reverse_support_n.iloc[0], cc) if not reverse_tested_n.empty and not reverse_support_n.empty else math.nan
+            pair_rate = self._observed_rate(pair_tested_n, pair_support_n)
+            reverse_rate = self._observed_rate(reverse_tested_n, reverse_support_n)
             rows.append(
                 {
                     "upstream_antibiotic": upstream_antibiotic,
@@ -170,10 +172,10 @@ class CascadePairDependenceAnalyzer:
                     "smoothed_reverse_test_rate": smoothed_reverse_rate,
                     "testing_asymmetry_score": self._asymmetry_score(smoothed_pair_rate, smoothed_reverse_rate),
                     "testing_asymmetry_bin": "unassigned",
-                    # PBI = min{P(O_k|O_j), P(O_j|O_k)} — quantifies panel-bundling intensity.
-                    # Pairs near-deterministically bundled in both directions have PBI → 1.
-                    # Retained edges are expected to have moderate PBI (co-testing filter removes PBI > 0.95 pairs).
-                    "panel_bundling_index": self._panel_bundling_index(smoothed_pair_rate, smoothed_reverse_rate),
+                    # PBI = min{P(O_k|O_j), P(O_j|O_k)} from the unsmoothed rates on the same
+                    # downstream-eligible rows the co-testing screen uses, so a reported PBI is
+                    # exactly the quantity the screen compared with its threshold.
+                    "panel_bundling_index": self._panel_bundling_index(pair_rate, reverse_rate),
                     "mean_upstream_panel_size": float(panel_size.mean()) if panel_size.notna().any() else math.nan,
                     "median_upstream_panel_size": float(panel_size.median()) if panel_size.notna().any() else math.nan,
                     "panel_size_q90": float(panel_size.quantile(0.9)) if panel_size.notna().any() else math.nan,
@@ -211,6 +213,12 @@ class CascadePairDependenceAnalyzer:
         return float((tested_n + continuity_correction) / (support_n + 2.0 * continuity_correction))
 
     @staticmethod
+    def _observed_rate(tested_n: pd.Series, support_n: pd.Series) -> float:
+        if tested_n.empty or support_n.empty or not support_n.iloc[0] > 0:
+            return math.nan
+        return float(tested_n.iloc[0] / support_n.iloc[0])
+
+    @staticmethod
     def _asymmetry_score(pair_rate: float, reverse_rate: float) -> float:
         if pd.isna(pair_rate) or pd.isna(reverse_rate) or pair_rate <= 0 or reverse_rate <= 0:
             return math.nan
@@ -222,8 +230,9 @@ class CascadePairDependenceAnalyzer:
 
         Values near 1 indicate near-deterministic bilateral bundling.
         Values near 0 indicate highly asymmetric testing (one direction drives the other).
-        Pairs with PBI > cotesting_probability_threshold (default 0.95) are removed by the co-testing screen;
-        retained edges are therefore bounded PBI < 0.95 by construction.
+        The co-testing screen removes pairs with PBI >= cotesting_probability_threshold (0.95)
+        when both directions have at least min_total_support rows, so a retained pair can
+        reach that PBI only when one direction has fewer rows than that.
         """
         if pd.isna(pair_rate) or pd.isna(reverse_rate):
             return math.nan

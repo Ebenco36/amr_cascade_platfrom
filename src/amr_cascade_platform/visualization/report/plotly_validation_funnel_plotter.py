@@ -124,10 +124,10 @@ class PlotlyValidationFunnelPlotter:
         df_s = df[support_mask]
 
         # Stage 2: permutation FDR
-        if "permutation_fdr_supported" in df_s.columns:
-            perm_mask = df_s["permutation_fdr_supported"].eq(True)
-        elif "permutation_p_value" in df_s.columns:
-            perm_mask = pd.to_numeric(df_s["permutation_p_value"], errors="coerce").le(self._perm_threshold)
+        if "permutation_fdr_supported_two_sided" in df_s.columns:
+            perm_mask = df_s["permutation_fdr_supported_two_sided"].eq(True)
+        elif "permutation_fdr_q_value_two_sided" in df_s.columns:
+            perm_mask = pd.to_numeric(df_s["permutation_fdr_q_value_two_sided"], errors="coerce").le(self._perm_threshold)
         else:
             perm_mask = pd.Series(True, index=df_s.index)
         n_perm = int(perm_mask.sum())

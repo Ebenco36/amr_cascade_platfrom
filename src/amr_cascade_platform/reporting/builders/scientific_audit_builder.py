@@ -365,7 +365,12 @@ class ScientificAuditBuilder:
         checks.append(
             self._check(
                 "downstream_trigger_availability_table_present",
-                bool(not trigger_availability.empty and "has_estimable_trigger_forest" in trigger_availability.columns),
+                bool(
+                    not trigger_availability.empty
+                    # The report table names the flag has_validated_trigger_forest;
+                    # has_estimable_trigger_forest is the earlier name.
+                    and bool({"has_validated_trigger_forest", "has_estimable_trigger_forest"} & set(trigger_availability.columns))
+                ),
                 "Report exports a downstream trigger availability table for screened downstream antibiotics.",
                 {
                     "screened_downstreams": screened_downstreams,
