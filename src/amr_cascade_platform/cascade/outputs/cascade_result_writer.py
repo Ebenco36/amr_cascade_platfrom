@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pandas as pd
 
 from amr_cascade_platform.core.config.config_models import Settings
+from amr_cascade_platform.core.utils.provenance import atomic_write_json, atomic_write_parquet
 
 
 class CascadeResultWriter:
@@ -22,6 +22,10 @@ class CascadeResultWriter:
         conditional_probabilities: pd.DataFrame,
         escalation_results: pd.DataFrame,
         adjusted_results: pd.DataFrame,
+        adjusted_model_shap_global: pd.DataFrame,
+        adjusted_model_shap_values: pd.DataFrame,
+        adjusted_model_shap_metadata: pd.DataFrame,
+        adjusted_model_shap_domain: pd.DataFrame,
         retained_edges: pd.DataFrame,
         validation_results: pd.DataFrame,
         dependence_results: pd.DataFrame,
@@ -35,6 +39,10 @@ class CascadeResultWriter:
             "conditional_probabilities": output_dir / "conditional_probabilities.parquet",
             "escalation_results": output_dir / "escalation_results.parquet",
             "adjusted_results": output_dir / "adjusted_results.parquet",
+            "adjusted_model_shap_global": output_dir / "adjusted_model_shap_global.parquet",
+            "adjusted_model_shap_values": output_dir / "adjusted_model_shap_values.parquet",
+            "adjusted_model_shap_metadata": output_dir / "adjusted_model_shap_metadata.parquet",
+            "adjusted_model_shap_domain": output_dir / "adjusted_model_shap_domain.parquet",
             "retained_edges": output_dir / "retained_edges.parquet",
             "validation_results": output_dir / "validation_results.parquet",
             "dependence_results": output_dir / "dependence_results.parquet",
@@ -43,15 +51,25 @@ class CascadeResultWriter:
             "cotesting_probabilities": output_dir / "cotesting_probabilities.parquet",
             "summary": output_dir / self._settings.cascade.outputs.summary_filename,
         }
-        conditional_probabilities.to_parquet(outputs["conditional_probabilities"], index=False)
-        escalation_results.to_parquet(outputs["escalation_results"], index=False)
-        adjusted_results.to_parquet(outputs["adjusted_results"], index=False)
-        retained_edges.to_parquet(outputs["retained_edges"], index=False)
-        validation_results.to_parquet(outputs["validation_results"], index=False)
-        dependence_results.to_parquet(outputs["dependence_results"], index=False)
-        rule_concordance.to_parquet(outputs["rule_concordance"], index=False)
-        cotesting_pairs.to_parquet(outputs["cotesting_pairs"], index=False)
-        cotesting_probabilities.to_parquet(outputs["cotesting_probabilities"], index=False)
+        # Each file goes in under a temporary name and is renamed into place, so a
+        # killed job never leaves a truncated parquet behind; the stage's
+        # _SUCCESS.json (CascadeAnalysisWorkflow) is what declares the set complete.
+        for name, frame in (
+            ("conditional_probabilities", conditional_probabilities),
+            ("escalation_results", escalation_results),
+            ("adjusted_results", adjusted_results),
+            ("adjusted_model_shap_global", adjusted_model_shap_global),
+            ("adjusted_model_shap_values", adjusted_model_shap_values),
+            ("adjusted_model_shap_metadata", adjusted_model_shap_metadata),
+            ("adjusted_model_shap_domain", adjusted_model_shap_domain),
+            ("retained_edges", retained_edges),
+            ("validation_results", validation_results),
+            ("dependence_results", dependence_results),
+            ("rule_concordance", rule_concordance),
+            ("cotesting_pairs", cotesting_pairs),
+            ("cotesting_probabilities", cotesting_probabilities),
+        ):
+            atomic_write_parquet(frame, outputs[name])
 
         summary = {
             "generated_at_utc": datetime.now(UTC).isoformat(),
@@ -63,6 +81,10 @@ class CascadeResultWriter:
                 "conditional_probabilities": len(conditional_probabilities),
                 "escalation_results": len(escalation_results),
                 "adjusted_results": len(adjusted_results),
+                "adjusted_model_shap_global": len(adjusted_model_shap_global),
+                "adjusted_model_shap_values": len(adjusted_model_shap_values),
+                "adjusted_model_shap_metadata": len(adjusted_model_shap_metadata),
+                "adjusted_model_shap_domain": len(adjusted_model_shap_domain),
                 "retained_edges": len(retained_edges),
                 "validation_results": len(validation_results),
                 "dependence_results": len(dependence_results),
@@ -71,6 +93,5 @@ class CascadeResultWriter:
                 "cotesting_probabilities": len(cotesting_probabilities),
             },
         }
-        with outputs["summary"].open("w", encoding="utf-8") as handle:
-            json.dump(summary, handle, indent=2)
+        atomic_write_json(summary, outputs["summary"])
         return outputs

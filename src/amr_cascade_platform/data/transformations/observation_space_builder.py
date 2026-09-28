@@ -5,7 +5,7 @@ from __future__ import annotations
 import pandas as pd
 
 from amr_cascade_platform.core.config.config_models import Settings
-from amr_cascade_platform.core.utils.antibiotic_names import normalize_antibiotic_label
+from amr_cascade_platform.core.utils.antibiotic_names import classify_ast_entity, normalize_antibiotic_label
 
 LEDGER_COLUMNS = (
     "organism_rows",
@@ -22,6 +22,9 @@ class ObservationSpaceBuilder:
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
+        # Rows removed as non-therapeutic entries by the last build, per site and
+        # label (source_site, antibiotic, entity_type, rows) -- for the gold metadata.
+        self.excluded_entities = pd.DataFrame(columns=["source_site", "antibiotic", "entity_type", "rows"])
 
     def build(self, cohort: pd.DataFrame, organism_list: tuple[str, ...] | None = None) -> pd.DataFrame:
         return self.build_with_ledger(cohort, organism_list)[0]
@@ -32,9 +35,13 @@ class ObservationSpaceBuilder:
         """The observed results and, per source site, how many rows each rule removed.
 
         The ledger counts, in order: the organism's rows; rows with no result;
-        rows whose result is not an interpretation (e.g. INCONCLUSIVE); ESBL
-        phenotypic confirmation assays; the interpretable rows left; and those
-        of them identical to another row on every observed-result column.
+        rows whose result is not an interpretation (e.g. INCONCLUSIVE); entries
+        that are not a therapeutic antibacterial susceptibility result
+        (``excluded_assay_rows``: screening, phenotypic-confirmation and
+        resistance-mechanism tests, antifungal and antimycobacterial agents,
+        rows without an antibiotic label -- see gold.primary_ast_entity_types);
+        the interpretable rows left; and those of them identical to another row
+        on every observed-result column.
         """
         frame = cohort
         if organism_list:
@@ -49,12 +56,29 @@ class ObservationSpaceBuilder:
         ledger["other_non_interpretive_rows"] = sites[~blank & ~interpretable].value_counts()
         frame = frame[interpretable]
 
+        # Only therapeutic antibacterial susceptibility results enter the observed
+        # layer. Screening, confirmatory and mechanism tests are not AST results for
+        # the drug they are named after (a cefoxitin screen detects methicillin
+        # resistance; inducible clindamycin is a D-zone test), so they are removed
+        # here, before any alias could merge them into the drug's own results.
         excluded = {normalize_antibiotic_label(label) for label in self._settings.gold.excluded_assay_labels}
+        primary = set(self._settings.gold.primary_ast_entity_types)
+        entity_of = {label: classify_ast_entity(label) for label in frame["antibiotic"].dropna().unique()}
+        entity_of = {label: entity or "MISSING_LABEL" for label, entity in entity_of.items()}
         assay_labels = [
-            label for label in frame["antibiotic"].dropna().unique() if normalize_antibiotic_label(label) in excluded
+            label for label, entity in entity_of.items()
+            if entity not in primary or normalize_antibiotic_label(label) in excluded
         ]
-        assay = frame["antibiotic"].isin(assay_labels)
+        assay = frame["antibiotic"].isin(assay_labels) | frame["antibiotic"].isna()
         ledger["excluded_assay_rows"] = sites[interpretable][assay.to_numpy()].value_counts()
+        removed = frame.loc[assay, ["source_site", "antibiotic"]].copy()
+        removed["entity_type"] = removed["antibiotic"].map(entity_of).fillna("MISSING_LABEL")
+        self.excluded_entities = (
+            removed.astype("string").fillna("<missing>")
+            .value_counts().rename("rows").reset_index()
+            .loc[:, ["source_site", "antibiotic", "entity_type", "rows"]]
+            .sort_values(["source_site", "rows"], ascending=[True, False], ignore_index=True)
+        )
         frame = frame[~assay]
         ledger["interpretable_rows"] = frame["source_site"].astype("string").fillna("unknown").value_counts()
 

@@ -40,6 +40,10 @@ Options:
   --run-site-cascade           Also run per-site organism gold/cascade jobs
   --run-features               Build combined model-ready features
   --run-training               Train combined downstream-testing models
+  --run-threshold-comparison   Compare validation-site holdout with patient-grouped
+                               OOF threshold selection on the same clinical model
+  --threshold-strategy MODE    validation_holdout (legacy) or grouped_oof
+                               (patient-grouped training CV)
   --run-eskape                 Run ESKAPE-family validation (one job per target)
   --eskape-targets T1,T2       Default: Enterococcus,Staphylococcus,Klebsiella,
                                Acinetobacter,Pseudomonas,Enterobacter
@@ -84,6 +88,8 @@ RUN_REPORTING=1
 RUN_SITE_CASCADE=0
 RUN_FEATURES=0
 RUN_TRAINING=0
+RUN_THRESHOLD_COMPARISON=0
+THRESHOLD_STRATEGY=""
 RUN_ESKAPE=0
 
 submitted_tasks=()
@@ -182,6 +188,10 @@ cascade_ready() {
   local dir; dir="$(scope_dir_path "${CASCADE_ARTIFACT_ROOT}" "$1" "${2:-}" "${3:-}")"
   [[ -f "${dir}/retained_edges.parquet" && -f "${dir}/edge_report.parquet" &&
      -f "${dir}/network_nodes.parquet" &&
+     -f "${dir}/adjusted_model_shap_global.parquet" &&
+     -f "${dir}/adjusted_model_shap_values.parquet" &&
+     -f "${dir}/adjusted_model_shap_metadata.parquet" &&
+     -f "${dir}/adjusted_model_shap_domain.parquet" &&
      -f "${dir}/${CASCADE_SUMMARY_FILENAME}" ]]
 }
 
@@ -202,9 +212,28 @@ training_ready() {
      -f "${dir}/selected_thresholds.parquet" && -f "${dir}/modeling_summary.json" ]]
 }
 
+threshold_comparison_ready() {
+  local dir; dir="$(scope_dir_path "${MODELING_TASK_ROOT}" "$1" "${2:-}" "${3:-}")/threshold_strategy_comparison"
+  [[ -f "${dir}/threshold_strategy_curves.parquet" &&
+     -f "${dir}/threshold_strategy_selected.parquet" &&
+     -f "${dir}/threshold_strategy_test_metrics.parquet" &&
+     -f "${dir}/threshold_strategy_comparison_summary.json" ]]
+}
+
 reporting_ready() {
-  local dir; dir="$(scope_dir_path "${REPORTS_ROOT}" "$1" "${2:-}" "${3:-}")"
-  [[ -f "${dir}/report_manifest.json" ]]
+  local dir cascade_dir comparison_dir
+  dir="$(scope_dir_path "${REPORTS_ROOT}" "$1" "${2:-}" "${3:-}")"
+  cascade_dir="$(scope_dir_path "${CASCADE_ARTIFACT_ROOT}" "$1" "${2:-}" "${3:-}")"
+  comparison_dir="$(scope_dir_path "${MODELING_TASK_ROOT}" "$1" "${2:-}" "${3:-}")/threshold_strategy_comparison"
+  [[ -f "${dir}/report_manifest.json" &&
+     -f "${cascade_dir}/adjusted_model_shap_metadata.parquet" &&
+     "${dir}/report_manifest.json" -nt "${cascade_dir}/adjusted_model_shap_metadata.parquet" ]] || return 1
+  if [[ "${RUN_THRESHOLD_COMPARISON}" -eq 1 ]]; then
+    [[ -f "${comparison_dir}/threshold_strategy_comparison_summary.json" &&
+       "${dir}/report_manifest.json" -nt "${comparison_dir}/threshold_strategy_comparison_summary.json" ]] || return 1
+    grep -q 'figure_threshold_strategy_comparison' "${dir}/report_manifest.json" || return 1
+  fi
+  return 0
 }
 
 eskape_ready() {
@@ -384,6 +413,12 @@ while [[ $# -gt 0 ]]; do
     --run-site-cascade)   RUN_SITE_CASCADE=1;    shift ;;
     --run-features)       RUN_FEATURES=1;        shift ;;
     --run-training)       RUN_TRAINING=1;        shift ;;
+    --run-threshold-comparison) RUN_THRESHOLD_COMPARISON=1; shift ;;
+    --threshold-strategy)
+      [[ $# -ge 2 ]] || { echo "--threshold-strategy requires a value" >&2; exit 2; }
+      THRESHOLD_STRATEGY="$2"
+      shift 2
+      ;;
     --run-eskape)         RUN_ESKAPE=1;          shift ;;
     --force-rerun-existing) REUSE_EXISTING=0;   shift ;;
     --dry-run)            DRY_RUN=1;             shift ;;
@@ -395,6 +430,11 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
+
+if [[ -n "${THRESHOLD_STRATEGY}" && "${THRESHOLD_STRATEGY}" != "validation_holdout" && "${THRESHOLD_STRATEGY}" != "grouped_oof" ]]; then
+  echo "ERROR: --threshold-strategy must be validation_holdout or grouped_oof." >&2
+  exit 2
+fi
 
 if [[ "${RUN_SITE_CASCADE}" -eq 1 && "${RUN_CASCADE}" -eq 0 ]]; then
   echo "ERROR: --run-site-cascade requires cascade analysis, but --skip-cascade was also supplied." >&2
@@ -436,7 +476,8 @@ log "Organisms  : ${ORGANISMS[*]}"
 log "Fraction   : ${SAMPLE_FRACTION} (ignored when source=raw)"
 log "Python     : ${PYTHON_BIN}"
 log "Reuse      : ${REUSE_EXISTING}"
-log "Features   : ${RUN_FEATURES} | Training: ${RUN_TRAINING} | ESKAPE: ${RUN_ESKAPE}"
+log "Features   : ${RUN_FEATURES} | Training: ${RUN_TRAINING} | Threshold comparison: ${RUN_THRESHOLD_COMPARISON} | ESKAPE: ${RUN_ESKAPE}"
+log "Threshold  : ${THRESHOLD_STRATEGY:-configured default}"
 echo
 
 # ── sampling ──────────────────────────────────────────────────────────────────
@@ -632,21 +673,35 @@ for raw_organism in "${ORGANISMS[@]}"; do
   training_dep=""
   if [[ "${RUN_TRAINING}" -eq 1 ]]; then
     training_name="${org_pfx}_training"
-    if should_submit "${feature_dep}" training_ready "combined" "" "${organism}"; then
-      spawn_task "${training_name}" "${feature_dep}" \
-        "${PYTHON_BIN}" scripts/run_training.py --env "${ENV_NAME}" \
-          --scope combined --organism "${organism}"
+    if [[ -n "${THRESHOLD_STRATEGY}" ]] || should_submit "${feature_dep}" training_ready "combined" "" "${organism}"; then
+      train_cmd=("${PYTHON_BIN}" scripts/run_training.py --env "${ENV_NAME}" --scope combined --organism "${organism}")
+      [[ -n "${THRESHOLD_STRATEGY}" ]] && train_cmd+=(--threshold-strategy "${THRESHOLD_STRATEGY}")
+      spawn_task "${training_name}" "${feature_dep}" "${train_cmd[@]}"
       training_dep="${training_name}"
     else
       log "Ready; not spawning ${training_name}"
     fi
   fi
 
-  # report — waits for prevalence + training (if training enabled)
+  threshold_comparison_dep=""
+  if [[ "${RUN_THRESHOLD_COMPARISON}" -eq 1 ]]; then
+    threshold_comparison_name="${org_pfx}_threshold_compare"
+    if should_submit "${feature_dep}" threshold_comparison_ready "combined" "" "${organism}"; then
+      spawn_task "${threshold_comparison_name}" "${feature_dep}" \
+        "${PYTHON_BIN}" scripts/run_threshold_strategy_comparison.py --env "${ENV_NAME}" \
+          --scope combined --organism "${organism}" --split-strategy site
+      threshold_comparison_dep="${threshold_comparison_name}"
+    else
+      log "Ready; not spawning ${threshold_comparison_name}"
+    fi
+  fi
+
+  # report — waits for prevalence and any enabled modeling stages
   if [[ "${RUN_REPORTING}" -eq 1 ]]; then
     report_name="${org_pfx}_report"
     report_deps_arr=("${prevalence_dep}")
     [[ -n "${training_dep}" ]] && report_deps_arr+=("${training_dep}")
+    [[ -n "${threshold_comparison_dep}" ]] && report_deps_arr+=("${threshold_comparison_dep}")
     report_deps="$(join_colon "${report_deps_arr[@]}")"
     if should_submit "${report_deps}" reporting_ready "combined" "" "${organism}"; then
       report_cmd=("${PYTHON_BIN}" scripts/run_reporting.py --env "${ENV_NAME}"

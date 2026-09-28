@@ -42,6 +42,17 @@ def register_training_command(subparsers, project_root: Path, context_builder) -
         default=None,
         help="Optional modeling split strategy. Defaults to the configured primary strategy.",
     )
+    parser.add_argument(
+        "--threshold-strategy",
+        choices=("validation_holdout", "grouped_oof"),
+        default=None,
+        help=(
+            "Threshold-selection strategy. validation_holdout preserves the legacy validation-site "
+            "sweep; grouped_oof selects from patient-grouped out-of-fold training predictions and "
+            "requires observed_only or clinical_no_cascade features unless cascade features are "
+            "regenerated inside each fold."
+        ),
+    )
     parser.add_argument("--organism", default=None, help="Optional organism filter for organism-stratified modeling.")
     parser.set_defaults(handler=lambda args: _run(args, project_root, context_builder))
 
@@ -57,5 +68,6 @@ def _run(args, project_root: Path, context_builder) -> None:
             ablation=bool(args.ablation),
             organism=args.organism,
             split_strategy=args.split_strategy,
+            threshold_selection_strategy=args.threshold_strategy,
         )
     )

@@ -425,10 +425,13 @@ def pbi_sensitivity(
     cotesting_probabilities: pd.DataFrame,
     validation_results: pd.DataFrame,
     settings: Settings,
-    stricter_threshold: float = 0.90,
+    stricter_threshold: float | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, object]]:
     """Apply the co-testing screen's own rule at a stricter threshold to the retained pairs."""
     primary_threshold = float(settings.cascade.cotesting_probability_threshold)
+    stricter_threshold = _resolve_stricter_pbi_threshold(
+        primary_threshold, stricter_threshold
+    )
     min_support = int(settings.cascade.min_total_support)
     probabilities = _pair_keys(cotesting_probabilities)[
         PAIR + ["p_downstream_given_upstream", "p_upstream_given_downstream", "support_n", "reverse_support_n"]
@@ -522,7 +525,11 @@ def pair_flow(
     return flow
 
 
-def pbi_distribution(cotesting_probabilities: pd.DataFrame, settings: Settings, stricter_threshold: float = 0.90) -> dict[str, object]:
+def pbi_distribution(
+    cotesting_probabilities: pd.DataFrame,
+    settings: Settings,
+    stricter_threshold: float | None = None,
+) -> dict[str, object]:
     """Where the screen's threshold falls in the distribution of assessed pairs' PBI."""
     frame = cotesting_probabilities.copy()
     pbi = frame[["p_downstream_given_upstream", "p_upstream_given_downstream"]].min(axis=1, skipna=False)
@@ -530,6 +537,7 @@ def pbi_distribution(cotesting_probabilities: pd.DataFrame, settings: Settings, 
     removed = frame["flagged"].fillna(False).astype(bool)
     kept = assessed & ~removed
     primary = float(settings.cascade.cotesting_probability_threshold)
+    stricter_threshold = _resolve_stricter_pbi_threshold(primary, stricter_threshold)
     return {
         "assessed_pairs": int(assessed.sum()),
         "one_direction_pairs": int((~assessed).sum()),
@@ -540,6 +548,24 @@ def pbi_distribution(cotesting_probabilities: pd.DataFrame, settings: Settings, 
         "max_kept_pbi": float(pbi[kept].max()) if kept.any() else math.nan,
         "min_removed_pbi": float(pbi[removed].min()) if removed.any() else math.nan,
     }
+
+
+def _resolve_stricter_pbi_threshold(
+    primary_threshold: float,
+    stricter_threshold: float | None,
+) -> float:
+    """Return a more exclusionary PBI cutoff and reject self-comparisons."""
+    candidate = (
+        round(primary_threshold - 0.05, 10)
+        if stricter_threshold is None
+        else float(stricter_threshold)
+    )
+    if not 0.0 <= candidate < primary_threshold <= 1.0:
+        raise ValueError(
+            "The PBI sensitivity cutoff must be in [0, primary_threshold). "
+            f"Received stricter={candidate:g}, primary={primary_threshold:g}."
+        )
+    return candidate
 
 
 # ---------------------------------------------------------------------------
@@ -1063,7 +1089,7 @@ def smd_balance_table(
         columns={
             "Mean abs SMD (observed vs unobserved)": "mean_abs_smd_observed_vs_unobserved",
             "Mean abs SMD (cascade evaluable vs unobserved)": "mean_abs_smd_triggered_vs_unobserved",
-            "Mean abs SMD (independent evaluable vs unobserved)": "mean_abs_smd_independent_vs_unobserved",
+            "Mean abs SMD (no-trigger evaluable vs unobserved)": "mean_abs_smd_independent_vs_unobserved",
             "Flagged covariates (observed vs unobserved)": "flagged_covariates_observed_vs_unobserved",
         }
     )
@@ -1260,15 +1286,19 @@ def prediction_summary(metrics: pd.DataFrame) -> dict[str, object]:
     }
 
 
-def s12_fragment(comparison: pd.DataFrame, test_prevalence: float) -> str:
+def s12_fragment(
+    comparison: pd.DataFrame,
+    test_prevalence: float,
+    primary_model: str = "Logistic Regression",
+) -> str:
     values = comparison[_MODEL_COMPARISON_COLUMNS].apply(pd.to_numeric, errors="coerce")
-    best = values["ROC-AUC (test)"].max()
     rows = []
     for model, row in zip(comparison["Model"], values.itertuples(index=False)):
         cells = [latex_float(value, 3) for value in row]
-        if row[2] == best:
-            cells[2] = f"\\textbf{{{cells[2]}}}"
-        rows.append([latex_text(model), *cells])
+        model_cell = latex_text(model)
+        if str(model).casefold() == primary_model.casefold():
+            model_cell = f"\\textbf{{{model_cell}}}"
+        rows.append([model_cell, *cells])
     baseline = ["No-skill baseline", "0.500", "0.500", "0.500", latex_float(test_prevalence, 3), "---", "0.500"]
     return _rows(rows) + "\\midrule\n" + _rows([baseline])
 
@@ -1898,31 +1928,80 @@ _MODEL_DISPLAY = {"logistic_regression": "logistic regression", "random_forest":
 
 
 def prediction_details(metrics: pd.DataFrame, thresholds: pd.DataFrame | None, coefficients: pd.DataFrame | None) -> dict[str, object]:
-    """Ranges and gaps the prediction text quotes, the selected LR threshold row, and the strongest LR features."""
+    """Prediction diagnostics without using the sealed test set for model selection."""
     details: dict[str, object] = {}
     auc = metrics.pivot_table(index="model_name", columns="split", values="roc_auc", aggfunc="first")
     details["roc_auc_range"] = {split: {"min": float(auc[split].min()), "max": float(auc[split].max())} for split in auc.columns}
     if "test" in auc.columns:
-        best = auc["test"].idxmax()
-        details["test_best_model"] = _MODEL_DISPLAY.get(str(best), str(best).replace("_", " "))
-        details["test_gap_to_best"] = {str(model): float(auc.loc[best, "test"] - value) for model, value in auc["test"].items()}
+        leader = auc["test"].idxmax()
+        details["test_roc_auc_leader_descriptive"] = _MODEL_DISPLAY.get(
+            str(leader), str(leader).replace("_", " ")
+        )
+        details["test_gap_to_leader_descriptive"] = {
+            str(model): float(auc.loc[leader, "test"] - value)
+            for model, value in auc["test"].items()
+        }
         details["train_to_test_gap"] = {str(model): float(auc.loc[model, "train"] - auc.loc[model, "test"]) for model in auc.index if "train" in auc.columns}
     if thresholds is not None and not thresholds.empty:
         numeric = thresholds.apply(pd.to_numeric, errors="coerce")
         selected = metrics.loc[metrics["split"].eq("test") & metrics["model_name"].eq("logistic_regression"), "decision_threshold"]
         if len(selected):
-            row = numeric.iloc[(numeric["Threshold"] - float(selected.iloc[0])).abs().argmin()]
-            details["lr_at_selected"] = {"threshold": float(row["Threshold"]), "precision": float(row["Precision"]), "recall": float(row["Recall"]), "f1": float(row["F1"])}
+            # The selected threshold's own row: quoting the nearest row would put a
+            # neighbouring threshold's numbers against the selected one.
+            match = numeric.loc[(numeric["Threshold"] - float(selected.iloc[0])).abs().lt(1e-6)]
+            if len(match):
+                row = match.iloc[0]
+                details["lr_at_selected"] = {
+                    "threshold": float(row["Threshold"]), "precision": float(row["Precision"]),
+                    "recall": float(row["Recall"]), "f1": float(row["F1"]),
+                    "balanced_accuracy": float(row["Balanced Acc."]) if "Balanced Acc." in row.index else math.nan,
+                }
         high = numeric.loc[(numeric["Threshold"] - 0.7).abs().lt(1e-9)]
         if len(high):
             row = high.iloc[0]
-            details["lr_at_070"] = {"precision": float(row["Precision"]), "recall": float(row["Recall"]), "f1": float(row["F1"])}
+            details["lr_at_070"] = {
+                "precision": float(row["Precision"]), "recall": float(row["Recall"]), "f1": float(row["F1"]),
+                "balanced_accuracy": float(row["Balanced Acc."]) if "Balanced Acc." in row.index else math.nan,
+            }
     if coefficients is not None and not coefficients.empty:
         ranked = pd.DataFrame({"feature": coefficients["Feature"].astype(str), "odds_ratio": pd.to_numeric(coefficients["Odds Ratio"], errors="coerce")})
         ranked = ranked.dropna(subset=["odds_ratio"]).sort_values("odds_ratio", ascending=False, kind="mergesort")
         details["lr_top_positive"] = ranked.head(3).to_dict(orient="records")
         details["lr_top_negative"] = ranked.tail(3).iloc[::-1].to_dict(orient="records")
     return details
+
+
+_THRESHOLD_STRATEGIES = ("validation_holdout", "grouped_oof")
+
+
+def threshold_comparison_summary(selected: pd.DataFrame, test_metrics: pd.DataFrame) -> dict[str, object]:
+    """Each threshold-selection procedure's frozen threshold and its sealed-test performance.
+
+    The test-site numbers set the two procedures side by side; they are not used
+    to choose between them.
+    """
+    summary: dict[str, object] = {}
+    for strategy in _THRESHOLD_STRATEGIES:
+        chosen = selected.loc[selected["comparison_strategy"].eq(strategy)]
+        tested = test_metrics.loc[test_metrics["comparison_strategy"].eq(strategy) & test_metrics["split"].eq("test")]
+        if len(chosen) != 1 or len(tested) != 1:
+            raise ValueError(
+                f"Threshold comparison has {len(chosen)} selected and {len(tested)} test rows for {strategy}; expected one of each."
+            )
+        choice, test = chosen.iloc[0], tested.iloc[0]
+        entry: dict[str, object] = {
+            "selected_threshold": float(choice["selected_threshold"]),
+            "selection_rows": int(choice["selection_rows"]),
+            "test": {metric: float(test[metric]) for metric in ("balanced_accuracy", "recall", "precision", "f1")},
+        }
+        if pd.notna(choice.get("selection_groups")):
+            entry["selection_patients"] = int(choice["selection_groups"])
+            entry["folds"] = int(choice["cv_folds"])
+        summary[strategy] = entry
+    holdout, oof = summary["validation_holdout"], summary["grouped_oof"]
+    summary["threshold_difference"] = abs(oof["selected_threshold"] - holdout["selected_threshold"])
+    summary["test_balanced_accuracy_difference"] = oof["test"]["balanced_accuracy"] - holdout["test"]["balanced_accuracy"]
+    return summary
 
 
 # ---------------------------------------------------------------------------
@@ -2123,6 +2202,9 @@ class SupplementaryTableBuilder:
         lr_coefficients = read(tables_dir / "supp_pred_table2_lr_top_features.csv", missing)
         lr_thresholds = read(tables_dir / "supp_pred_table3_lr_threshold.csv", missing)
         model_metrics = read(self._modeling_dir(organism) / "site__all_models" / "metrics.parquet", missing)
+        comparison_dir = self._modeling_dir(organism) / "threshold_strategy_comparison"
+        threshold_selected = read(comparison_dir / "threshold_strategy_selected.parquet", missing)
+        threshold_tested = read(comparison_dir / "threshold_strategy_test_metrics.parquet", missing)
         prevalence = read(tables_dir / "table_k_prevalence_shift.csv", missing)
         coverage = read(tables_dir / "table_w_observation_coverage.csv", missing)
         diagnostics = read(tables_dir / "table_k_prevalence_shift_diagnostics.csv", missing)
@@ -2285,6 +2367,10 @@ class SupplementaryTableBuilder:
             fragments["prevalence_top"] = prevalence_fragment(top, self._resolver)
         if model_metrics is not None and "prediction" in numbers:
             numbers["prediction"].update(prediction_details(model_metrics, lr_thresholds, lr_coefficients))
+        if threshold_selected is not None and threshold_tested is not None:
+            numbers.setdefault("prediction", {})["threshold_comparison"] = threshold_comparison_summary(
+                threshold_selected, threshold_tested
+            )
         configured_runs = settings.reporting.availability_sensitivity_environments
         if configured_runs and validation is not None:
             runs = {}

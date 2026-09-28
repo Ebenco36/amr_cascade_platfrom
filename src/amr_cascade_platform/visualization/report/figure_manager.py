@@ -33,6 +33,10 @@ from amr_cascade_platform.visualization.report.plotly_cascade_plotters import (
 )
 from amr_cascade_platform.visualization.report.plotly_delta_curves_plotter import PrevalenceDeltaCurvePlotter
 from amr_cascade_platform.visualization.report.plotly_model_plotters import PlotlyModelEvaluationPlotter
+from amr_cascade_platform.visualization.report.plotly_threshold_strategy_comparison_plotter import (
+    PlotlyThresholdStrategyComparisonPlotter,
+)
+from amr_cascade_platform.visualization.report.plotly_shap_plotter import PlotlyShapPlotter
 from amr_cascade_platform.visualization.report.plotly_mnar_tipping_point_plotter import PlotlyMNARTippingPointPlotter
 from amr_cascade_platform.visualization.report.plotly_prevalence_plotter import PlotlyPrevalencePlotter
 from amr_cascade_platform.visualization.report.plotly_validation_diagnostics_plotter import PlotlyValidationDiagnosticsPlotter
@@ -81,6 +85,7 @@ class FigureManager:
         self._anti_artefact_plotter = AntiArtefactScatterPlotter(
             exporter=exporter, template=settings.reporting.plotly_template,
             width=settings.reporting.image_width, height=settings.reporting.image_height,
+            cotesting_threshold=float(settings.cascade.cotesting_probability_threshold),
         )
         self._adjustment_concordance_plotter = AdjustmentConcordancePlotter(
             exporter=exporter, template=settings.reporting.plotly_template,
@@ -139,6 +144,18 @@ class FigureManager:
             classification_resolver=classification,
         )
         self._model_plotter = PlotlyModelEvaluationPlotter(
+            exporter=exporter,
+            template=settings.reporting.plotly_template,
+            width=settings.reporting.image_width,
+            height=settings.reporting.image_height,
+        )
+        self._threshold_strategy_comparison_plotter = PlotlyThresholdStrategyComparisonPlotter(
+            exporter=exporter,
+            template=settings.reporting.plotly_template,
+            width=settings.reporting.image_width,
+            height=settings.reporting.image_height,
+        )
+        self._shap_plotter = PlotlyShapPlotter(
             exporter=exporter,
             template=settings.reporting.plotly_template,
             width=settings.reporting.image_width,
@@ -392,6 +409,43 @@ class FigureManager:
     def export_model_threshold_analysis(self, threshold_metrics: pd.DataFrame, output_stem: Path, formats: tuple[str, ...]) -> dict[str, Path]:
         return self._model_plotter.export_threshold_analysis(threshold_metrics, output_stem, formats)
 
+    def export_threshold_strategy_comparison(
+        self,
+        curves: pd.DataFrame,
+        selected: pd.DataFrame,
+        test_metrics: pd.DataFrame,
+        output_stem: Path,
+        formats: tuple[str, ...],
+    ) -> dict[str, Path]:
+        return self._threshold_strategy_comparison_plotter.export(
+            curves=curves,
+            selected=selected,
+            test_metrics=test_metrics,
+            output_stem=output_stem,
+            formats=formats,
+        )
+
+    def export_adjusted_model_shap(
+        self,
+        global_importance: pd.DataFrame,
+        sampled_values: pd.DataFrame,
+        output_dir: Path,
+        formats: tuple[str, ...],
+        pairs: list[tuple[str, str]] | None = None,
+        domain_summary: pd.DataFrame | None = None,
+    ) -> dict[str, Path]:
+        """Per-pair importance and beeswarm figures for ``pairs`` (default: all), plus the cross-pair domain summary."""
+        outputs = self._shap_plotter.export_pair_suite(
+            global_importance,
+            sampled_values,
+            output_dir,
+            formats,
+            pairs=pairs,
+        )
+        if domain_summary is not None and not domain_summary.empty:
+            outputs.update(self._shap_plotter.export_domain_summary(domain_summary, output_dir, formats))
+        return outputs
+
     def export_aware_transition_heatmap(
         self,
         transition_summary: pd.DataFrame,
@@ -570,6 +624,32 @@ class FigureManager:
             output_dir=output_dir,
             formats=formats,
         )
+
+    def export_dataset_summary_figures(
+        self,
+        eligible_pairs: pd.DataFrame,
+        culture_episodes: pd.DataFrame,
+        drug_pair_episodes: pd.DataFrame,
+        output_dir: Path,
+        formats: tuple[str, ...],
+    ) -> dict[str, Path]:
+        """The dataset-characterisation figures that need only the gold layer (no cascade output).
+
+        culture_episodes should carry the adjusted model's covariates
+        (ManuscriptTableBuilder.culture_episodes_with_covariates).
+        """
+        plotter = self._dataset_characterization_plotter
+        output_dir.mkdir(parents=True, exist_ok=True)
+        outputs: dict[str, Path] = {}
+        outputs.update(plotter.export_eligibility_funnel(eligible_pairs, output_dir / "dataset_eligibility_funnel", formats))
+        outputs.update(plotter.export_eligibility_by_site(eligible_pairs, output_dir / "dataset_eligibility_by_site", formats))
+        outputs.update(plotter.export_eligible_vs_observed_by_drug(eligible_pairs, output_dir / "dataset_eligible_vs_observed", formats))
+        outputs.update(plotter.export_observation_rate_heatmap(eligible_pairs, output_dir / "dataset_observation_rate_heatmap", formats))
+        outputs.update(plotter.export_episode_temporal_heatmap(culture_episodes, output_dir / "dataset_episode_temporal_heatmap", formats))
+        outputs.update(plotter.export_covariate_comparison(eligible_pairs, culture_episodes, output_dir / "dataset_covariate_comparison", formats))
+        outputs.update(plotter.export_missing_data_profile(culture_episodes, output_dir / "dataset_missing_data_profile", formats))
+        outputs.update(plotter.export_testing_rate_by_upstream_result(drug_pair_episodes, output_dir / "dataset_testing_rate_by_upstream_result", formats))
+        return outputs
 
     def export_eligible_vs_observed_by_drug(
         self,

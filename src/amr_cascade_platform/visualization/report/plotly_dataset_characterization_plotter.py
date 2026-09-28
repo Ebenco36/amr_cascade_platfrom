@@ -506,9 +506,10 @@ class DatasetCharacterizationPlotter:
 
         fig = go.Figure(go.Heatmap(
             z=pivot.values * 100,
-            x=pivot.columns.tolist(),
+            x=[site_label(str(site)) for site in pivot.columns],
             y=pivot.index.tolist(),
-            colorscale=[[0, "#C0392B"], [0.5, "#F5CBA7"], [1, "#27AE60"]],
+            # One hue, light to dark: a share is a magnitude, and red-green is not colour-blind safe.
+            colorscale=[[stop, colour] for stop, colour in _BLUE_RAMP],
             zmin=0, zmax=100,
             text=[[f"{v * 100:.0f}%" if not math.isnan(v) else "—"
                    for v in row] for row in pivot.values],
@@ -566,9 +567,9 @@ class DatasetCharacterizationPlotter:
 
         fig = go.Figure(go.Heatmap(
             z=pivot.values * 100,
-            x=pivot.columns.tolist(),
+            x=[site_label(str(site)) for site in pivot.columns],
             y=pivot.index.tolist(),
-            colorscale=[[0, "#C0392B"], [0.5, "#F5CBA7"], [1, "#27AE60"]],
+            colorscale=[[stop, colour] for stop, colour in _BLUE_RAMP],
             zmin=0, zmax=100,
             text=[[f"{v * 100:.0f}%" if not math.isnan(v) else "—"
                    for v in row] for row in pivot.values],
@@ -624,7 +625,7 @@ class DatasetCharacterizationPlotter:
 
         fig = make_subplots(
             rows=1, cols=len(sites), shared_yaxes=True,
-            subplot_titles=sites, horizontal_spacing=0.03,
+            subplot_titles=[site_label(str(site)) for site in sites], horizontal_spacing=0.03,
         )
         for annotation in fig.layout.annotations:
             annotation.font = {"size": 12}
@@ -933,7 +934,7 @@ class DatasetCharacterizationPlotter:
 
         fig = make_subplots(
             rows=1, cols=n_sites,
-            subplot_titles=[str(s) for s in sites],
+            subplot_titles=[site_label(str(s)) for s in sites],
             horizontal_spacing=0.08,
         )
         months = ["Jan","Feb","Mar","Apr","May","Jun",
@@ -963,7 +964,7 @@ class DatasetCharacterizationPlotter:
         fig.update_layout(
             template=self._template,
             width=self._width,
-            height=max(400, self._height // 2),
+            height=max(720, self._height),
             paper_bgcolor=_BG,
             plot_bgcolor=_BG,
             title=dict(text="<b>Episode Volume by Calendar Period and Site</b>",
@@ -1095,7 +1096,7 @@ class DatasetCharacterizationPlotter:
             ))
 
         fig.add_hline(y=1.0, line=dict(color=_REF, dash="dash", width=1.2),
-                      annotation_text="ER = 1 (no cascade)", annotation_position="right")
+                      annotation_text="ER = 1 (no cascade)", annotation_position="top left")
 
         fig.update_layout(
             template=self._template,
@@ -1105,7 +1106,7 @@ class DatasetCharacterizationPlotter:
             plot_bgcolor=_BG,
             title=dict(text="<b>Drug-Pair Support vs. Escalation Ratio</b>",
                        font=dict(size=15, color=_TEXT)),
-            xaxis=dict(title="Total episode pairs (support N)", type="log",
+            xaxis=dict(title="Total episode pairs (support N)", type="log", dtick=1,
                        gridcolor=_GRID),
             yaxis=dict(title="Escalation ratio", gridcolor=_GRID),
             legend=dict(title=""),
@@ -1172,7 +1173,7 @@ class DatasetCharacterizationPlotter:
                      "<sup>Share of culture episodes with each adjusted-model covariate recorded</sup>",
                 font=dict(size=16, color=_TEXT), x=0.01, xanchor="left",
             ),
-            xaxis=dict(title="", side="top", tickfont=dict(size=13), tickangle=0),
+            xaxis=dict(title="", side="top", tickfont=dict(size=11), tickangle=0),
             yaxis=dict(title="", autorange="reversed", tickfont=dict(size=13)),
             margin=dict(l=40, r=40, t=110, b=30),
         )

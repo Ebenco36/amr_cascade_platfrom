@@ -135,3 +135,14 @@ def test_notes_below_the_plot_get_room_above_a_bottom_legend():
     note_bottom = 0.2 * plot_height + 1.3 * 12 * PRINT_FONT_SCALE
     legend_top = layout["legend"]["y"] * layout["height"] + 1.45 * 12 * PRINT_FONT_SCALE
     assert layout["margin"]["b"] >= note_bottom + (legend_top - layout["legend"]["y"] * layout["height"])
+
+
+def test_multi_line_x_labels_wrap_on_their_own_words():
+    labels = ["All sites<br>n = 4,712", "Stanford<br>n = 1,829", "ECU Health<br>n = 1,692", "UT Southwestern<br>n = 1,191"]
+    figure = go.Figure(go.Heatmap(z=[[1, 2, 3, 4]], x=labels, y=["Age"]),
+                       layout={"xaxis": {"tickangle": 0, "tickfont": {"size": 11}}, "margin": {"l": 40, "r": 40}})
+    # Each column fits a 12-character word but not "UT Southwestern" on one line.
+    spec = prepare_for_print(figure.to_plotly_json(), 1060, 600)
+    axis = spec["layout"]["xaxis"]
+    assert axis["tickangle"] == 0  # measuring "Southwesternn" (lines glued) would have stood them up
+    assert axis["ticktext"][3].split("<br>")[:2] == ["UT", "Southwestern"]

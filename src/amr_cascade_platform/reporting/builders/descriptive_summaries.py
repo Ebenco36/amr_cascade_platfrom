@@ -698,7 +698,7 @@ EXCLUSION_STAGES = (
     ("AST rows", "organism_rows", "Rows for the analysed organism"),
     ("AST rows", "no_result_rows", "No result recorded"),
     ("AST rows", "other_non_interpretive_rows", "Result other than R, S or I (e.g. INCONCLUSIVE)"),
-    ("AST rows", "excluded_assay_rows", "ESBL phenotypic confirmation assays"),
+    ("AST rows", "excluded_assay_rows", "Screening, confirmatory and mechanism assays; non-antibacterial agents"),
     ("AST rows", "interpretable_rows", "Interpretable results (R, S or I)"),
     ("Episode–antibiotic results", "repeated_rows", "Repeated rows for the same episode, antibiotic and result"),
     ("Episode–antibiotic results", "conflicting_extra_rows", "Additional rows of conflicting results"),

@@ -47,6 +47,14 @@ python -c "import amr_cascade_platform" && echo "Platform installed OK"
 
 If the last line prints `Platform installed OK`, the environment is ready.
 
+You can also skip these steps: `bash scripts/submit_everything_hpc.sh` does the same
+before it queues anything. It creates `.venv` if it is missing, and installs every
+package in `requirements-hpc.txt` (which includes `requirements.txt`) whenever the
+requirement files or `pyproject.toml` changed since the last install, such as after a
+`git pull` that adds a package. When nothing changed it installs nothing. Pass
+`--skip-install` to use `.venv` as it is, or `--delete-venv` to rebuild it from scratch.
+Run it from the login node, which has internet access.
+
 ---
 
 ## 3. Place the input data

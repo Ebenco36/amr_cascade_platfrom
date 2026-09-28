@@ -27,7 +27,8 @@ Options:
                                /usr/bin/python3.12 over conda Python, because the
                                conda stdlib may not be mounted on compute nodes).
                                Example: --python-bin /usr/bin/python3.12
-                               If the venv is missing/broken the script rebuilds it.
+                               If the venv is missing the script creates it; see
+                               --skip-install for package updates.
   --skip-ingestion
   --skip-preprocessing
   --skip-harmonization
@@ -36,9 +37,15 @@ Options:
   --skip-cascade
   --skip-prevalence
   --skip-reporting
+  --skip-dataset-summary
   --run-site-cascade           Also run site-level organism gold/cascade jobs.
   --run-features               Build combined model-ready features.
   --run-training               Train combined downstream-testing models.
+  --run-threshold-comparison   Compare validation-site holdout with patient-grouped
+                               OOF threshold selection using the same
+                               clinical-no-cascade logistic model.
+  --threshold-strategy MODE    Threshold selection for training: validation_holdout
+                               (legacy) or grouped_oof (patient-grouped training CV).
   --run-eskape                 Run ESKAPE-family cascade validation (site + combined
                                 scope) as one independent job per target, rather than
                                 one sequential job looping over all targets. Each
@@ -60,7 +67,8 @@ Options:
                                report outputs are generated.
   --run-publication-package    Shortcut for --run-site-cascade
                                --include-site-comparison-figures --run-features
-                               --run-training --run-eskape --run-all-figures
+                               --run-training --run-threshold-comparison --run-eskape
+                               --run-all-figures
                                --run-audit --run-readiness-audit.
   --eskape-targets T1,T2        Default: Enterococcus,Staphylococcus,Klebsiella,
                                 Acinetobacter,Pseudomonas,Enterobacter
@@ -68,6 +76,12 @@ Options:
                                forcing a clean reinstall of all Python packages.
                                Use this when switching Python versions or when
                                packages are corrupted.
+  --setup-only                 Create .venv or bring its packages up to date, then
+                               exit without submitting anything.
+  --skip-install               Use .venv as it is: check that it imports, never
+                               install. By default every submission installs into
+                               .venv whenever requirements-hpc.txt, requirements.txt
+                               or pyproject.toml changed since the last install.
   --fix-stale-gold             Before submitting, move aside any existing
                                gold-layer output (data/gold/.../organisms/<slug>)
                                for every organism/scope this invocation would
@@ -86,6 +100,9 @@ Options:
   --fix-stale                  Shorthand for --fix-stale-gold --fix-stale-cascade.
   --force-rerun-existing       Submit enabled stages even when outputs exist.
   --dry-run                    Print sbatch commands without submitting.
+  --allow-dirty-checkout       Submit even though src/, scripts/ or configs/ differ from
+                               the checked-out commit. By default this is refused, so
+                               every result traces to one commit.
   --wait                       After submission, block until all jobs finish
                                and print a final per-job status table. Exits
                                non-zero if any job did not complete cleanly.
@@ -168,7 +185,10 @@ FIX_STALE_CASCADE=0
 # for a different Python version or a different venv rebuild.
 VENV_SITE=""
 DELETE_VENV=0
+SETUP_ONLY=0
+SKIP_INSTALL=0
 DRY_RUN=0
+ALLOW_DIRTY_CHECKOUT=0
 WAIT_FOR_JOBS=0
 MONITOR_INTERVAL=60
 STATUS_FILE=""
@@ -181,9 +201,12 @@ RUN_GOLD=1
 RUN_CASCADE=1
 RUN_PREVALENCE=1
 RUN_REPORTING=1
+RUN_DATASET_SUMMARY=1
 RUN_SITE_CASCADE=0
 RUN_FEATURES=0
 RUN_TRAINING=0
+RUN_THRESHOLD_COMPARISON=0
+THRESHOLD_STRATEGY=""
 RUN_ESKAPE=0
 RUN_ALL_FIGURES=0
 RUN_SITE_COMPARISON_FIGURES=0
@@ -242,9 +265,16 @@ while [[ $# -gt 0 ]]; do
     --skip-cascade) RUN_CASCADE=0; shift ;;
     --skip-prevalence) RUN_PREVALENCE=0; shift ;;
     --skip-reporting) RUN_REPORTING=0; shift ;;
+    --skip-dataset-summary) RUN_DATASET_SUMMARY=0; shift ;;
     --run-site-cascade) RUN_SITE_CASCADE=1; shift ;;
     --run-features) RUN_FEATURES=1; shift ;;
     --run-training) RUN_TRAINING=1; shift ;;
+    --run-threshold-comparison) RUN_THRESHOLD_COMPARISON=1; shift ;;
+    --threshold-strategy)
+      [[ $# -ge 2 ]] || { echo "--threshold-strategy requires a value" >&2; exit 2; }
+      THRESHOLD_STRATEGY="$2"
+      shift 2
+      ;;
     --run-eskape) RUN_ESKAPE=1; shift ;;
     --run-all-figures) RUN_ALL_FIGURES=1; shift ;;
     --include-site-comparison-figures) RUN_SITE_COMPARISON_FIGURES=1; shift ;;
@@ -254,6 +284,7 @@ while [[ $# -gt 0 ]]; do
       RUN_SITE_CASCADE=1
       RUN_FEATURES=1
       RUN_TRAINING=1
+      RUN_THRESHOLD_COMPARISON=1
       RUN_ESKAPE=1
       RUN_ALL_FIGURES=1
       RUN_SITE_COMPARISON_FIGURES=1
@@ -267,6 +298,8 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --delete-venv) DELETE_VENV=1; shift ;;
+    --setup-only) SETUP_ONLY=1; shift ;;
+    --skip-install) SKIP_INSTALL=1; shift ;;
     --fix-stale-gold) FIX_STALE_GOLD=1; shift ;;
     --fix-stale-cascade) FIX_STALE_CASCADE=1; shift ;;
     --fix-stale)
@@ -276,6 +309,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --force-rerun-existing) REUSE_EXISTING=0; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
+    --allow-dirty-checkout) ALLOW_DIRTY_CHECKOUT=1; shift ;;
     --wait) WAIT_FOR_JOBS=1; shift ;;
     --monitor-interval)
       [[ $# -ge 2 ]] || { echo "--monitor-interval requires a value" >&2; exit 2; }
@@ -291,6 +325,11 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
+
+if [[ -n "${THRESHOLD_STRATEGY}" && "${THRESHOLD_STRATEGY}" != "validation_holdout" && "${THRESHOLD_STRATEGY}" != "grouped_oof" ]]; then
+  echo "ERROR: --threshold-strategy must be validation_holdout or grouped_oof." >&2
+  exit 2
+fi
 
 if [[ "${RUN_SITE_CASCADE}" -eq 1 && "${RUN_CASCADE}" -eq 0 ]]; then
   echo "ERROR: --run-site-cascade requires cascade analysis, but --skip-cascade was also supplied." >&2
@@ -367,13 +406,86 @@ find_base_python() {
 # exact Python path that SLURM will run, the script exits before submitting any
 # jobs. Submitting jobs against a missing/incomplete Python environment only
 # produces a fast wall of failed jobs.
+#
+# Packages follow the requirement files on every submission. After each successful
+# install the venv records a fingerprint of requirements-hpc.txt, requirements.txt,
+# pyproject.toml and the Python version; when any of them changes (a new package
+# such as shap, a moved version bound) the packages are installed into the existing
+# venv. Only a missing venv, or one on an unsupported Python, is built from scratch
+# (--delete-venv forces that); --skip-install uses the venv as it is.
+
+REQUIREMENTS_STAMP="${PROJECT_ROOT}/.venv/.amr_requirements.sha256"
+RUNTIME_IMPORTS='import pandas, pyarrow, scipy, sklearn, shap, amr_cascade_platform'
+
+requirements_fingerprint() {
+  local python="$1" file
+  {
+    for file in requirements-hpc.txt requirements.txt pyproject.toml; do
+      if [[ -f "${PROJECT_ROOT}/${file}" ]]; then cat "${PROJECT_ROOT}/${file}"; fi
+    done
+    "${python}" -c 'import sys; print(sys.version)'
+  } | "${python}" -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())'
+}
+
+recorded_fingerprint() {
+  if [[ -f "${REQUIREMENTS_STAMP}" ]]; then cat "${REQUIREMENTS_STAMP}"; fi
+}
+
+# Validate with a clean environment: no PYTHONPATH, no user site-packages. This
+# mirrors what compute nodes see inside each SLURM job wrapper. Pass /dev/stderr
+# as the second argument to show why an import failed.
+runtime_imports_ok() {
+  PYTHONNOUSERSITE=1 "$1" -c "${RUNTIME_IMPORTS}" 2>"${2:-/dev/null}"
+}
+
+use_runtime() {
+  local project_python="$1" state="$2"
+  # From the running Python's version_info: sysconfig can return a stale path
+  # when a venv was previously created by a different Python minor version.
+  VENV_SITE="$(PYTHONNOUSERSITE=1 "${project_python}" -c \
+    'import sys, os; print(os.path.join(sys.prefix, "lib",
+     f"python{sys.version_info.major}.{sys.version_info.minor}",
+     "site-packages"))')"
+  PYTHON="$(readlink -f "${project_python}" 2>/dev/null || printf '%s' "${project_python}")"
+  echo "Runtime ready (${state}): $("${project_python}" --version 2>&1)" >&2
+  echo "Venv Python resolves to: ${PYTHON}" >&2
+  echo "Package site-packages: ${VENV_SITE}" >&2
+}
+
+warn_if_jobs_use_the_venv() {
+  command -v squeue >/dev/null 2>&1 || return 0
+  local queued
+  queued="$(squeue -h -u "${USER:-$(id -un)}" -o '%j' 2>/dev/null | grep -c '^amr_' || true)"
+  if [[ "${queued:-0}" -gt 0 ]]; then
+    echo "WARNING: ${queued} of your amr_* jobs are queued or running, and all of them use this venv." >&2
+    echo "         Changing its packages under a running job can break it: cancel them first" >&2
+    echo "         (scancel) unless you know they are unaffected." >&2
+  fi
+}
+
+install_python_packages() {
+  local venv_python="$1" requirements_file="$2"
+  echo "Upgrading pip ..." >&2
+  PYTHONNOUSERSITE=1 "${venv_python}" -m pip install --upgrade pip 2>&1 | tail -2 >&2 || true
+
+  echo "Installing requirements from ${requirements_file} ..." >&2
+  PYTHONNOUSERSITE=1 "${venv_python}" -m pip install -r "${requirements_file}" || {
+    echo "" >&2
+    echo "ERROR: pip install failed — likely no internet on this node." >&2
+    echo "Run the script with 'bash' (not sbatch) from the login node." >&2
+    return 1
+  }
+
+  echo "Installing project package ..." >&2
+  PYTHONNOUSERSITE=1 "${venv_python}" -m pip install -e "${PROJECT_ROOT}" || {
+    echo "ERROR: could not install project package." >&2
+    return 1
+  }
+}
 
 bootstrap_python_runtime() {
   local project_python="${PROJECT_ROOT}/.venv/bin/python"
   local requirements_file="${PROJECT_ROOT}/requirements-hpc.txt"
-  # Validate with a clean environment: no PYTHONPATH, no user site-packages.
-  # This mirrors what compute nodes see inside each SLURM job wrapper.
-  local runtime_ok='import pandas, pyarrow, scipy, sklearn, amr_cascade_platform'
 
   if command -v git >/dev/null 2>&1 && git -C "${PROJECT_ROOT}" rev-parse --git-dir >/dev/null 2>&1; then
     git -C "${PROJECT_ROOT}" fetch --quiet 2>/dev/null || true
@@ -390,31 +502,58 @@ bootstrap_python_runtime() {
     return 1
   fi
 
-  # Fast path: accept an existing venv only if it passes the same clean import
-  # check submitted jobs run. Do not rely on PROJECT_ROOT/src in PYTHONPATH here:
-  # jobs do not set it before check_python_runtime.py.
-  if [[ -x "${project_python}" ]]; then
-    if python_is_supported "${project_python}"; then
-      local _site
-      _site="$(PYTHONNOUSERSITE=1 "${project_python}" -c \
-        'import sys, os; print(os.path.join(sys.prefix, "lib",
-         f"python{sys.version_info.major}.{sys.version_info.minor}",
-         "site-packages"))' 2>/dev/null || true)"
-      if [[ -n "${_site}" ]] && PYTHONNOUSERSITE=1 "${project_python}" -c "${runtime_ok}" 2>/dev/null; then
-        VENV_SITE="${_site}"
-        PYTHON="$(readlink -f "${project_python}" 2>/dev/null || printf '%s' "${project_python}")"
-        echo "Runtime ready (existing env): $("${project_python}" --version 2>&1)" >&2
-        echo "Venv Python resolves to: ${PYTHON}" >&2
-        echo "Package site-packages: ${VENV_SITE}" >&2
+  # An existing venv on a supported Python is updated in place, never deleted, so
+  # a failed download leaves the working venv as it was.
+  if [[ -x "${project_python}" ]] && python_is_supported "${project_python}"; then
+    local wanted recorded
+    wanted="$(requirements_fingerprint "${project_python}")"
+    recorded="$(recorded_fingerprint)"
+    # An empty fingerprint (it could not be computed) never counts as up to date.
+    if [[ -n "${wanted}" && "${recorded}" == "${wanted}" ]] && runtime_imports_ok "${project_python}"; then
+      use_runtime "${project_python}" "existing env, packages up to date"
+      return 0
+    fi
+    if [[ "${SKIP_INSTALL}" -eq 1 ]]; then
+      if runtime_imports_ok "${project_python}"; then
+        if [[ -n "${recorded}" ]]; then
+          echo "WARNING: --skip-install: the requirement files changed since packages were last installed into .venv." >&2
+        else
+          echo "WARNING: --skip-install: .venv has no record of an install from the current requirement files." >&2
+        fi
+        use_runtime "${project_python}" "existing env, not updated (--skip-install)"
         return 0
       fi
-      echo "Existing venv failed clean import validation; rebuilding." >&2
-    else
-      echo "Existing venv uses unsupported Python $(python_version_string "${project_python}"); rebuilding with Python >=3.12." >&2
+      echo "ERROR: --skip-install, but .venv fails the import check:" >&2
+      runtime_imports_ok "${project_python}" /dev/stderr || true
+      return 1
     fi
+    if [[ -n "${recorded}" ]]; then
+      echo "Requirement files changed since the last install: updating .venv packages ..." >&2
+    else
+      echo "Installing every package from ${requirements_file} into the existing .venv ..." >&2
+    fi
+    warn_if_jobs_use_the_venv
+    install_python_packages "${project_python}" "${requirements_file}" || return 1
+    echo "Validating imports (clean environment) ..." >&2
+    if runtime_imports_ok "${project_python}" /dev/stderr; then
+      printf '%s\n' "${wanted}" > "${REQUIREMENTS_STAMP}"
+      use_runtime "${project_python}" "packages installed"
+      return 0
+    fi
+    echo "ERROR: package import validation failed after updating .venv." >&2
+    echo "       Rerun with --delete-venv to rebuild it from scratch." >&2
+    return 1
   fi
 
-  # Find a base Python (not the .venv itself — it is broken or missing).
+  if [[ "${SKIP_INSTALL}" -eq 1 ]]; then
+    echo "ERROR: --skip-install, but ${project_python} is missing or runs a Python older than 3.12." >&2
+    return 1
+  fi
+  if [[ -e "${project_python}" ]]; then
+    echo "Existing venv uses unsupported Python $(python_version_string "${project_python}"); rebuilding with Python >=3.12." >&2
+  fi
+
+  # Find a base Python (not the .venv itself — it is missing or unusable).
   local base_python=""
   base_python="$(find_base_python || true)"
   if [[ -z "${base_python}" ]]; then
@@ -442,51 +581,56 @@ bootstrap_python_runtime() {
   fi
   echo "Venv Python resolves to: $(readlink -f "${venv_python}" 2>/dev/null || printf '%s' "${venv_python}")" >&2
 
-  echo "Upgrading pip ..." >&2
-  PYTHONNOUSERSITE=1 "${venv_python}" -m pip install --upgrade pip 2>&1 | tail -2 >&2 || true
-
-  echo "Installing requirements from ${requirements_file} ..." >&2
-  PYTHONNOUSERSITE=1 "${venv_python}" -m pip install -r "${requirements_file}" || {
-    echo "" >&2
-    echo "ERROR: pip install failed — likely no internet on this node." >&2
-    echo "Run the script with 'bash' (not sbatch) from the login node." >&2
-    return 1
-  }
-
-  echo "Installing project package ..." >&2
-  PYTHONNOUSERSITE=1 "${venv_python}" -m pip install -e "${PROJECT_ROOT}" || {
-    echo "ERROR: could not install project package." >&2
-    return 1
-  }
-
-  # Use sys.version_info to construct the site-packages path — sysconfig.get_path
-  # can return a stale path when a venv was previously created by a different
-  # Python minor version.
-  VENV_SITE="$(PYTHONNOUSERSITE=1 "${venv_python}" -c \
-    'import sys, os; print(os.path.join(sys.prefix, "lib",
-     f"python{sys.version_info.major}.{sys.version_info.minor}",
-     "site-packages"))')"
-  echo "Python version in venv: $("${venv_python}" --version 2>&1)" >&2
-  echo "Site-packages: ${VENV_SITE}" >&2
+  install_python_packages "${venv_python}" "${requirements_file}" || return 1
 
   echo "Validating imports (clean environment) ..." >&2
-  if PYTHONNOUSERSITE=1 "${venv_python}" -c "${runtime_ok}"; then
-    PYTHON="$(readlink -f "${venv_python}" 2>/dev/null || printf '%s' "${venv_python}")"
-    echo "Runtime ready: $("${venv_python}" --version 2>&1)" >&2
+  if runtime_imports_ok "${venv_python}" /dev/stderr; then
+    requirements_fingerprint "${venv_python}" > "${REQUIREMENTS_STAMP}"
+    use_runtime "${venv_python}" "new env"
     return 0
   fi
   echo "ERROR: package import validation failed after install." >&2
   return 1
 }
 
+# What bootstrap_python_runtime would do, without changing anything (--dry-run).
+describe_python_runtime() {
+  local project_python="${PROJECT_ROOT}/.venv/bin/python"
+  if [[ "${DELETE_VENV}" -eq 1 ]]; then
+    echo "[dry-run] Would rebuild .venv from scratch and install every package from requirements-hpc.txt."
+  elif [[ -x "${project_python}" ]] && python_is_supported "${project_python}"; then
+    local wanted
+    wanted="$(requirements_fingerprint "${project_python}" || true)"
+    if [[ -n "${wanted}" && "$(recorded_fingerprint)" == "${wanted}" ]]; then
+      echo "[dry-run] .venv packages match the requirement files: nothing to install."
+    elif [[ "${SKIP_INSTALL}" -eq 1 ]]; then
+      echo "[dry-run] --skip-install: would use .venv as it is, although the requirement files changed."
+    else
+      echo "[dry-run] Would install or update .venv packages from requirements-hpc.txt."
+    fi
+  else
+    echo "[dry-run] Would create .venv and install every package from requirements-hpc.txt."
+  fi
+}
+
 if [[ "${DELETE_VENV}" -eq 1 && -d "${PROJECT_ROOT}/.venv" ]]; then
-  echo "Deleting existing venv at ${PROJECT_ROOT}/.venv ..." >&2
-  rm -rf "${PROJECT_ROOT}/.venv"
-  echo "Venv deleted." >&2
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    echo "[dry-run] Would delete the existing venv at ${PROJECT_ROOT}/.venv." >&2
+  else
+    echo "Deleting existing venv at ${PROJECT_ROOT}/.venv ..." >&2
+    rm -rf "${PROJECT_ROOT}/.venv"
+    echo "Venv deleted." >&2
+  fi
 fi
 
 if [[ -z "${STATUS_FILE}" && "${DRY_RUN}" -eq 0 ]]; then
   bootstrap_python_runtime || exit 1
+fi
+
+if [[ "${SETUP_ONLY}" -eq 1 ]]; then
+  [[ "${DRY_RUN}" -eq 1 ]] && describe_python_runtime
+  echo "Python runtime step done (--setup-only): no jobs submitted."
+  exit 0
 fi
 
 CPUS_PER_TASK="${CPUS_PER_TASK:-8}"
@@ -533,10 +677,15 @@ READINESS_AUDIT_TIME="${READINESS_AUDIT_TIME:-01:00:00}"
 
 REPORT_FIGURE_ARGS=""
 if [[ "${RUN_ALL_FIGURES}" -eq 1 ]]; then
-  REPORT_FIGURE_ARGS="--fail-on-missing-figures --figure cascade_directional --figure cascade_evidence_scatter --figure cascade_consequence_summary --figure operational_availability_suite --figure observation_coverage --figure descriptive_summaries --figure prevalence_shift_forest --figure prevalence_shift_curves --figure mnar_tipping_point --figure upstream_contribution_forest --figure downstream_trigger_forest --figure threshold_sensitivity --figure model_metrics_comparison --figure model_pr_curve --figure model_roc_curve --figure model_calibration --figure model_threshold_analysis --figure validation_diagnostics --figure er_landscape --figure mnar_prevalence_shift_distribution --figure validation_funnel --figure panel_bundling --figure temporal_stability --figure consort_diagram --figure dataset_characterization"
+  REPORT_FIGURE_ARGS="--fail-on-missing-figures --figure cascade_directional --figure cascade_evidence_scatter --figure cascade_consequence_summary --figure operational_availability_suite --figure observation_coverage --figure descriptive_summaries --figure prevalence_shift_forest --figure prevalence_shift_curves --figure mnar_tipping_point --figure upstream_contribution_forest --figure downstream_trigger_forest --figure threshold_sensitivity --figure model_metrics_comparison --figure model_pr_curve --figure model_roc_curve --figure model_calibration --figure model_threshold_analysis --figure adjusted_model_shap --figure validation_diagnostics --figure er_landscape --figure mnar_prevalence_shift_distribution --figure validation_funnel --figure panel_bundling --figure temporal_stability --figure consort_diagram --figure dataset_characterization"
   if [[ "${RUN_SITE_CASCADE}" -eq 1 || "${RUN_SITE_COMPARISON_FIGURES}" -eq 1 ]]; then
     REPORT_FIGURE_ARGS="${REPORT_FIGURE_ARGS} --figure site_vs_combined_summary --figure cross_site_concordance"
   fi
+  if [[ "${RUN_THRESHOLD_COMPARISON}" -eq 1 ]]; then
+    REPORT_FIGURE_ARGS="${REPORT_FIGURE_ARGS} --figure threshold_strategy_comparison"
+  fi
+elif [[ "${RUN_THRESHOLD_COMPARISON}" -eq 1 ]]; then
+  REPORT_FIGURE_ARGS="--fail-on-missing-figures --figure threshold_strategy_comparison"
 fi
 
 LOG_DIR="${PROJECT_ROOT}/logs"
@@ -692,10 +841,17 @@ cascade_ready() {
   local organism="${3:-}"
   local dir
   dir="$(scope_dir_path "${PROJECT_ROOT}/${DATA_ROOT_DIR}/artifacts/cascade" "${scope}" "${site}" "${organism}")"
+  # _SUCCESS.json is written last by the cascade job, only after every file is in
+  # place, so a directory left by a killed job is never taken as finished.
   [[ -f "${dir}/retained_edges.parquet" &&
      -f "${dir}/edge_report.parquet" &&
      -f "${dir}/network_nodes.parquet" &&
-     -f "${dir}/cascade_summary.json" ]]
+     -f "${dir}/adjusted_model_shap_global.parquet" &&
+     -f "${dir}/adjusted_model_shap_values.parquet" &&
+     -f "${dir}/adjusted_model_shap_metadata.parquet" &&
+     -f "${dir}/adjusted_model_shap_domain.parquet" &&
+     -f "${dir}/cascade_summary.json" &&
+     -f "${dir}/_SUCCESS.json" ]]
 }
 
 # Returns true when the shard merge step has written validation_results.parquet.
@@ -706,7 +862,9 @@ validation_merge_ready() {
   local organism="${3:-}"
   local dir
   dir="$(scope_dir_path "${PROJECT_ROOT}/${DATA_ROOT_DIR}/artifacts/cascade" "${scope}" "${site}" "${organism}")"
-  [[ -f "${dir}/validation_results.parquet" ]]
+  # The provenance record is written after the merged file; the merge itself
+  # re-merges when the record does not match the current gold data, config and code.
+  [[ -f "${dir}/validation_results.parquet" && -f "${dir}/validation_results.provenance.json" ]]
 }
 
 # Returns true when a specific shard parquet has already been written.
@@ -718,7 +876,11 @@ shard_ready() {
   local shard_total="$5"
   local dir
   dir="$(scope_dir_path "${PROJECT_ROOT}/${DATA_ROOT_DIR}/artifacts/cascade" "${scope}" "${site}" "${organism}")"
-  [[ -f "${dir}/validation_shards/shard_$(printf '%04d' "${shard_idx}")_of_$(printf '%04d' "${shard_total}").parquet" ]]
+  local stem
+  stem="${dir}/validation_shards/shard_$(printf '%04d' "${shard_idx}")_of_$(printf '%04d' "${shard_total}")"
+  # A shard counts as done only with its provenance record; the shard script
+  # itself recomputes one whose record does not match the current inputs.
+  [[ -f "${stem}.parquet" && -f "${stem}.provenance.json" ]]
 }
 
 prevalence_ready() {
@@ -758,13 +920,44 @@ training_ready() {
      -f "${dir}/xgboost_predictions.parquet" ]]
 }
 
-reporting_ready() {
+threshold_comparison_ready() {
+  local scope="$1"
+  local site="${2:-}"
+  local organism="${3:-}"
+  local dir
+  dir="$(scope_dir_path "${PROJECT_ROOT}/${DATA_ROOT_DIR}/artifacts/modeling/downstream_testing" "${scope}" "${site}" "${organism}")/threshold_strategy_comparison"
+  [[ -f "${dir}/threshold_strategy_curves.parquet" &&
+     -f "${dir}/threshold_strategy_selected.parquet" &&
+     -f "${dir}/threshold_strategy_test_metrics.parquet" &&
+     -f "${dir}/threshold_strategy_comparison_summary.json" ]]
+}
+
+dataset_summary_ready() {
   local scope="$1"
   local site="${2:-}"
   local organism="${3:-}"
   local dir
   dir="$(scope_dir_path "${PROJECT_ROOT}/outputs/reports" "${scope}" "${site}" "${organism}")"
-  [[ -f "${dir}/report_manifest.json" ]]
+  [[ -f "${dir}/dataset_summary/dataset_summary_manifest.json" ]]
+}
+
+reporting_ready() {
+  local scope="$1"
+  local site="${2:-}"
+  local organism="${3:-}"
+  local dir cascade_dir comparison_dir
+  dir="$(scope_dir_path "${PROJECT_ROOT}/outputs/reports" "${scope}" "${site}" "${organism}")"
+  cascade_dir="$(scope_dir_path "${PROJECT_ROOT}/${DATA_ROOT_DIR}/artifacts/cascade" "${scope}" "${site}" "${organism}")"
+  comparison_dir="$(scope_dir_path "${PROJECT_ROOT}/${DATA_ROOT_DIR}/artifacts/modeling/downstream_testing" "${scope}" "${site}" "${organism}")/threshold_strategy_comparison"
+  [[ -f "${dir}/report_manifest.json" &&
+     -f "${cascade_dir}/adjusted_model_shap_metadata.parquet" &&
+     "${dir}/report_manifest.json" -nt "${cascade_dir}/adjusted_model_shap_metadata.parquet" ]] || return 1
+  if [[ "${RUN_THRESHOLD_COMPARISON}" -eq 1 ]]; then
+    [[ -f "${comparison_dir}/threshold_strategy_comparison_summary.json" &&
+       "${dir}/report_manifest.json" -nt "${comparison_dir}/threshold_strategy_comparison_summary.json" ]] || return 1
+    grep -q 'figure_threshold_strategy_comparison' "${dir}/report_manifest.json" || return 1
+  fi
+  return 0
 }
 
 scientific_audit_ready() {
@@ -935,7 +1128,7 @@ submit_job() {
   # If the venv symlink is broken on a node (meaning the base Python used to
   # create it doesn't exist there), the fix is to delete the venv and rerun
   # with --python-bin pointing to a python3.12 that exists on all node types.
-  args+=(--wrap "cd '${PROJECT_ROOT}' && export PYTHONNOUSERSITE=1 && export MPLCONFIGDIR='${PROJECT_ROOT}/.cache/matplotlib' && mkdir -p \"\${MPLCONFIGDIR}\" && export AMR_CASCADE_PYTHON='${PROJECT_ROOT}/.venv/bin/python' && \"\${AMR_CASCADE_PYTHON}\" scripts/check_python_runtime.py || { echo \"ERROR: venv Python not working on \$(hostname): \${AMR_CASCADE_PYTHON}\" >&2; echo \"Delete the venv and rerun with --python-bin pointing to a python3.12 that exists on all nodes.\" >&2; exit 127; } && export PYTHONUNBUFFERED=1 && export OMP_NUM_THREADS='${CPUS_PER_TASK}' && export OPENBLAS_NUM_THREADS='${CPUS_PER_TASK}' && export MKL_NUM_THREADS='${CPUS_PER_TASK}' && ${command}")
+  args+=(--wrap "cd '${PROJECT_ROOT}' && export PYTHONNOUSERSITE=1 && export MPLCONFIGDIR='${PROJECT_ROOT}/.cache/matplotlib' && mkdir -p \"\${MPLCONFIGDIR}\" && export AMR_CASCADE_PYTHON='${PROJECT_ROOT}/.venv/bin/python' && export AMR_CASCADE_EXPECTED_CODE='${CODE_IDENTITY}' && \"\${AMR_CASCADE_PYTHON}\" scripts/check_python_runtime.py || { echo \"ERROR: start-up check failed on \$(hostname) (see above): a broken venv (\${AMR_CASCADE_PYTHON}) or a checkout changed since submission.\" >&2; echo \"For a broken venv: delete it and rerun with --python-bin pointing to a python3.12 that exists on all nodes.\" >&2; exit 127; } && export PYTHONUNBUFFERED=1 && export OMP_NUM_THREADS='${CPUS_PER_TASK}' && export OPENBLAS_NUM_THREADS='${CPUS_PER_TASK}' && export MKL_NUM_THREADS='${CPUS_PER_TASK}' && ${command}")
 
   if [[ "${DRY_RUN}" -eq 1 ]]; then
     printf 'sbatch' >&2
@@ -1139,6 +1332,8 @@ echo "Partition: ${PARTITION}"
 echo "Site cascade: ${RUN_SITE_CASCADE}"
 echo "Features: ${RUN_FEATURES}"
 echo "Training: ${RUN_TRAINING}"
+echo "Threshold-strategy comparison: ${RUN_THRESHOLD_COMPARISON}"
+echo "Threshold strategy: ${THRESHOLD_STRATEGY:-configured default}"
 echo "ESKAPE: ${RUN_ESKAPE}"
 echo "All report figures: ${RUN_ALL_FIGURES}"
 echo "Site-comparison figures: ${RUN_SITE_COMPARISON_FIGURES}"
@@ -1146,6 +1341,39 @@ echo "Scientific audit: ${RUN_AUDIT}"
 echo "Publication readiness audit: ${RUN_READINESS_AUDIT}"
 echo "Reuse existing outputs: ${REUSE_EXISTING}"
 echo "Wait for completion: ${WAIT_FOR_JOBS}"
+
+# --force-rerun-existing reaches the validation shard and merge scripts too:
+# without it they reuse a shard or merged result whose provenance fingerprint
+# matches the current gold data, configuration and code (and recompute any other).
+VALIDATION_OVERWRITE_ARG=""
+[[ "${REUSE_EXISTING}" -eq 0 ]] && VALIDATION_OVERWRITE_ARG=" --overwrite"
+
+# Record the exact package versions this submission runs with.
+if [[ "${DRY_RUN}" -eq 0 && -x "${PROJECT_ROOT}/.venv/bin/python" ]]; then
+  mkdir -p "${PROJECT_ROOT}/logs"
+  ENVIRONMENT_LOCK="${PROJECT_ROOT}/logs/environment_lock_$(date +%Y%m%d_%H%M%S).txt"
+  PYTHONNOUSERSITE=1 "${PROJECT_ROOT}/.venv/bin/python" -m pip freeze > "${ENVIRONMENT_LOCK}" 2>/dev/null \
+    && echo "Environment lock: ${ENVIRONMENT_LOCK}" || echo "WARNING: could not write the environment lock file" >&2
+fi
+
+# The code every job of this submission must run: the commit, plus a hash of any
+# uncommitted change (provenance.code_identity). Each job compares its checkout
+# with it at start-up (scripts/check_python_runtime.py), so an edit made while
+# jobs wait in the queue stops the next job at once instead of mixing code
+# versions within one run -- or leaving the shard merge to refuse days later.
+CODE_IDENTITY=""
+if [[ -x "${PROJECT_ROOT}/.venv/bin/python" ]]; then
+  CODE_IDENTITY="$(cd "${PROJECT_ROOT}" && PYTHONNOUSERSITE=1 "${PROJECT_ROOT}/.venv/bin/python" -c \
+    'import sys; sys.path.insert(0, "src"); from amr_cascade_platform.core.utils.provenance import code_identity; print(code_identity("."))' \
+    2>/dev/null || true)"
+fi
+echo "Code identity: ${CODE_IDENTITY:-unavailable}"
+if [[ "${CODE_IDENTITY}" == *"+dirty."* && "${ALLOW_DIRTY_CHECKOUT}" -eq 0 && "${DRY_RUN}" -eq 0 ]]; then
+  echo "ERROR: src/, scripts/ or configs/ differ from commit ${CODE_IDENTITY%%+*} (uncommitted or untracked files)." >&2
+  echo "Commit the changes and check out that commit here, so every result traces to one commit;" >&2
+  echo "or pass --allow-dirty-checkout to submit this working tree as it is." >&2
+  exit 2
+fi
 
 fix_stale_outputs
 
@@ -1270,7 +1498,7 @@ for raw_organism in "${ORGANISMS[@]}"; do
               site_shard_job="$(
                 PARTITION="${CASCADE_PARTITION}"
                 submit_job "${organism_prefix}_${site_slug}_cval_s${site_shard_idx}" "${CASCADE_SHARD_TIME}" "${CASCADE_SHARD_MEM}" "${site_dep}" \
-                  "\"\${AMR_CASCADE_PYTHON}\" scripts/run_cascade_validation_shard.py --env ${ENV_NAME} --gold-scope site --site '${site}' --organism '${organism}' --shard-index ${site_shard_idx} --shard-total ${site_shard_total}"
+                  "\"\${AMR_CASCADE_PYTHON}\" scripts/run_cascade_validation_shard.py --env ${ENV_NAME} --gold-scope site --site '${site}' --organism '${organism}' --shard-index ${site_shard_idx} --shard-total ${site_shard_total}${VALIDATION_OVERWRITE_ARG}"
               )"
               echo "  Site cascade shard ${site_shard_idx}/${site_shard_total} ${site} | ${organism}: ${site_shard_job}"
               submitted_jobs+=("${site_shard_job}")
@@ -1285,7 +1513,7 @@ for raw_organism in "${ORGANISMS[@]}"; do
             site_merge_job="$(
               PARTITION="${CASCADE_PARTITION}"
               submit_job "${organism_prefix}_${site_slug}_cval_merge" "${CASCADE_MERGE_TIME}" "${CASCADE_MERGE_MEM}" "${site_shard_dep}" \
-                "\"\${AMR_CASCADE_PYTHON}\" scripts/merge_cascade_validation_shards.py --env ${ENV_NAME} --gold-scope site --site '${site}' --organism '${organism}' --shard-total ${site_shard_total}"
+                "\"\${AMR_CASCADE_PYTHON}\" scripts/merge_cascade_validation_shards.py --env ${ENV_NAME} --gold-scope site --site '${site}' --organism '${organism}' --shard-total ${site_shard_total}${VALIDATION_OVERWRITE_ARG}"
             )"
             echo "Site cascade validation merge ${site} | ${organism}: ${site_merge_job}"
             submitted_jobs+=("${site_merge_job}")
@@ -1324,6 +1552,22 @@ for raw_organism in "${ORGANISMS[@]}"; do
     fi
   fi
 
+  # Describe the dataset as soon as the combined gold layer exists -- cohort,
+  # eligibility and observation structure, covariate coverage, antibiogram --
+  # ahead of the cascade and validation jobs. Nothing downstream waits on it.
+  if [[ "${RUN_REPORTING}" -eq 1 && "${RUN_DATASET_SUMMARY}" -eq 1 ]]; then
+    if should_submit "${combined_dep}" dataset_summary_ready "combined" "" "${organism}"; then
+      dataset_summary_job="$(
+        submit_job "${organism_prefix}_dataset_summary" "${REPORT_TIME}" "${REPORT_MEM}" "${combined_dep}" \
+          "\"\${AMR_CASCADE_PYTHON}\" scripts/run_dataset_summary.py --env ${ENV_NAME} --scope combined --organism '${organism}' --figure-format png --figure-format pdf --figure-format html"
+      )"
+      echo "Dataset summary ${organism}: ${dataset_summary_job}"
+      submitted_jobs+=("${dataset_summary_job}")
+    else
+      skip_ready "dataset summary ${organism}"
+    fi
+  fi
+
   cascade_dep="${combined_dep}"
   if [[ "${RUN_CASCADE}" -eq 1 ]]; then
     if should_submit "${cascade_dep}" cascade_ready "combined" "" "${organism}"; then
@@ -1339,7 +1583,7 @@ for raw_organism in "${ORGANISMS[@]}"; do
           shard_job="$(
             PARTITION="${CASCADE_PARTITION}"
             submit_job "${organism_prefix}_cval_s${shard_idx}" "${CASCADE_SHARD_TIME}" "${CASCADE_SHARD_MEM}" "${cascade_dep}" \
-              "\"\${AMR_CASCADE_PYTHON}\" scripts/run_cascade_validation_shard.py --env ${ENV_NAME} --gold-scope combined --organism '${organism}' --shard-index ${shard_idx} --shard-total ${shard_total}"
+              "\"\${AMR_CASCADE_PYTHON}\" scripts/run_cascade_validation_shard.py --env ${ENV_NAME} --gold-scope combined --organism '${organism}' --shard-index ${shard_idx} --shard-total ${shard_total}${VALIDATION_OVERWRITE_ARG}"
           )"
           echo "  Cascade shard ${shard_idx}/${shard_total} ${organism}: ${shard_job}"
           submitted_jobs+=("${shard_job}")
@@ -1354,7 +1598,7 @@ for raw_organism in "${ORGANISMS[@]}"; do
         merge_job="$(
           PARTITION="${CASCADE_PARTITION}"
           submit_job "${organism_prefix}_cval_merge" "${CASCADE_MERGE_TIME}" "${CASCADE_MERGE_MEM}" "${shard_dep}" \
-            "\"\${AMR_CASCADE_PYTHON}\" scripts/merge_cascade_validation_shards.py --env ${ENV_NAME} --gold-scope combined --organism '${organism}' --shard-total ${shard_total}"
+            "\"\${AMR_CASCADE_PYTHON}\" scripts/merge_cascade_validation_shards.py --env ${ENV_NAME} --gold-scope combined --organism '${organism}' --shard-total ${shard_total}${VALIDATION_OVERWRITE_ARG}"
         )"
         echo "Cascade validation merge ${organism}: ${merge_job}"
         submitted_jobs+=("${merge_job}")
@@ -1413,10 +1657,12 @@ for raw_organism in "${ORGANISMS[@]}"; do
 
   training_dep=""
   if [[ "${RUN_TRAINING}" -eq 1 ]]; then
-    if should_submit "${feature_dep}" training_ready "combined" "" "${organism}"; then
+    if [[ -n "${THRESHOLD_STRATEGY}" ]] || should_submit "${feature_dep}" training_ready "combined" "" "${organism}"; then
+      threshold_arg=""
+      [[ -n "${THRESHOLD_STRATEGY}" ]] && threshold_arg=" --threshold-strategy ${THRESHOLD_STRATEGY}"
       training_job="$(
         submit_job "${organism_prefix}_training" "${TRAINING_TIME}" "${TRAINING_MEM}" "${feature_dep}" \
-          "\"\${AMR_CASCADE_PYTHON}\" scripts/run_training.py --env ${ENV_NAME} --scope combined --organism '${organism}'"
+          "\"\${AMR_CASCADE_PYTHON}\" scripts/run_training.py --env ${ENV_NAME} --scope combined --organism '${organism}'${threshold_arg}"
       )"
       echo "Training ${organism}: ${training_job}"
       submitted_jobs+=("${training_job}")
@@ -1426,9 +1672,25 @@ for raw_organism in "${ORGANISMS[@]}"; do
     fi
   fi
 
+  threshold_comparison_dep=""
+  if [[ "${RUN_THRESHOLD_COMPARISON}" -eq 1 ]]; then
+    if should_submit "${feature_dep}" threshold_comparison_ready "combined" "" "${organism}"; then
+      threshold_comparison_job="$(
+        submit_job "${organism_prefix}_threshold_compare" "${TRAINING_TIME}" "${TRAINING_MEM}" "${feature_dep}" \
+          "\"\${AMR_CASCADE_PYTHON}\" scripts/run_threshold_strategy_comparison.py --env ${ENV_NAME} --scope combined --organism '${organism}' --split-strategy site"
+      )"
+      echo "Threshold comparison ${organism}: ${threshold_comparison_job}"
+      submitted_jobs+=("${threshold_comparison_job}")
+      threshold_comparison_dep="${threshold_comparison_job}"
+    else
+      skip_ready "threshold comparison ${organism}"
+    fi
+  fi
+
   if [[ "${RUN_REPORTING}" -eq 1 ]]; then
     report_inputs=("${prevalence_dep}")
     [[ -n "${training_dep}" ]] && report_inputs+=("${training_dep}")
+    [[ -n "${threshold_comparison_dep}" ]] && report_inputs+=("${threshold_comparison_dep}")
     report_deps="$(join_colon "${report_inputs[@]}")"
     organism_publication_dep="${report_deps}"
     if should_submit "${report_deps}" reporting_ready "combined" "" "${organism}"; then
@@ -1444,7 +1706,7 @@ for raw_organism in "${ORGANISMS[@]}"; do
     fi
     if [[ "${RUN_READINESS_AUDIT}" -eq 1 ]]; then
       readiness_args=""
-      [[ "${RUN_TRAINING}" -eq 1 || "${RUN_ALL_FIGURES}" -eq 1 ]] && readiness_args="--require-training"
+      [[ "${RUN_TRAINING}" -eq 1 || "${RUN_THRESHOLD_COMPARISON}" -eq 1 || "${RUN_ALL_FIGURES}" -eq 1 ]] && readiness_args="--require-training"
       if should_submit "${organism_publication_dep}" publication_readiness_ready "combined" "" "${organism}"; then
         readiness_job="$(
           submit_job "${organism_prefix}_readiness_audit" "${READINESS_AUDIT_TIME}" "${READINESS_AUDIT_MEM}" "${organism_publication_dep}" \

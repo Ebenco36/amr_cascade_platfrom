@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from amr_cascade_platform.core.utils.provenance import run_provenance
 from amr_cascade_platform.core.config.config_models import Settings
 from amr_cascade_platform.core.exceptions.custom_exceptions import DataDiscoveryError
 from amr_cascade_platform.core.logging.logger_factory import LoggerFactory
@@ -94,6 +95,7 @@ class GoldBuildManager:
         self._parquet_store.write_pandas(eligible_pairs, outputs["eligible_pairs"])
         self._write_metadata(
             request=request,
+            cohort_path=cohort_path,
             outputs=outputs,
             organism_labels=organism_labels,
             observation_ledger=observation_ledger,
@@ -197,6 +199,7 @@ class GoldBuildManager:
     def _write_metadata(
         self,
         request: GoldBuildRequest,
+        cohort_path: Path,
         outputs: dict[str, Path],
         organism_labels: dict[str, int],
         observation_ledger: dict[str, dict[str, int]],
@@ -219,6 +222,14 @@ class GoldBuildManager:
             # Per site: rows removed by each rule from the harmonised cohort to the
             # observed episode x antibiotic results (see _observation_ledger).
             "observation_ledger": observation_ledger,
+            # Entries removed as not a therapeutic antibacterial AST result (counted in
+            # the ledger's excluded_assay_rows), per site, source label and entity type.
+            "excluded_ast_entities": [
+                {key: (int(value) if key == "rows" else str(value)) for key, value in record.items()}
+                for record in self._observation_space_builder.excluded_entities.to_dict(orient="records")
+            ],
+            # Code, configuration, input and package versions behind this build.
+            "provenance": run_provenance(self._paths.project_root, self._settings, {"harmonized_cohort": cohort_path}),
             "row_counts": {
                 "culture_episodes": len(culture_episodes),
                 "culture_drug_episodes": len(culture_drug_episodes),

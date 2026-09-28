@@ -32,7 +32,12 @@ class CascadePairDependenceAnalyzer:
         "mutual_eligible_reverse_support_n",
         "mutual_eligible_pair_test_rate",
         "mutual_eligible_reverse_test_rate",
+        "testing_asymmetry_score_mutual_eligible",
+        "mutual_eligible_escalation_ratio",
+        "mutual_eligible_reverse_escalation_ratio",
         "directional_asymmetry_score_mutual_eligible",
+        "mutual_eligible_directional_support_ratio",
+        "mutual_eligible_directional_episode_overlap",
     ]
 
     def __init__(self, settings: Settings) -> None:
@@ -88,18 +93,10 @@ class CascadePairDependenceAnalyzer:
             mutual_frame = frame.loc[frame["upstream_eligible"] == 1]
         else:
             mutual_frame = frame.iloc[0:0]
-        if not mutual_frame.empty:
-            mutual_rates = (
-                mutual_frame.groupby(["upstream_antibiotic", "downstream_antibiotic"], dropna=False, observed=True)["downstream_tested"]
-                .agg(mutual_tested_n="sum", mutual_support_n="size")
-                .reset_index()
-            )
-            mutual_rate_lookup = {
-                (row.upstream_antibiotic, row.downstream_antibiotic): (row.mutual_tested_n, row.mutual_support_n)
-                for row in mutual_rates.itertuples(index=False)
-            }
-        else:
-            mutual_rate_lookup = {}
+        mutual_frame = mutual_frame.merge(
+            relevant_labels, on=["upstream_antibiotic", "downstream_antibiotic"], how="inner"
+        )
+        mutual_rate_lookup = self._mutual_eligible_lookup(mutual_frame, episode_key_columns)
 
         panel_keys = episode_key_columns + ["upstream_antibiotic"]
         panel_sizes = (
@@ -230,7 +227,8 @@ class CascadePairDependenceAnalyzer:
 
         Values near 1 indicate near-deterministic bilateral bundling.
         Values near 0 indicate highly asymmetric testing (one direction drives the other).
-        The co-testing screen removes pairs with PBI >= cotesting_probability_threshold (0.95)
+        The co-testing screen removes pairs with PBI >= the configured
+        ``cotesting_probability_threshold``
         when both directions have at least min_total_support rows, so a retained pair can
         reach that PBI only when one direction has fewer rows than that.
         """
@@ -262,9 +260,60 @@ class CascadePairDependenceAnalyzer:
             return math.nan
         return float(len(forward_episodes & reverse_episodes) / union_size)
 
+    def _mutual_eligible_lookup(
+        self,
+        mutual_frame: pd.DataFrame,
+        episode_key_columns: list[str],
+    ) -> dict[tuple[object, object], dict[str, object]]:
+        """Per ordered pair, the counts behind the mutual-eligibility diagnostics.
+
+        All rows (any observed upstream result) give the co-observation rate, the
+        support size and the contributing episodes, as for the primary support ratio
+        and episode overlap; the resistant and susceptible upstream rows give the
+        escalation ratio, as for the primary DAS.
+        """
+        if mutual_frame.empty:
+            return {}
+        frame = mutual_frame.copy()
+        positive = self._settings.cascade.upstream_result_positive
+        negative = self._settings.cascade.upstream_result_negative
+        result = (
+            frame["upstream_susceptibility"].astype("string")
+            if "upstream_susceptibility" in frame.columns
+            else pd.Series(pd.NA, index=frame.index, dtype="string")
+        )
+        frame["_resistant"] = result.eq(positive).fillna(False).to_numpy()
+        frame["_susceptible"] = result.eq(negative).fillna(False).to_numpy()
+        frame["_episode_key"] = frame[episode_key_columns].astype(str).agg("||".join, axis=1)
+        lookup: dict[tuple[object, object], dict[str, object]] = {}
+        for (upstream, downstream), group in frame.groupby(
+            ["upstream_antibiotic", "downstream_antibiotic"], dropna=False, observed=True
+        ):
+            tested = group["downstream_tested"].astype(float)
+            lookup[(upstream, downstream)] = {
+                "tested_n": float(tested.sum()),
+                "support_n": float(len(group)),
+                "resistant_tested_n": float(tested[group["_resistant"]].sum()),
+                "resistant_n": float(group["_resistant"].sum()),
+                "susceptible_tested_n": float(tested[group["_susceptible"]].sum()),
+                "susceptible_n": float(group["_susceptible"].sum()),
+                "episodes": frozenset(group["_episode_key"]),
+            }
+        return lookup
+
+    @staticmethod
+    def _escalation_ratio(counts: dict[str, object] | None, continuity_correction: float) -> float:
+        """The primary escalation ratio's formula; undefined unless both upstream branches have rows."""
+        if not counts or counts["resistant_n"] <= 0 or counts["susceptible_n"] <= 0:
+            return math.nan
+        cc = continuity_correction
+        resistant = (counts["resistant_tested_n"] + cc) / (counts["resistant_n"] + 2.0 * cc)
+        susceptible = (counts["susceptible_tested_n"] + cc) / (counts["susceptible_n"] + 2.0 * cc)
+        return float(resistant / susceptible) if susceptible > 0 else math.nan
+
     def _mutual_eligible_diagnostics(
         self,
-        mutual_rate_lookup: dict[tuple[object, object], tuple[float, float]],
+        mutual_rate_lookup: dict[tuple[object, object], dict[str, object]],
         upstream_antibiotic: object,
         downstream_antibiotic: object,
         continuity_correction: float,
@@ -273,31 +322,48 @@ class CascadePairDependenceAnalyzer:
 
         eligible opportunity universe (both upstream_eligible==1 and
         downstream_eligible==1), rather than each direction conditioning only on
-        its own downstream drug's eligibility. Complements, does not replace,
+        its own downstream drug's eligibility. It is the primary DAS's formula,
+        log ER(j->k) - log ER(k->j), with each ER computed from that universe's
+        resistant and susceptible upstream rows. Complements, does not replace,
         the primary directional_asymmetry_score in cascade_report_builder.py:
-        this quantifies how much of that primary DAS could reflect the two
-        directions drawing from different opportunity populations, by showing
-        what DAS looks like once that specific difference is removed. The two
-        directions' SUPPORT SIZES can still differ afterward (one direction
-        still requires the upstream drug to be observed, the other requires the
-        reverse), which is exactly why mutual_eligible_pair_support_n and
-        mutual_eligible_reverse_support_n are reported alongside it rather than
-        DAS alone.
+        it shows how much of the primary DAS could reflect the two directions
+        drawing from different opportunity populations. The two directions'
+        support can still differ afterward (one direction requires j observed,
+        the other k), so the support ratio and episode overlap are recomputed
+        within the same universe and reported alongside it. The co-observation
+        rate asymmetry of that universe is kept as
+        testing_asymmetry_score_mutual_eligible.
         """
         pair = mutual_rate_lookup.get((upstream_antibiotic, downstream_antibiotic))
         reverse = mutual_rate_lookup.get((downstream_antibiotic, upstream_antibiotic))
         pair_rate = (
-            self._smoothed_rate(pair[0], pair[1], continuity_correction) if pair else math.nan
+            self._smoothed_rate(pair["tested_n"], pair["support_n"], continuity_correction) if pair else math.nan
         )
         reverse_rate = (
-            self._smoothed_rate(reverse[0], reverse[1], continuity_correction) if reverse else math.nan
+            self._smoothed_rate(reverse["tested_n"], reverse["support_n"], continuity_correction) if reverse else math.nan
+        )
+        pair_er = self._escalation_ratio(pair, continuity_correction)
+        reverse_er = self._escalation_ratio(reverse, continuity_correction)
+        das = (
+            float(math.log(pair_er) - math.log(reverse_er))
+            if pd.notna(pair_er) and pd.notna(reverse_er) and pair_er > 0 and reverse_er > 0
+            else math.nan
         )
         return {
-            "mutual_eligible_pair_support_n": float(pair[1]) if pair else math.nan,
-            "mutual_eligible_reverse_support_n": float(reverse[1]) if reverse else math.nan,
+            "mutual_eligible_pair_support_n": pair["support_n"] if pair else math.nan,
+            "mutual_eligible_reverse_support_n": reverse["support_n"] if reverse else math.nan,
             "mutual_eligible_pair_test_rate": pair_rate,
             "mutual_eligible_reverse_test_rate": reverse_rate,
-            "directional_asymmetry_score_mutual_eligible": self._asymmetry_score(pair_rate, reverse_rate),
+            "testing_asymmetry_score_mutual_eligible": self._asymmetry_score(pair_rate, reverse_rate),
+            "mutual_eligible_escalation_ratio": pair_er,
+            "mutual_eligible_reverse_escalation_ratio": reverse_er,
+            "directional_asymmetry_score_mutual_eligible": das,
+            "mutual_eligible_directional_support_ratio": self._directional_support_ratio(
+                pair["support_n"] if pair else math.nan, reverse["support_n"] if reverse else math.nan
+            ),
+            "mutual_eligible_directional_episode_overlap": self._episode_jaccard_overlap(
+                pair["episodes"] if pair else frozenset(), reverse["episodes"] if reverse else frozenset()
+            ),
         }
 
     @staticmethod

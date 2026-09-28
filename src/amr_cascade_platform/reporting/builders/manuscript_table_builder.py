@@ -1286,17 +1286,17 @@ class ManuscriptTableBuilder:
             "non_evaluable_observed_n": "Observed non-evaluable n",
             "unknown_binary_outcome_n": "Unknown binary outcome n",
             "cascade_triggered_observed_n": "Cascade-triggered observed n",
-            "independent_observed_n": "Independent observed n",
+            "independent_observed_n": "No-trigger observed n",
             "cascade_triggered_tested_n": "Cascade-triggered tested n",
-            "independent_tested_n": "Independent tested n",
+            "independent_tested_n": "No-trigger tested n",
             "cascade_eligible_n": "Cascade eligible n",
-            "independent_eligible_n": "Independent eligible n",
+            "independent_eligible_n": "No-trigger eligible n",
             "w_casc_eligible": "Cascade eligible weight",
-            "w_ind_eligible": "Independent eligible weight",
+            "w_ind_eligible": "No-trigger eligible weight",
             "standardised_prevalence_pct": "Subgroup-standardised prevalence",
             "cascade_trigger_fraction": "Cascade trigger fraction",
             "mean_abs_smd_tested_vs_untested": "Mean abs SMD (observed vs unobserved)",
-            "mean_abs_smd_independent_vs_untested": "Mean abs SMD (independent evaluable vs unobserved)",
+            "mean_abs_smd_independent_vs_untested": "Mean abs SMD (no-trigger evaluable vs unobserved)",
             "mean_abs_smd_cascade_vs_untested": "Mean abs SMD (cascade evaluable vs unobserved)",
             "flagged_covariate_n_tested_vs_untested": "Flagged covariates (observed vs unobserved)",
             "denominator_inflation_effect_pct": "Denominator inflation effect",
@@ -1305,7 +1305,7 @@ class ManuscriptTableBuilder:
             "mnar_status_lambda0": "MNAR status (lambda=0)",
             "mnar_feature_count": "MNAR feature count",
             "mnar_feature_columns": "MNAR feature columns",
-            "rho_independent_vs_cascade": "rho independent/cascade",
+            "rho_independent_vs_cascade": "rho no-trigger/cascade",
         }
         table = table.rename(columns=rename_map)
         table = table.loc[:, ~table.columns.duplicated()].copy()
@@ -1313,7 +1313,7 @@ class ManuscriptTableBuilder:
             table["Cascade trigger fraction"] = table["Cascade trigger fraction"].map(
                 lambda value: f"{value:.1%}" if pd.notna(value) else "NA"
             )
-        for column in ("Cascade eligible weight", "Independent eligible weight"):
+        for column in ("Cascade eligible weight", "No-trigger eligible weight"):
             if column in table.columns:
                 table[column] = table[column].map(
                     lambda value: f"{value:.3f}" if pd.notna(value) else "NA"
@@ -1324,10 +1324,10 @@ class ManuscriptTableBuilder:
             )
         for column in (
             "Mean abs SMD (observed vs unobserved)",
-            "Mean abs SMD (independent evaluable vs unobserved)",
+            "Mean abs SMD (no-trigger evaluable vs unobserved)",
             "Mean abs SMD (cascade evaluable vs unobserved)",
             "MNAR shift (percentage points)",
-            "rho independent/cascade",
+            "rho no-trigger/cascade",
             "Legacy empirical delta",
             "Legacy delta shift (percentage points)",
         ):

@@ -10,6 +10,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
+from amr_cascade_platform.core.utils.site_labels import site_label
 from amr_cascade_platform.visualization.report.plotly_exporter import PlotlyFigureExporter
 
 _GRID = "#E8EEF5"
@@ -88,6 +89,8 @@ class PlotlyCrossSiteConcordancePlotter:
             + df.get("downstream_antibiotic", pd.Series("?", index=df.index)).fillna("?")
         )
 
+        if "site" in df.columns:
+            df["site"] = df["site"].map(lambda code: site_label(str(code)) if pd.notna(code) else code)
         sites = sorted(df["site"].dropna().unique().tolist()) if "site" in df.columns else ["combined"]
         site_colors = {s: _SITE_PALETTE[i % len(_SITE_PALETTE)] for i, s in enumerate(sites)}
 

@@ -1,5 +1,15 @@
 evaluation:
   probability_threshold: 0.5
-  threshold_selection_metric: f1
-  threshold_candidates: [0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+  # Balanced accuracy (Youden's J = sensitivity + specificity - 1, rescaled) does not
+  # depend on prevalence. F1 does: with ~2/3 of pair rows positive it is maximised by
+  # predicting almost everything positive, so it drove thresholds to the grid edge.
+  threshold_selection_metric: balanced_accuracy
+  # 0.05 steps; a selection at 0.05 or 0.95 is flagged as a grid-boundary solution.
+  threshold_candidates: [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
   reporting_threshold_metrics: [f1, mcc, balanced_accuracy, precision, recall]
+  # grouped_oof is valid only for feature sets without precomputed train_pair_/
+  # network features. Full cascade-aware models require validation_holdout until
+  # cascade features are regenerated independently inside every CV fold.
+  threshold_selection_strategy: validation_holdout
+  threshold_cv_folds: 5
+  threshold_cv_group_column: anon_id

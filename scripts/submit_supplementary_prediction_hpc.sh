@@ -19,6 +19,10 @@ that already exist on disk:
 these are missing, run the feature/training stages first via
 submit_pipeline_dag_hpc.sh --run-features --run-training.
 
+The figures go into the report's figure directory. If a report or readiness
+audit job is queued, chain after it: the report archives every earlier figure
+there, and the audit fails on files outside the report manifest.
+
 Options:
   --organism NAME       Default: ESCHERICHIA COLI
   --partition NAME      Default: main
@@ -38,7 +42,7 @@ Examples:
   # See the exact sbatch command first:
   bash scripts/submit_supplementary_prediction_hpc.sh --dry-run
 
-  # Chain after a training job submitted in the same tmux session:
+  # Chain after the report's readiness audit job submitted in the same session:
   bash scripts/submit_supplementary_prediction_hpc.sh --dependency 123456
 EOF
 }

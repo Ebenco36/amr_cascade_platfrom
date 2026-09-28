@@ -138,6 +138,10 @@ class GoldConfig:
     observed_result_values: tuple[str, ...]
     excluded_assay_labels: tuple[str, ...]
     eligibility: EligibilityConfig
+    # AST entity types (core.utils.antibiotic_names.classify_ast_entity) kept in the
+    # observed layer; screening, confirmatory and mechanism tests and non-antibacterial
+    # agents are removed before eligibility and pair construction.
+    primary_ast_entity_types: tuple[str, ...] = ("ANTIBACTERIAL", "COMPOSITE_AST")
 
 
 @dataclass(frozen=True)
@@ -158,6 +162,15 @@ class CascadeValidationConfig:
     minimum_site_direction_agreement_rate: float
     i_squared_threshold: float
     between_site_permutation_enabled: bool
+
+
+@dataclass(frozen=True)
+class CascadeExplainabilityConfig:
+    enabled: bool
+    background_size: int
+    explanation_sample_size: int
+    random_seed: int
+    additivity_tolerance: float
 
 
 @dataclass(frozen=True)
@@ -182,6 +195,7 @@ class CascadeConfig:
     validate_suppression_cascades: bool
     include_acuity_covariates: bool
     validation: CascadeValidationConfig
+    explainability: CascadeExplainabilityConfig
     outputs: CascadeOutputConfig
 
 
@@ -206,6 +220,10 @@ class ReportingConfig:
     # Availability-denominator sensitivity runs compared with this run in the
     # supplement: label -> environment name. Empty where no such runs exist.
     availability_sensitivity_environments: tuple[tuple[str, str], ...] = ()
+    # Adjusted-model SHAP: pairs drawn as individual importance and beeswarm figures,
+    # the top ones by the upstream result's attribution (0 = every pair). All pairs
+    # stay in the SHAP tables and the cross-pair domain summary.
+    shap_max_pair_figures: int = 20
 
 
 @dataclass(frozen=True)
@@ -269,6 +287,8 @@ class ModelingConfig:
     temporal_validation_end_year: int
     temporal_test_end_year: int
     estimators: tuple[str, ...]
+    primary_estimator: str
+    primary_feature_set: str
     include_cascade_features: bool
     output_dir: str
     random_state: int
@@ -284,6 +304,9 @@ class EvaluationConfig:
     threshold_selection_metric: str
     threshold_candidates: tuple[float, ...]
     reporting_threshold_metrics: tuple[str, ...]
+    threshold_selection_strategy: str = "validation_holdout"
+    threshold_cv_folds: int = 5
+    threshold_cv_group_column: str = "anon_id"
 
 
 @dataclass(frozen=True)

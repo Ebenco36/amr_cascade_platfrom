@@ -16,6 +16,11 @@ modeling:
     - logistic_regression
     - random_forest
     - xgboost
+  # Prespecified before sealed-test evaluation. The tree estimators are
+  # predictive benchmarks; they do not replace the primary model merely by
+  # leading on one held-out test metric.
+  primary_estimator: logistic_regression
+  primary_feature_set: full
   include_cascade_features: true
   output_dir: modeling
   random_state: 42

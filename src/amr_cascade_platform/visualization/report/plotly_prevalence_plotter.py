@@ -95,7 +95,7 @@ class PlotlyPrevalencePlotter:
                     f"Naive minus reference estimate: {row['mnar_lambda0_shift_from_naive_pct']:.2f} percentage points"
                     if pd.notna(row["mnar_lambda0_shift_from_naive_pct"])
                     else "Shift: NA",
-                    f"rho independent/cascade: {row['rho_independent_vs_cascade']:.2f}" if pd.notna(row["rho_independent_vs_cascade"]) else "rho independent/cascade: NA",
+                    f"rho no-trigger/cascade: {row['rho_independent_vs_cascade']:.2f}" if pd.notna(row["rho_independent_vs_cascade"]) else "rho no-trigger/cascade: NA",
                     f"Cascade trigger fraction: {row['cascade_trigger_fraction']:.2%}" if pd.notna(row["cascade_trigger_fraction"]) else "Cascade trigger fraction: NA",
                 ]
             )
@@ -330,7 +330,7 @@ class PlotlyPrevalencePlotter:
         """Ranked bar: cascade-trigger fraction (kappa) per drug.
 
         How concentrated each drug's observed denominator is in episodes with
-        a validated upstream resistant trigger, vs. independently-tested ones.
+        a validated upstream resistant trigger, vs. those without one (no observed validated trigger).
         """
         required = {"drug", "cascade_trigger_fraction"}
         if results.empty or not required.issubset(results.columns):
@@ -364,7 +364,7 @@ class PlotlyPrevalencePlotter:
         )
 
     def export_cascade_vs_independent_dumbbell(self, results: pd.DataFrame, output_stem: Path, formats: tuple[str, ...]) -> dict[str, Path]:
-        """Dumbbell: resistance prevalence among cascade-triggered vs. independently-tested episodes, per drug."""
+        """Dumbbell: resistance prevalence among cascade-triggered vs. non-triggered episodes (no observed validated trigger), per drug."""
         required = {"drug", "cascade_prevalence_pct", "independent_prevalence_pct"}
         if results.empty or not required.issubset(results.columns):
             return self._exporter.write(self._empty_figure("Cascade-vs-independent prevalence unavailable"), output_stem, formats)
@@ -379,7 +379,7 @@ class PlotlyPrevalencePlotter:
                 mode="lines", line={"color": "#CBD5E1", "width": 3}, hoverinfo="skip", showlegend=False,
             ))
         fig.add_trace(go.Scatter(
-            x=data["independent_prevalence_pct"], y=data["drug"], mode="markers", name="Independently tested",
+            x=data["independent_prevalence_pct"], y=data["drug"], mode="markers", name="No observed validated trigger",
             marker={"size": 11, "color": "#27AE60"},
             hovertemplate="<b>%{y}</b><br>Independent: %{x:.1f}%<extra></extra>",
         ))
@@ -391,7 +391,7 @@ class PlotlyPrevalencePlotter:
         fig.update_layout(
             template=self._template, width=self._width, height=max(self._height, 32 * len(data) + 220),
             title={
-                "text": "<b>Resistance prevalence: cascade-triggered vs. independently tested</b>"
+                "text": "<b>Resistance prevalence: episodes with vs. without an observed validated resistant trigger</b>"
                         "<br><sup>Among observed binary tests for this drug, split by whether a validated upstream resistant trigger was active</sup>",
                 "font": {"size": 15},
             },

@@ -112,6 +112,37 @@ def test_evidence_scatter_suite_produces_all_three_figures(figure_manager, tmp_p
     assert all(path.exists() and path.stat().st_size > 0 for path in outputs.values())
 
 
+def test_pbi_reference_line_uses_the_configured_primary_threshold(figure_manager, monkeypatch):
+    captured = {}
+
+    class _CapturingExporter:
+        def write(self, fig, output_stem, formats):
+            captured["fig"] = fig
+            return {}
+
+    plotter = figure_manager._anti_artefact_plotter
+    monkeypatch.setattr(plotter, "_exporter", _CapturingExporter())
+    edges = _edge_report_with_adjustment_fields()
+    edges["direction"] = edges["escalation_ratio"].ge(1).map(
+        {True: "escalation", False: "suppression"}
+    )
+    plotter.export(
+        edges,
+        Path("unused"),
+        ("html",),
+        tier="validated",
+    )
+
+    reference_lines = [
+        shape
+        for shape in captured["fig"].layout.shapes
+        if shape.type == "line" and shape.x0 == shape.x1
+    ]
+    assert len(reference_lines) == 1
+    assert reference_lines[0].x0 == pytest.approx(0.95)
+    assert any(annotation.text == "PBI=0.95" for annotation in captured["fig"].layout.annotations)
+
+
 def test_evidence_scatter_suite_is_empty_safe(figure_manager, tmp_path):
     empty = pd.DataFrame(columns=["upstream_antibiotic", "downstream_antibiotic", "escalation_ratio", "total_support_n", "validation_status"])
     assert figure_manager.export_evidence_scatter_suite(empty, tmp_path, ("png",), tier="validated") == {}

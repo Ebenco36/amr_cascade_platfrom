@@ -1,0 +1,35 @@
+# The synthetic replica at the production resampling budget (B = 1000), for a
+# full end-to-end check on the Mac:
+#   bash scripts/run_replica_end_to_end.sh --env test_replica_b1000 --parallel
+# Identical to test_replica.yaml (same data root and outputs) except the 1000
+# permutation and bootstrap iterations and its own three availability
+# sensitivities; allow roughly 4-5 hours with --parallel.
+environment:
+  name: test_replica_b1000
+  data_root: test_replica
+  execution_mode: local
+  default_data_layer: raw
+  allow_raw_processing: true
+
+ingestion:
+  csv_read:
+    use_dask_threshold_mb: 0.5
+    dask_blocksize: 4MB
+
+features:
+  auto_build_comorbidity: false
+  auto_prepare_silver_feature_sources: false
+
+cascade:
+  validation:
+    permutation_iterations: 1000
+    bootstrap_iterations: 1000
+
+reporting:
+  tables_dir: test_replica/outputs/tables
+  figures_dir: test_replica/outputs/figures
+  reports_dir: test_replica/outputs/reports
+  availability_sensitivity_environments:
+    support_5: test_replica_b1000_availability_sensitivity
+    one_year_era: test_replica_b1000_availability_annual_sensitivity
+    joint: test_replica_b1000_availability_joint_sensitivity

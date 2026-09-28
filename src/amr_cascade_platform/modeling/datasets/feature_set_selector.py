@@ -35,7 +35,13 @@ class ModelingFeatureSetSelector:
         requested_sets: tuple[str, ...] | None = None,
         ablation: bool = False,
     ) -> tuple[ModelingFeatureSet, ...]:
-        clinical_numeric = self._clinical_numeric_columns(full_dataset)
+        clinical_columns = self._clinical_columns(full_dataset)
+        clinical_categorical = tuple(
+            column for column in clinical_columns if column in full_dataset.categorical_columns
+        )
+        clinical_numeric = tuple(
+            column for column in clinical_columns if column in full_dataset.numeric_columns
+        )
         cascade_numeric = tuple(
             column
             for column in base_dataset.numeric_columns
@@ -64,15 +70,15 @@ class ModelingFeatureSetSelector:
             "clinical_no_cascade": ModelingFeatureSet(
                 name="clinical_no_cascade",
                 description="Observed pair/context features plus baseline, acute, history, and comorbidity enrichment, excluding cascade features.",
-                feature_columns=categorical + core_numeric + clinical_numeric,
-                categorical_columns=categorical,
+                feature_columns=categorical + clinical_categorical + core_numeric + clinical_numeric,
+                categorical_columns=categorical + clinical_categorical,
                 numeric_columns=core_numeric + clinical_numeric,
             ),
             "full": ModelingFeatureSet(
                 name="full",
                 description="Observed pair/context, cascade-aware, and clinical enrichment combined.",
-                feature_columns=categorical + core_numeric + cascade_numeric + clinical_numeric,
-                categorical_columns=categorical,
+                feature_columns=categorical + clinical_categorical + core_numeric + cascade_numeric + clinical_numeric,
+                categorical_columns=categorical + clinical_categorical,
                 numeric_columns=core_numeric + cascade_numeric + clinical_numeric,
             ),
         }
@@ -91,7 +97,7 @@ class ModelingFeatureSetSelector:
             return tuple(feature_sets[name] for name in ("observed_only", "cascade_aware", "clinical_no_cascade", "full"))
         return (feature_sets["full"],)
 
-    def _clinical_numeric_columns(self, dataset: ModelingDatasetBundle) -> tuple[str, ...]:
+    def _clinical_columns(self, dataset: ModelingDatasetBundle) -> tuple[str, ...]:
         if not self._metadata_path.exists():
             return tuple(
                 column
@@ -109,6 +115,14 @@ class ModelingFeatureSetSelector:
         ):
             clinical_columns.extend(payload.get(key, []))
         return self._dedupe_existing(tuple(clinical_columns), dataset)
+
+    def _clinical_numeric_columns(self, dataset: ModelingDatasetBundle) -> tuple[str, ...]:
+        """Return metadata-declared clinical columns assigned to the numeric branch."""
+        return tuple(
+            column
+            for column in self._clinical_columns(dataset)
+            if column in dataset.numeric_columns
+        )
 
     @staticmethod
     def _dedupe_existing(columns: tuple[str, ...], dataset: ModelingDatasetBundle) -> tuple[str, ...]:

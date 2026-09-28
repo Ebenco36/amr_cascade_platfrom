@@ -48,5 +48,7 @@ def test_scientific_qa_payload_is_dynamic_and_complete() -> None:
     assert payload["scope"] == "combined"
     assert payload["sampling_context"]["environment"] == "mac_sampled"
     assert payload["downstream_trigger_availability"]["total_downstreams_screened"] >= payload["downstream_trigger_availability"]["estimable_downstreams"]
-    assert "best_test_model" in payload["modeling"]
+    assert payload["modeling"]["protocol"]["primary_estimator"] == "logistic_regression"
+    assert payload["modeling"]["primary_model"]["role"] == "prespecified_primary"
+    assert "test_performance_leader_descriptive" in payload["modeling"]
     assert payload["interpretation_boundary"]["primary_analysis"] == "directly observed AST only"

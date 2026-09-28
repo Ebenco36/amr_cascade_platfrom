@@ -45,6 +45,13 @@ cascade:
     i_squared_threshold: 50.0
     # A diagnostic neither paper reports; set true to compute it.
     between_site_permutation_enabled: false
+  explainability:
+    enabled: true
+    # SHAP uses deterministic samples to bound memory on the full HPC cohort.
+    background_size: 500
+    explanation_sample_size: 1000
+    random_seed: 20260421
+    additivity_tolerance: 1.0e-8
   outputs:
     result_dir: cascade
     summary_filename: cascade_summary.json

@@ -267,8 +267,12 @@ class DirectionalNetworkPlotter:
 
         style = DIRECTION_STYLE[direction]
         fig, ax = plt.subplots(figsize=(self._size, self._size), facecolor="white")
-        ax.set_xlim(-1.55, 1.55)
-        ax.set_ylim(-1.55, 1.55)
+        # Node labels sit at 1.11x the ring radius and the longest runs ~0.7 units
+        # further out; these limits keep every label inside the axes, and the
+        # axes sit below the title block and above the legend (subplots_adjust
+        # below), so no label reaches the subtitle.
+        ax.set_xlim(-1.9, 1.9)
+        ax.set_ylim(-1.9, 1.9)
         ax.set_aspect("equal")
         ax.axis("off")
 
@@ -310,7 +314,8 @@ class DirectionalNetworkPlotter:
         fig.text(0.5, 0.955, subtitle, ha="center", va="top", fontsize=9.6, color="#475467", wrap=True)
         handles = [Line2D([0], [0], marker="o", color="w", markerfacecolor=self._classification.CATEGORY_COLORS[t], markeredgecolor="#17324d", markersize=10, label=f"{t} (AWaRe)") for t in ("Access", "Watch", "Reserve")]
         handles += [Line2D([0], [0], color=style["hue"], lw=3, alpha=0.78, label="robust"), Line2D([0], [0], color=style["hue"], lw=3, alpha=0.34, label="supported")]
-        fig.legend(handles=handles, loc="lower center", ncol=5, frameon=False, fontsize=10.5, bbox_to_anchor=(0.5, 0.02))
+        fig.legend(handles=handles, loc="lower center", ncol=5, frameon=False, fontsize=10.5, bbox_to_anchor=(0.5, 0.01))
+        fig.subplots_adjust(left=0.01, right=0.99, top=0.875, bottom=0.06)
         return self._write(fig, output_stem, formats)
 
     def _write(self, fig, output_stem: Path, formats: tuple[str, ...]) -> dict[str, Path]:
@@ -381,7 +386,9 @@ class DirectionalForestPlotter:
         if n == 0:
             fig = go.Figure()
             fig.add_annotation(text=f"No {TIER_TITLE[tier]} {direction} patterns to draw", x=0.5, y=0.5, xref="paper", yref="paper", showarrow=False, font={"color": "#475467"})
-            fig.update_layout(template=self._template, width=900, height=300, xaxis={"visible": False}, yaxis={"visible": False}, plot_bgcolor="white", paper_bgcolor="white")
+            # 400 px, as the other empty-state figure: 300 exported below the 628 px
+            # minimum PNG height the publication-readiness audit enforces.
+            fig.update_layout(template=self._template, width=900, height=400, xaxis={"visible": False}, yaxis={"visible": False}, plot_bgcolor="white", paper_bgcolor="white")
             return self._exporter.write(fig, output_stem, formats)
 
         est = pd.to_numeric(data.escalation_ratio, errors="coerce").to_numpy()
@@ -652,11 +659,19 @@ class AntiArtefactScatterPlotter:
     reading, the same way er_landscape does.
     """
 
-    def __init__(self, exporter: PlotlyFigureExporter, template: str, width: int, height: int) -> None:
+    def __init__(
+        self,
+        exporter: PlotlyFigureExporter,
+        template: str,
+        width: int,
+        height: int,
+        cotesting_threshold: float,
+    ) -> None:
         self._exporter = exporter
         self._template = template
         self._width = width
         self._height = height
+        self._cotesting_threshold = cotesting_threshold
 
     def export(
         self,
@@ -691,7 +706,14 @@ class AntiArtefactScatterPlotter:
                 customdata=np.stack([subset.upstream_antibiotic, subset.downstream_antibiotic, subset.total_support_n, subset.validation_status], axis=-1),
                 hovertemplate="<b>%{customdata[0]} → %{customdata[1]}</b><br>PBI %{x:.3f}<br>DAS %{y:.3f}<br>Support %{customdata[2]:,}<br>%{customdata[3]}<extra></extra>",
             ))
-        fig.add_vline(x=0.95, line={"dash": "dash", "color": "#94A3B8", "width": 1.2}, annotation_text="PBI=0.95", annotation_font={"size": 9}, annotation_position="top left")
+        threshold_label = f"PBI={self._cotesting_threshold:.2f}"
+        fig.add_vline(
+            x=self._cotesting_threshold,
+            line={"dash": "dash", "color": "#94A3B8", "width": 1.2},
+            annotation_text=threshold_label,
+            annotation_font={"size": 9},
+            annotation_position="top left",
+        )
         fig.update_layout(
             template=self._template, width=self._width, height=self._height,
             title={

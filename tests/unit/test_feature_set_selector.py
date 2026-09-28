@@ -11,10 +11,10 @@ def test_feature_set_selector_builds_expected_ablation_sets(tmp_path: Path) -> N
     metadata_path.write_text(
         """
         {
-          "baseline_feature_columns": ["demo_age"],
+          "baseline_feature_columns": ["demo_age", "demo_gender_category"],
           "acute_feature_columns": ["acute_labs_available"],
           "history_feature_columns": ["history_abx_any_30d"],
-          "comorbidity_feature_columns": ["comorbidity_count"]
+          "comorbidity_feature_columns": ["comorbidity_count", "comorb_diabetes"]
         }
         """,
         encoding="utf-8",
@@ -34,9 +34,11 @@ def test_feature_set_selector_builds_expected_ablation_sets(tmp_path: Path) -> N
             "train_upstream_pagerank": [0.1],
             "train_downstream_pagerank": [0.2],
             "demo_age": [63],
+            "demo_gender_category": ["female"],
             "acute_labs_available": [1],
             "history_abx_any_30d": [1],
             "comorbidity_count": [4],
+            "comorb_diabetes": [1],
             "target": [1],
         }
     )
@@ -77,10 +79,23 @@ def test_feature_set_selector_builds_expected_ablation_sets(tmp_path: Path) -> N
     full_dataset = ModelingDatasetBundle(
         dataframe=dataframe,
         feature_columns=base_dataset.feature_columns
-        + ("demo_age", "acute_labs_available", "history_abx_any_30d", "comorbidity_count"),
-        categorical_columns=base_dataset.categorical_columns,
+        + (
+            "demo_age",
+            "demo_gender_category",
+            "acute_labs_available",
+            "history_abx_any_30d",
+            "comorbidity_count",
+            "comorb_diabetes",
+        ),
+        categorical_columns=base_dataset.categorical_columns + ("demo_gender_category",),
         numeric_columns=base_dataset.numeric_columns
-        + ("demo_age", "acute_labs_available", "history_abx_any_30d", "comorbidity_count"),
+        + (
+            "demo_age",
+            "acute_labs_available",
+            "history_abx_any_30d",
+            "comorbidity_count",
+            "comorb_diabetes",
+        ),
         id_columns=base_dataset.id_columns,
     )
 
@@ -94,4 +109,6 @@ def test_feature_set_selector_builds_expected_ablation_sets(tmp_path: Path) -> N
     assert "demo_age" in by_name["clinical_no_cascade"].feature_columns
     assert "train_pair_escalation_ratio" not in by_name["clinical_no_cascade"].feature_columns
     assert "demo_age" in by_name["full"].feature_columns
+    assert "demo_gender_category" in by_name["full"].categorical_columns
+    assert "comorb_diabetes" in by_name["full"].numeric_columns
     assert "train_pair_escalation_ratio" in by_name["full"].feature_columns

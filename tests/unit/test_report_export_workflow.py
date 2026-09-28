@@ -1,6 +1,38 @@
+from types import SimpleNamespace
+
 import pandas as pd
 
 from amr_cascade_platform.reporting.workflows.report_export_workflow import ReportExportWorkflow
+
+
+def test_shap_figures_are_drawn_for_the_top_of_the_ranking_only() -> None:
+    ranking = pd.DataFrame({
+        "upstream_antibiotic": ["A", "D", "A"],
+        "downstream_antibiotic": ["B", "C", "C"],
+        "rank": [1, 2, 3],
+    })
+    workflow = ReportExportWorkflow.__new__(ReportExportWorkflow)
+    workflow._settings = SimpleNamespace(reporting=SimpleNamespace(shap_max_pair_figures=2))
+    assert workflow._shap_figure_pairs(ranking) == [("A", "B"), ("D", "C")]
+    workflow._settings.reporting.shap_max_pair_figures = 0  # 0 = every pair
+    assert len(workflow._shap_figure_pairs(ranking)) == 3
+    assert workflow._shap_figure_pairs(ranking.iloc[0:0]) == []
+
+
+def test_shap_values_are_read_for_the_requested_pairs_only(tmp_path) -> None:
+    path = tmp_path / "adjusted_model_shap_values.parquet"
+    pd.DataFrame({
+        "upstream_antibiotic": ["A", "A", "D", "D", "E"],
+        "downstream_antibiotic": ["B", "C", "B", "C", "B"],
+        "shap_value": [1.0, 2.0, 3.0, 4.0, 5.0],
+    }).to_parquet(path)
+    # The parquet filter keeps A/D x B/C, a superset; the exact match then drops
+    # A->C and D->B, which were never requested.
+    rows = ReportExportWorkflow._read_shap_values_for_pairs(path, [("A", "B"), ("D", "C")])
+    assert sorted(zip(rows["upstream_antibiotic"], rows["downstream_antibiotic"])) == [("A", "B"), ("D", "C")]
+    assert sorted(rows["shap_value"]) == [1.0, 4.0]
+    assert ReportExportWorkflow._read_shap_values_for_pairs(path, []).empty
+    assert ReportExportWorkflow._read_shap_values_for_pairs(tmp_path / "absent.parquet", [("A", "B")]).empty
 
 
 def test_archive_existing_figure_exports_moves_top_level_static_outputs(tmp_path) -> None:

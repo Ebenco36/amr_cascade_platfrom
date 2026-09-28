@@ -105,20 +105,28 @@ class EligibilityService:
                 & (eligible_space["is_operationally_available"] == 1)
             ).astype("int64")
 
-        # Vectorised equivalent of _observation_status — same priority order,
-        # no Python-level row iteration over the ~4 M-row eligibility space.
-        _obs_conditions = [
-            eligible_space["is_observed_tested"].eq(1),
-            eligible_space["is_intrinsic_resistance"].eq(1),
-            eligible_space["is_operationally_available"].eq(0),
-        ]
-        _obs_choices = [
-            "observed_tested",
-            "structural_intrinsic_resistance",
-            "operationally_unavailable",
-        ]
-        eligible_space["observation_status"] = np.select(
-            _obs_conditions, _obs_choices, default="not_observed"
+        # Eligibility and observation are separate facts about a row: an intrinsically
+        # resistant pair can still carry a recorded result, and it stays ineligible.
+        # eligibility_state says why a row is (not) in the opportunity space;
+        # is_observed_tested says whether a result was recorded; observation_status
+        # combines them with eligibility first, so an observed ineligible row is
+        # reported by its eligibility, never as "observed_tested". Vectorised: no
+        # Python-level iteration over the multi-million-row eligibility space.
+        intrinsic = eligible_space["is_intrinsic_resistance"].eq(1)
+        unavailable = eligible_space["is_operationally_available"].eq(0) & (
+            self._settings.gold.eligibility.denominator != "biological"
+        )
+        eligible_space["eligibility_state"] = pd.Categorical(
+            np.select([intrinsic, unavailable], ["intrinsic_resistance", "operationally_unavailable"], default="eligible"),
+            categories=["eligible", "intrinsic_resistance", "operationally_unavailable"],
+        )
+        eligible_space["observation_status"] = pd.Categorical(
+            np.select(
+                [intrinsic, unavailable, eligible_space["is_observed_tested"].eq(1)],
+                ["structural_intrinsic_resistance", "operationally_unavailable", "observed_tested"],
+                default="not_observed",
+            ),
+            categories=["observed_tested", "not_observed", "structural_intrinsic_resistance", "operationally_unavailable"],
         )
         return eligible_space.drop(columns=["organism_normalized", "antibiotic_normalized"])
 
@@ -187,8 +195,13 @@ class EligibilityService:
         frame["organism_normalized"] = frame["organism"].map(normalize_organism_label)
         frame["antibiotic_normalized"] = frame["antibiotic"].map(normalize_antibiotic_label)
         group_columns = ["source_site", "organism_normalized", "availability_era", "antibiotic_normalized"]
+        # Support is the number of distinct episode-antibiotic observations, not rows:
+        # an episode whose drug carries two results (discordant R and S, or two
+        # labels that normalise to one drug) is one observation of availability.
+        episode_keys = [column for column in self._settings.gold.episode_key_columns if column in frame.columns]
         return (
             frame.dropna(subset=["source_site", "organism_normalized", "antibiotic_normalized"])
+            .drop_duplicates(subset=[*episode_keys, *[c for c in group_columns if c not in episode_keys]])
             .groupby(group_columns, dropna=False)
             .size()
             .rename("availability_support_n")

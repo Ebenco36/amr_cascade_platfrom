@@ -1,0 +1,28 @@
+# test_dataset counterpart of hpc_availability_annual_sensitivity.yaml: test_dataset_b1000.yaml
+# with one-year availability eras (primary: five). Its data_root symlinks the upstream
+# layers of test_dataset (the end-to-end runner creates the links) and keeps its own
+# gold and artifacts, so the primary run is never overwritten.
+environment:
+  name: test_dataset_b1000_availability_annual_sensitivity
+  data_root: test_dataset_b1000_availability_annual_sensitivity
+  execution_mode: local
+  default_data_layer: sample
+  allow_raw_processing: false
+
+features:
+  auto_build_comorbidity: false
+  auto_prepare_silver_feature_sources: false
+
+cascade:
+  validation:
+    permutation_iterations: 1000
+    bootstrap_iterations: 1000
+
+gold:
+  eligibility:
+    availability_era_years: 1
+
+reporting:
+  tables_dir: test_dataset_b1000_availability_annual_sensitivity/outputs/tables
+  figures_dir: test_dataset_b1000_availability_annual_sensitivity/outputs/figures
+  reports_dir: test_dataset_b1000_availability_annual_sensitivity/outputs/reports

@@ -97,7 +97,9 @@ def main() -> None:
     covariates = CascadeCovariateBuilder(settings, path_manager).build(dataset_store.read_pandas(culture_episode_path))
     results = []
     for penalty in penalties:
-        fitted = DownstreamTestingRegression(settings, path_manager, ridge_penalty=penalty).analyze_with_covariates(
+        # explain=False: only the adjusted ORs are compared across penalties; SHAP for every
+        # pair at every penalty would be computed and thrown away.
+        fitted = DownstreamTestingRegression(settings, path_manager, ridge_penalty=penalty, explain=False).analyze_with_covariates(
             filtered_pairs, validated, covariates
         )
         results.append(fitted.assign(ridge_penalty=penalty))

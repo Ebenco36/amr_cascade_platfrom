@@ -233,6 +233,7 @@ def test_pbi_sensitivity_applies_the_screen_rule_including_support(settings):
     )
     table, summary_table, summary = stb.pbi_sensitivity(probabilities, validation, settings)
     assert table.set_index("downstream_antibiotic").loc["ERTAPENEM", "excluded_at_stricter"]
+    assert summary["stricter_threshold"] == pytest.approx(0.90)
     assert summary_table["pairs"].tolist() == [2, 3]
     assert summary_table.iloc[0][["robust", "supported", "mixed_or_insufficient"]].tolist() == [2, 0, 0]
     assert summary["pbi_at_or_above_primary_but_support_below_minimum"] == 1
@@ -414,7 +415,7 @@ def test_prevalence_tables_join_raw_and_display_drug_names(resolver):
             "Binary-evaluable tested n": [40, 30],
             "Mean abs SMD (observed vs unobserved)": [0.11, 0.2],
             "Mean abs SMD (cascade evaluable vs unobserved)": [0.12, 0.3],
-            "Mean abs SMD (independent evaluable vs unobserved)": [0.1, 0.25],
+            "Mean abs SMD (no-trigger evaluable vs unobserved)": [0.1, 0.25],
             "Flagged covariates (observed vs unobserved)": [3, 7],
         }
     )
@@ -506,7 +507,7 @@ def test_estimability_reports_every_reason_even_when_absent():
     assert summary["model_fit_failed"] == 0 and summary["not_estimable"] == 1
 
 
-def test_prediction_fragments_bold_the_best_model_and_the_selected_threshold():
+def test_prediction_fragments_mark_the_prespecified_primary_model_and_selected_threshold():
     metrics = pd.DataFrame(
         [
             (model, split, threshold, 0.524 if split == "test" else 0.5, auc)
@@ -529,7 +530,8 @@ def test_prediction_fragments_bold_the_best_model_and_the_selected_threshold():
         }
     )
     s12 = stb.s12_fragment(comparison, summary["test_prevalence"])
-    assert "XGBoost & 0.963 & 0.793 & \\textbf{0.840} & 0.838 & 0.188 & 0.672 \\\\" in s12
+    assert "\\textbf{Logistic Regression} & 0.958 & 0.779 & 0.825" in s12
+    assert "XGBoost & 0.963 & 0.793 & 0.840" in s12
     assert "No-skill baseline & 0.500 & 0.500 & 0.500 & 0.524 & --- & 0.500 \\\\" in s12
     thresholds = pd.DataFrame({"Threshold": ["0.05", "0.10"], "Precision": ["0.650", "0.667"]})
     s13 = stb.s13_fragment(thresholds, 0.05)
@@ -726,12 +728,40 @@ def test_prediction_details_ranges_gaps_threshold_rows_and_top_features():
     thresholds = pd.DataFrame({"Threshold": ["0.05", "0.70"], "Precision": ["0.65", "0.79"], "Recall": ["0.94", "0.65"], "F1": ["0.77", "0.71"]})
     coefficients = pd.DataFrame({"Feature": ["A", "B", "C", "D"], "Coefficient (log-OR)": [1.0, 0.5, -0.1, -2.0], "Odds Ratio": [2.7, 1.6, 0.9, 0.14]})
     details = stb.prediction_details(metrics, thresholds, coefficients)
-    assert details["test_best_model"] == "XGBoost"
-    assert details["test_gap_to_best"]["logistic_regression"] == pytest.approx(0.02)
+    assert details["test_roc_auc_leader_descriptive"] == "XGBoost"
+    assert details["test_gap_to_leader_descriptive"]["logistic_regression"] == pytest.approx(0.02)
     assert details["roc_auc_range"]["validation"] == {"min": 0.78, "max": 0.79}
     assert details["lr_at_selected"]["recall"] == pytest.approx(0.94) and details["lr_at_070"]["precision"] == pytest.approx(0.79)
     assert [row["feature"] for row in details["lr_top_positive"]] == ["A", "B", "C"]
     assert details["lr_top_negative"][0] == {"feature": "D", "odds_ratio": 0.14}
+
+
+def test_threshold_comparison_quotes_each_procedures_threshold_and_test_performance():
+    selected = pd.DataFrame({
+        "comparison_strategy": ["validation_holdout", "grouped_oof"],
+        "selected_threshold": [0.35, 0.45],
+        "selection_rows": [7595, 7265],
+        "selection_groups": [np.nan, 199.0],
+        "cv_folds": [np.nan, 5.0],
+    })
+    tested = pd.DataFrame({
+        "comparison_strategy": ["validation_holdout", "grouped_oof", "grouped_oof"],
+        "split": ["test", "test", "validation"],
+        "balanced_accuracy": [0.70, 0.72, 0.99],
+        "recall": [0.85, 0.80, 0.99],
+        "precision": [0.58, 0.62, 0.99],
+        "f1": [0.69, 0.70, 0.99],
+    })
+    summary = stb.threshold_comparison_summary(selected, tested)
+    assert summary["validation_holdout"]["selected_threshold"] == 0.35 and "selection_patients" not in summary["validation_holdout"]
+    assert summary["grouped_oof"]["selection_patients"] == 199 and summary["grouped_oof"]["folds"] == 5
+    assert summary["grouped_oof"]["test"]["balanced_accuracy"] == 0.72  # the test row, not the validation row
+    assert summary["threshold_difference"] == pytest.approx(0.10)
+    assert summary["test_balanced_accuracy_difference"] == pytest.approx(0.02)
+    macros = stb.numbers_tex({"prediction": {"threshold_comparison": summary}}, "test")
+    assert "amrnum:prediction.threshold_comparison.grouped_oof.selected_threshold|2\\endcsname{0.45}" in macros
+    with pytest.raises(ValueError, match="grouped_oof"):
+        stb.threshold_comparison_summary(selected, tested.loc[tested["comparison_strategy"].ne("grouped_oof")])
 
 
 def test_signed_numbers_drop_the_sign_when_they_round_to_zero():

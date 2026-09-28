@@ -32,14 +32,15 @@ import time
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-import plotly.io as pio
 import pyarrow as pa
 import pyarrow.dataset as ds
 import pyarrow.parquet as pq
+from matplotlib import pyplot as plt
 from plotly.subplots import make_subplots
 from sklearn.calibration import calibration_curve
 from sklearn.compose import ColumnTransformer
@@ -193,20 +194,117 @@ def _apply_standard_layout(
     fig.update_yaxes(showgrid=True, gridcolor=GRID_Y, zeroline=False)
 
 
-def _write_all_formats(fig: go.Figure, out_stem: Path) -> dict[str, Path]:
-    """Write .html (interactive), .png and .pdf (static, via kaleido)."""
-    out_stem.parent.mkdir(parents=True, exist_ok=True)
+def _model_static_plotter():
+    """Reuse the production model plotter's dedicated static renderers."""
+    from amr_cascade_platform.visualization.report.plotly_exporter import (
+        PlotlyFigureExporter,
+    )
+    from amr_cascade_platform.visualization.report.plotly_model_plotters import (
+        PlotlyModelEvaluationPlotter,
+    )
+
+    exporter = PlotlyFigureExporter(width=FIG_WIDTH, height=FIG_HEIGHT)
+    return PlotlyModelEvaluationPlotter(
+        exporter=exporter,
+        template=PLOTLY_TEMPLATE,
+        width=FIG_WIDTH,
+        height=FIG_HEIGHT,
+    )
+
+
+def _write_all_formats(
+    fig: go.Figure,
+    out_stem: Path,
+    static_fallback: Callable[[str, Path], None] | None = None,
+) -> dict[str, Path]:
+    """Write interactive and publication-static outputs with a real fallback."""
+    from amr_cascade_platform.visualization.report.plotly_exporter import (
+        PlotlyFigureExporter,
+    )
+
     width = int(fig.layout.width or FIG_WIDTH)
     height = int(fig.layout.height or FIG_HEIGHT)
-    paths: dict[str, Path] = {}
-    for fmt in EXPORT_FORMATS:
-        path = out_stem.with_suffix(f".{fmt}")
-        if fmt == "html":
-            pio.write_html(fig, path, include_plotlyjs="cdn", full_html=True)
-        else:
-            fig.write_image(path, format=fmt, width=width, height=height, scale=2)
-        paths[fmt] = path
-    return paths
+    PlotlyFigureExporter(width=width, height=height).write(
+        fig,
+        out_stem,
+        EXPORT_FORMATS,
+        static_fallback=static_fallback,
+    )
+    return {fmt: out_stem.with_suffix(f".{fmt}") for fmt in EXPORT_FORMATS}
+
+
+def _write_cross_split_static(metrics: pd.DataFrame, fmt: str, path: Path) -> None:
+    """Publication-static grouped bars for train/validation/test ROC-AUC."""
+    models = [model for model in MODEL_ORDER if model in set(metrics["model_name"])]
+    splits = ["train", "validation", "test"]
+    positions = np.arange(len(models), dtype=float)
+    bar_width = 0.23
+    fig, ax = plt.subplots(figsize=(11.5, 7.2))
+
+    for index, split in enumerate(splits):
+        split_rows = metrics.loc[metrics["split"].eq(split)].set_index("model_name")
+        values = [
+            float(split_rows.loc[model, "roc_auc"]) if model in split_rows.index else np.nan
+            for model in models
+        ]
+        offset = (index - 1) * bar_width
+        bars = ax.bar(
+            positions + offset,
+            values,
+            width=bar_width,
+            color=SPLIT_COLOR[split],
+            label=SPLIT_LABEL[split],
+        )
+        ax.bar_label(
+            bars,
+            labels=[f"{value:.3f}" if np.isfinite(value) else "" for value in values],
+            padding=3,
+            fontsize=10,
+        )
+
+    ax.axhline(0.5, color=REFERENCE_COLOR, linestyle="--", linewidth=1.2, label="Chance (0.50)")
+    ax.set_xticks(positions, [MODEL_LABEL[model] for model in models])
+    ax.set_ylabel("ROC-AUC")
+    ax.set_ylim(0.4, 1.02)
+    ax.set_title("ROC-AUC Across Train, Development-Validation, and Test Sites", fontsize=15, fontweight="bold")
+    ax.grid(axis="y", color=GRID_Y, linewidth=0.8)
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.legend(frameon=False, loc="lower center", bbox_to_anchor=(0.5, -0.20), ncol=4)
+    fig.tight_layout(rect=(0, 0.08, 1, 1))
+    fig.savefig(path, format=fmt, dpi=300, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+
+
+def _write_coefficients_static(plot_df: pd.DataFrame, fmt: str, path: Path) -> None:
+    """Publication-static horizontal coefficient plot with readable labels."""
+    frame = plot_df.iloc[::-1].copy()
+    labels = frame["feature"].map(_axis_label).str.replace("<br>", "\n", regex=False)
+    values = frame["coefficient"].astype(float)
+    colors = ["#1F77B4" if value > 0 else "#D62728" for value in values]
+    height = max(8.0, 0.43 * len(frame) + 2.5)
+    fig, ax = plt.subplots(figsize=(13.5, height))
+    bars = ax.barh(labels, values, color=colors, edgecolor="white", linewidth=0.5)
+    ax.axvline(0, color="#444444", linewidth=1)
+    ax.set_xlabel("Logistic-regression coefficient (log-OR)")
+    ax.set_title(
+        "Largest Positive and Negative Logistic-Regression Coefficients\n"
+        "Stanford training site; full feature set",
+        fontsize=15,
+        fontweight="bold",
+    )
+    ax.grid(axis="x", color=GRID_X, linewidth=0.8)
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.bar_label(
+        bars,
+        labels=[f"{value:+.3f}" for value in values],
+        padding=4,
+        fontsize=9,
+    )
+    x_limit = max(abs(float(values.min())), abs(float(values.max())), 0.01)
+    ax.set_xlim(-1.30 * x_limit, 1.30 * x_limit)
+    fig.tight_layout()
+    fig.savefig(path, format=fmt, dpi=300, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
 
 
 # ── Data loading ──────────────────────────────────────────────────────────────
@@ -464,16 +562,25 @@ def fig_roc_curves(preds: pd.DataFrame, fig_dir: Path) -> dict[str, Path]:
             hovertemplate="FPR=%{x:.4f}<br>TPR=%{y:.4f}<extra>%{fullData.name}</extra>",
         ))
 
+    # Titles stay on one line at print scale (the exporter enlarges text 2.6x);
+    # what they used to explain is in the Supplement caption.
     _apply_standard_layout(
         fig,
-        title="Receiver Operating Characteristic (Test Site, armd_utsw)",
-        xaxis_title="False Positive Rate (1 − Specificity)",
-        yaxis_title="True Positive Rate (Sensitivity)",
+        title="ROC curves, test site (armd_utsw)",
+        xaxis_title="False positive rate (1 − specificity)",
+        yaxis_title="True positive rate",
     )
-    fig.update_xaxes(range=[-0.01, 1.01])
-    fig.update_yaxes(range=[-0.01, 1.01])
+    fig.update_xaxes(range=[-0.01, 1.01], dtick=0.2)
+    fig.update_yaxes(range=[-0.01, 1.01], dtick=0.2)
 
-    return _write_all_formats(fig, fig_dir / "supp_pred_fig1_roc_curves")
+    static_plotter = _model_static_plotter()
+    return _write_all_formats(
+        fig,
+        fig_dir / "supp_pred_fig1_roc_curves",
+        static_fallback=lambda fmt, path: static_plotter._write_curve_static(
+            test, fmt, path, curve_type="roc"
+        ),
+    )
 
 
 # ── Figure 2 — PR curves (test split) ────────────────────────────────────────
@@ -483,10 +590,12 @@ def fig_pr_curves(preds: pd.DataFrame, fig_dir: Path) -> dict[str, Path]:
     prevalence = float(test["target"].mean())
 
     fig = go.Figure()
+    # Below the line at the right: every curve ends on the baseline from above, so the
+    # label is clear of them (at the left it ran into the y tick labels).
     fig.add_hline(
         y=prevalence, line_dash="dash", line_color=REFERENCE_COLOR,
-        annotation_text=f"No-skill baseline (prevalence = {prevalence:.4f})",
-        annotation_position="top left",
+        annotation_text=f"No skill (prevalence {prevalence:.2f})",
+        annotation_position="bottom right",
     )
 
     for model in MODEL_ORDER:
@@ -498,22 +607,17 @@ def fig_pr_curves(preds: pd.DataFrame, fig_dir: Path) -> dict[str, Path]:
         fig.add_trace(go.Scatter(
             x=rec, y=prec, mode="lines",
             line={"width": 3, "color": MODEL_COLOR[model]},
-            name=f"{MODEL_LABEL[model]} (PR-AUC = {pr_auc:.4f})",
+            name=f"{MODEL_LABEL[model]} (PR-AUC = {pr_auc:.3f})",
             hovertemplate="Recall=%{x:.4f}<br>Precision=%{y:.4f}<extra>%{fullData.name}</extra>",
         ))
 
-    subtitle = (
-        f"PR-AUC is bounded by prevalence (≈{prevalence:.1%}); "
-        "all models exceed the no-skill baseline"
-    )
     _apply_standard_layout(
         fig,
-        title=f"Precision-Recall Curves (Test Site, armd_utsw)<br><sup>{subtitle}</sup>",
-        xaxis_title="Recall (Sensitivity)",
-        yaxis_title="Precision (Positive Predictive Value)",
-        margin={"l": 80, "r": 40, "t": 110, "b": 90},
+        title="Precision–recall curves, test site (armd_utsw)",
+        xaxis_title="Recall (sensitivity)",
+        yaxis_title="Precision (PPV)",
     )
-    fig.update_xaxes(range=[-0.01, 1.01])
+    fig.update_xaxes(range=[-0.01, 1.01], dtick=0.2)
     # Precision is always in [0, 1]. Only zoom toward the baseline for a
     # genuinely rare positive class (prevalence <= 5%, so prevalence*20 <= 1.0
     # stays a valid upper bound) — otherwise use the full range, since a
@@ -524,7 +628,14 @@ def fig_pr_curves(preds: pd.DataFrame, fig_dir: Path) -> dict[str, Path]:
     else:
         fig.update_yaxes(range=[-0.01, 1.01])
 
-    return _write_all_formats(fig, fig_dir / "supp_pred_fig2_pr_curves")
+    static_plotter = _model_static_plotter()
+    return _write_all_formats(
+        fig,
+        fig_dir / "supp_pred_fig2_pr_curves",
+        static_fallback=lambda fmt, path: static_plotter._write_curve_static(
+            test, fmt, path, curve_type="pr"
+        ),
+    )
 
 
 # ── Figure 3 — Calibration plots (test split, 2 × 2 grid) ────────────────────
@@ -533,10 +644,15 @@ def fig_calibration(preds: pd.DataFrame, fig_dir: Path) -> dict[str, Path]:
     test = preds[preds["split"] == "test"]
     models = [m for m in MODEL_ORDER if not test[test["model_name"] == m].empty]
 
-    fig = make_subplots(rows=2, cols=2, subplot_titles=[MODEL_LABEL[m] for m in models])
+    # One row of panels with a shared y-axis: each axis title appears once, so
+    # the print-scaled titles cannot run into a neighbouring panel.
+    fig = make_subplots(
+        rows=1, cols=max(len(models), 1), subplot_titles=[MODEL_LABEL[m] for m in models],
+        shared_yaxes=True, horizontal_spacing=0.05,
+    )
 
     for idx, model in enumerate(models):
-        row, col = idx // 2 + 1, idx % 2 + 1
+        row, col = 1, idx + 1
         sub = test[test["model_name"] == model]
         frac_pos, mean_pred = calibration_curve(
             sub["target"].astype(int),
@@ -563,20 +679,23 @@ def fig_calibration(preds: pd.DataFrame, fig_dir: Path) -> dict[str, Path]:
             ),
             row=row, col=col,
         )
-        fig.update_xaxes(title_text="Mean predicted probability", row=row, col=col)
-        fig.update_yaxes(title_text="Observed event rate", row=row, col=col)
-
-    for idx in range(len(models), 4):
-        row, col = idx // 2 + 1, idx % 2 + 1
-        fig.update_xaxes(visible=False, row=row, col=col)
-        fig.update_yaxes(visible=False, row=row, col=col)
+        fig.update_xaxes(range=[-0.02, 1.02], dtick=0.5, row=row, col=col)
+        fig.update_yaxes(range=[-0.02, 1.02], dtick=0.5, row=row, col=col)
+    if models:
+        fig.update_yaxes(title_text="Observed event rate", row=1, col=1)
+        # Short enough to stay on one line under a single panel at print scale.
+        fig.update_xaxes(title_text="Predicted probability", row=1, col=(len(models) + 1) // 2)
+        # Plotly draws axis titles above the base font; at 14 px the shared title fits one panel.
+        fig.update_xaxes(title_font_size=14, tickfont_size=14)
+        fig.update_yaxes(title_font_size=14, tickfont_size=14)
 
     fig.update_layout(
         template=PLOTLY_TEMPLATE,
-        width=FIG_WIDTH,
-        height=FIG_HEIGHT,
+        # Wide enough that each panel holds its title and the shared axis title on one line.
+        width=2000,
+        height=820,
         title={
-            "text": "Calibration Reliability Plots (Test Site, armd_utsw)",
+            "text": "Calibration, test site (armd_utsw)",
             "x": 0.5, "xanchor": "center", "font": {"size": 20},
         },
         legend={
@@ -591,7 +710,14 @@ def fig_calibration(preds: pd.DataFrame, fig_dir: Path) -> dict[str, Path]:
     fig.update_xaxes(showgrid=True, gridcolor=GRID_X, zeroline=False)
     fig.update_yaxes(showgrid=True, gridcolor=GRID_Y, zeroline=False)
 
-    return _write_all_formats(fig, fig_dir / "supp_pred_fig3_calibration")
+    static_plotter = _model_static_plotter()
+    return _write_all_formats(
+        fig,
+        fig_dir / "supp_pred_fig3_calibration",
+        static_fallback=lambda fmt, path: static_plotter._write_calibration_static(
+            test, fmt, path
+        ),
+    )
 
 
 # ── Figure 4 — Cross-split ROC-AUC bar chart ─────────────────────────────────
@@ -615,45 +741,45 @@ def fig_cross_split(metrics: pd.DataFrame, fig_dir: Path) -> dict[str, Path]:
             textfont={"size": 12, "color": "#344054"},
         ))
 
-    # Compute the actual train-test gap per model rather than asserting a
-    # fixed winner in the title: which family has the smallest gap is a
-    # property of the data, not something to hardcode (it need not be LR).
-    gap_by_model = {}
-    for m in models:
-        sub = metrics[metrics["model_name"] == m].set_index("split")
-        if "train" in sub.index and "test" in sub.index:
-            gap_by_model[m] = float(sub.loc["train", "roc_auc"] - sub.loc["test", "roc_auc"])
-    if gap_by_model:
-        smallest = min(gap_by_model, key=gap_by_model.get)
-        subtitle = (
-            f"Train-test gap ranges {min(gap_by_model.values()):.3f}-"
-            f"{max(gap_by_model.values()):.3f} across families; smallest for {MODEL_LABEL[smallest]}"
-        )
-    else:
-        subtitle = "Train, validation, and test ROC-AUC by model family"
-
-    fig.add_hline(
-        y=0.5, line_dash="dot", line_color="#888888",
-        annotation_text="Chance (0.50)", annotation_position="bottom right",
-    )
+    # The chance line is named in the legend: a label drawn on the line sat on the bars.
+    fig.add_hline(y=0.5, line_dash="dot", line_color="#888888")
+    fig.add_trace(go.Scatter(
+        x=[None], y=[None], mode="lines",
+        line={"dash": "dot", "color": "#888888"}, name="Chance (0.50)",
+    ))
 
     _apply_standard_layout(
         fig,
-        title=f"ROC-AUC Across Train / Validation / Test Splits<br><sup>{subtitle}</sup>",
+        title="ROC-AUC by model and site",
         yaxis_title="ROC-AUC",
-        margin={"l": 80, "r": 40, "t": 110, "b": 90},
+        legend_title="Split",
     )
     fig.update_layout(barmode="group")
-    fig.update_yaxes(range=[0.4, 1.08])
+    # Bars start at zero so their heights compare honestly.
+    fig.update_yaxes(range=[0, 1.1], dtick=0.2)
 
-    return _write_all_formats(fig, fig_dir / "supp_pred_fig4_cross_split_roc")
+    return _write_all_formats(
+        fig,
+        fig_dir / "supp_pred_fig4_cross_split_roc",
+        static_fallback=lambda fmt, path: _write_cross_split_static(
+            metrics, fmt, path
+        ),
+    )
 
 
-# ── Figure 5 — Threshold sensitivity (test split, all models) ─────────────────
+# ── Figure 5 — Threshold selection (development-validation split) ──────────
+
+def _selection_metric_label(frame: pd.DataFrame) -> str:
+    """The metric the decision thresholds were selected on, as recorded by training."""
+    labels = {"balanced_accuracy": "balanced-accuracy", "f1": "F1", "mcc": "MCC"}
+    column = frame.get("threshold_selection_metric")
+    metric = str(column.dropna().iloc[0]) if column is not None and column.notna().any() else "f1"
+    return labels.get(metric, metric)
+
 
 def fig_threshold(thresh_metrics: pd.DataFrame, fig_dir: Path) -> dict[str, Path]:
-    test = thresh_metrics[thresh_metrics["split"] == "test"].copy()
-    models = [m for m in MODEL_ORDER if m in test["model_name"].values]
+    validation = thresh_metrics[thresh_metrics["split"] == "validation"].copy()
+    models = [m for m in MODEL_ORDER if m in validation["model_name"].values]
 
     metric_specs = [
         ("precision", "Precision (PPV)"),
@@ -662,12 +788,17 @@ def fig_threshold(thresh_metrics: pd.DataFrame, fig_dir: Path) -> dict[str, Path
         ("balanced_accuracy", "Balanced Accuracy"),
     ]
 
-    fig = make_subplots(rows=2, cols=2, subplot_titles=[label for _, label in metric_specs])
+    # Panel titles name the metric, so panels carry no y-axis titles of their own
+    # (at print scale they ran into the neighbouring panel).
+    fig = make_subplots(
+        rows=2, cols=2, subplot_titles=[label for _, label in metric_specs],
+        horizontal_spacing=0.09, vertical_spacing=0.2,
+    )
 
     for i, (metric, label) in enumerate(metric_specs):
         row, col = i // 2 + 1, i % 2 + 1
         for model in models:
-            sub = test[test["model_name"] == model].sort_values("threshold")
+            sub = validation[validation["model_name"] == model].sort_values("threshold")
             fig.add_trace(
                 go.Scatter(
                     x=sub["threshold"], y=sub[metric], mode="lines+markers",
@@ -698,23 +829,29 @@ def fig_threshold(thresh_metrics: pd.DataFrame, fig_dir: Path) -> dict[str, Path
                     ),
                     row=row, col=col,
                 )
-        fig.update_xaxes(title_text="Decision threshold", range=[0.04, 0.91], row=row, col=col)
-        fig.update_yaxes(title_text=label, row=row, col=col)
+        fig.update_xaxes(
+            title_text="Decision threshold" if row == 2 else None,
+            range=[0.02, 0.98], dtick=0.2, row=row, col=col,
+        )
+
+    # One legend entry explains the diamonds (previously a wrapped subtitle).
+    fig.add_trace(go.Scatter(
+        x=[None], y=[None], mode="markers",
+        marker={"size": 12, "symbol": "diamond", "color": "#667085", "line": {"width": 2, "color": "white"}},
+        name=f"Selected ({_selection_metric_label(validation)}-optimal)",
+    ))
 
     fig.update_layout(
         template=PLOTLY_TEMPLATE,
-        width=1450,
+        width=FIG_WIDTH,
         height=FIG_HEIGHT,
         title={
-            "text": (
-                "Threshold Sensitivity Analysis (Test Site, armd_utsw)"
-                "<br><sup>Diamond markers show the threshold selected on the validation split</sup>"
-            ),
+            "text": "Threshold selection, validation site (armd_ecuh)",
             "x": 0.5, "xanchor": "center", "font": {"size": 20},
         },
         legend={
-            "title": {"text": "Model"}, "orientation": "h", "yanchor": "top",
-            "y": -0.08, "xanchor": "center", "x": 0.5, "font": {"size": 13},
+            "title": {"text": ""}, "orientation": "h", "yanchor": "top",
+            "y": -0.1, "xanchor": "center", "x": 0.5, "font": {"size": 13},
         },
         plot_bgcolor="white",
         paper_bgcolor="white",
@@ -724,7 +861,14 @@ def fig_threshold(thresh_metrics: pd.DataFrame, fig_dir: Path) -> dict[str, Path
     fig.update_xaxes(showgrid=True, gridcolor=GRID_X, zeroline=False)
     fig.update_yaxes(showgrid=True, gridcolor=GRID_Y, zeroline=False)
 
-    return _write_all_formats(fig, fig_dir / "supp_pred_fig5_threshold_analysis")
+    static_plotter = _model_static_plotter()
+    return _write_all_formats(
+        fig,
+        fig_dir / "supp_pred_fig5_threshold_analysis",
+        static_fallback=lambda fmt, path: static_plotter._write_threshold_static(
+            validation, fmt, path, split="development-validation"
+        ),
+    )
 
 
 # ── Figure 6 — LR top-20 feature coefficients ─────────────────────────────────
@@ -745,7 +889,7 @@ def fig_lr_coefficients(coef_df: pd.DataFrame, fig_dir: Path) -> dict[str, Path]
 
     fig = go.Figure()
     fig.add_trace(go.Bar(
-        x=plot_df["coefficient"], y=plot_df["feature"].map(_axis_label), orientation="h",
+        x=plot_df["coefficient"], y=plot_df["feature"].map(lambda name: _axis_label(name, limit=46)), orientation="h",
         marker_color=colors,
         marker_line={"color": "white", "width": 0.5},
         text=text, textposition="outside",
@@ -765,23 +909,30 @@ def fig_lr_coefficients(coef_df: pd.DataFrame, fig_dir: Path) -> dict[str, Path]
         name="Decreases P(downstream testing)",
     ))
 
+    # The sign's meaning is in the legend and the caption, so the axis title stays one line.
     _apply_standard_layout(
         fig,
-        title=(
-            "Top 10 Positive and Top 10 Negative LR Coefficients"
-            "<br><sup>Trained on armd (Stanford) site, full feature set</sup>"
-        ),
-        xaxis_title="Logistic regression coefficient (log-OR); positive increases downstream-testing probability",
-        margin={"l": 260, "r": 60, "t": 110, "b": 90},
+        title="Top 10 positive and negative LR coefficients",
+        xaxis_title="Coefficient (log-OR)",
+        margin={"l": 260, "r": 60, "t": 90, "b": 90},
         legend_title="",
     )
     fig.update_layout(yaxis={"autorange": "reversed"})
     x_min = min(0.0, float(plot_df["coefficient"].min()))
     x_max = max(0.0, float(plot_df["coefficient"].max()))
-    x_pad = max(0.12 * (x_max - x_min), 0.01)
+    # Room on both sides for the value printed beyond each bar end; with less, a
+    # long negative bar's value ran into the feature names.
+    x_pad = max(0.28 * (x_max - x_min), 0.05)
     fig.update_xaxes(range=[x_min - x_pad, x_max + x_pad])
+    fig.update_traces(cliponaxis=False, selector={"type": "bar"})
 
-    return _write_all_formats(fig, fig_dir / "supp_pred_fig6_lr_coefficients")
+    return _write_all_formats(
+        fig,
+        fig_dir / "supp_pred_fig6_lr_coefficients",
+        static_fallback=lambda fmt, path: _write_coefficients_static(
+            plot_df, fmt, path
+        ),
+    )
 
 
 # ── Tables ─────────────────────────────────────────────────────────────────────
@@ -837,17 +988,23 @@ def table_lr_top_features(coef_df: pd.DataFrame, tab_dir: Path) -> Path:
 
 
 def table_threshold_decision(thresh_metrics: pd.DataFrame, tab_dir: Path) -> Path:
-    """LR threshold decision table for the test split at representative thresholds."""
-    lr_test = thresh_metrics[
+    """LR threshold decision table for the development-validation split."""
+    lr_validation = thresh_metrics[
         (thresh_metrics["model_name"] == "logistic_regression")
-        & (thresh_metrics["split"] == "test")
+        & (thresh_metrics["split"] == "validation")
     ].copy()
 
-    keep_thresh = [0.05, 0.1, 0.2, 0.3, 0.5, 0.6, 0.7, 0.8, 0.9]
-    lr_test = lr_test[lr_test["threshold"].isin(keep_thresh)].sort_values("threshold")
+    # Representative thresholds plus the selected one, which the manuscript table
+    # bolds and quotes -- it must be a row of its own, never a neighbour's.
+    keep_thresh = {0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9}
+    if "selected_for_decision" in lr_validation.columns:
+        keep_thresh |= set(lr_validation.loc[lr_validation["selected_for_decision"].fillna(False).astype(bool), "threshold"].round(4))
+    lr_validation = lr_validation[
+        lr_validation["threshold"].round(4).isin({round(value, 4) for value in keep_thresh})
+    ].sort_values("threshold")
 
-    export = lr_test[["threshold", "precision", "recall", "f1", "balanced_accuracy",
-                       "roc_auc", "brier_score"]].copy()
+    export = lr_validation[["threshold", "precision", "recall", "f1", "balanced_accuracy",
+                             "roc_auc", "brier_score"]].copy()
 
     def _fmt(s, decimals=3):
         return s.map(lambda x: f"{x:.{decimals}f}" if pd.notna(x) else "")

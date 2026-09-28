@@ -21,7 +21,9 @@ from amr_cascade_platform.cascade.statistics.downstream_testing_regression impor
 from amr_cascade_platform.core.config.config_models import Settings
 from amr_cascade_platform.core.exceptions.custom_exceptions import ValidationError
 from amr_cascade_platform.core.paths.path_manager import PathManager
+from amr_cascade_platform.core.utils.antibiotic_names import normalize_antibiotic_label
 from amr_cascade_platform.core.utils.eskape import EskapeTarget
+from amr_cascade_platform.core.utils.organism_names import normalize_organism_label
 from amr_cascade_platform.core.utils.text import normalize_label, safe_feature_name
 from amr_cascade_platform.data.transformations.culture_episode_builder import CultureEpisodeBuilder
 from amr_cascade_platform.data.transformations.observation_space_builder import ObservationSpaceBuilder
@@ -71,10 +73,14 @@ class ArmdEskapeCascadeRunner:
 
         filter_path = output_dir / "filtered_input_cohort.parquet"
         filtered.to_parquet(filter_path, index=False)
+        canonical = filtered["organism"].map(normalize_organism_label) if not filtered.empty else pd.Series(dtype="string")
         matched_labels = (
-            filtered["organism"].astype("string").value_counts(dropna=False).rename_axis("armd_organism_label").reset_index(name="row_count")
+            filtered.assign(canonical_organism=canonical)
+            .groupby(["organism", "canonical_organism"], dropna=False).size()
+            .rename("row_count").reset_index()
+            .rename(columns={"organism": "armd_organism_label"})
             if not filtered.empty
-            else pd.DataFrame(columns=["armd_organism_label", "row_count"])
+            else pd.DataFrame(columns=["armd_organism_label", "canonical_organism", "row_count"])
         )
         matched_labels_path = output_dir / "matched_labels.csv"
         matched_labels.to_csv(matched_labels_path, index=False)
@@ -85,8 +91,52 @@ class ArmdEskapeCascadeRunner:
                 f"the family filter '{request.target.armd_match_pattern}'."
             )
 
-        culture_episodes = self._culture_episode_builder.build(filtered, organism_list=None)
-        culture_drug_episodes = self._observation_space_builder.build(filtered, organism_list=None)
+        # One analysis per canonical organism. A family target (every ENTEROBACTER
+        # label, for one) spans biologically different species with their own drug
+        # panels and testing regimes, and the pattern estimates assume a single
+        # organism (ConditionalProbabilityAnalyzer refuses anything else).
+        # Phenotype-annotated labels of one species (e.g. "STAPH AUREUS {MRSA}") are
+        # pooled into that species, as in the primary gold build. Organisms are
+        # combined only in the summary, after each one's own validation.
+        outputs: dict[str, Path] = {"filtered_input": filter_path, "matched_labels": matched_labels_path}
+        summaries = []
+        for organism in sorted(canonical.dropna().unique()):
+            subset = filtered.loc[canonical.eq(organism).fillna(False).to_numpy()].copy()
+            subset["organism"] = organism
+            organism_dir = output_dir / "organisms" / safe_feature_name(organism)
+            organism_dir.mkdir(parents=True, exist_ok=True)
+            organism_outputs, summary = self._run_organism(request, subset, organism, organism_dir)
+            outputs.update({f"{safe_feature_name(organism)}__{name}": path for name, path in organism_outputs.items()})
+            summaries.append(summary)
+        summary = pd.concat(summaries, ignore_index=True)
+        csv_path = output_dir / "eskape_existence_summary.csv"
+        json_path = output_dir / "eskape_existence_summary.json"
+        summary.to_csv(csv_path, index=False)
+        json_path.write_text(summary.to_json(orient="records", indent=2), encoding="utf-8")
+        outputs["existence_summary_csv"] = csv_path
+        outputs["existence_summary_json"] = json_path
+        return outputs
+
+    def _run_organism(
+        self, request: ArmdEskapeRequest, subset: pd.DataFrame, organism: str, organism_dir: Path
+    ) -> tuple[dict[str, Path], pd.DataFrame]:
+        """The cascade analysis for one canonical organism of the target, and its summary row."""
+        episode_count = int(subset.drop_duplicates(list(self._settings.gold.episode_key_columns)).shape[0])
+        if episode_count < self._settings.cascade.min_total_support:
+            return {}, self._existence_summary(
+                dataset="armd", target=request.target, organism=organism,
+                retained_edges=pd.DataFrame(), validation_results=pd.DataFrame(),
+                filtered_rows=len(subset), culture_episode_rows=episode_count, drug_pair_rows=0,
+                source_scope=request.source_scope, site=request.site,
+                decision_rule=f"Fewer than {self._settings.cascade.min_total_support} culture episodes; not analysed",
+            )
+
+        culture_episodes = self._culture_episode_builder.build(subset, organism_list=None)
+        culture_drug_episodes = self._observation_space_builder.build(subset, organism_list=None)
+        # Same canonical names as the primary gold build (GoldBuildManager.build):
+        # raw aliases of one drug would otherwise become separate nodes and
+        # alias-to-alias pseudo-patterns.
+        culture_drug_episodes["antibiotic"] = culture_drug_episodes["antibiotic"].map(normalize_antibiotic_label)
         testing_matrix = self._testing_matrix_builder.build(culture_drug_episodes)
         eligible_pairs = self._eligibility_service.build_episode_eligibility(
             culture_episodes=culture_episodes,
@@ -97,7 +147,7 @@ class ArmdEskapeCascadeRunner:
             eligibility_space=eligible_pairs,
         )
 
-        gold_dir = output_dir / "gold"
+        gold_dir = organism_dir / "gold"
         gold_dir.mkdir(parents=True, exist_ok=True)
         culture_episodes.to_parquet(gold_dir / "culture_episodes.parquet", index=False)
         culture_drug_episodes.to_parquet(gold_dir / "culture_drug_episodes.parquet", index=False)
@@ -109,18 +159,8 @@ class ArmdEskapeCascadeRunner:
             drug_pair_episodes
         )
 
-        # ESKAPE family analysis pools organism variants only for the conditional
-        # edge-estimation step. Keep filtered_pairs itself on the original organism
-        # labels so downstream adjusted regression can merge episode covariates on
-        # the configured episode key, which includes organism.
-        family_name = request.target.display_name
-        conditional_pairs = (
-            filtered_pairs.assign(organism=family_name)
-            if "organism" in filtered_pairs.columns
-            else filtered_pairs
-        )
-
-        conditional_probabilities = self._conditional_analyzer.analyze(conditional_pairs)
+        # One organism per call (see run), so the analyzer's single-organism guard holds.
+        conditional_probabilities = self._conditional_analyzer.analyze(filtered_pairs)
         escalation_results = self._escalation_analyzer.analyze(conditional_probabilities)
         adjusted_results = self._regression_analyzer._empty_results()
         retained_edges = self._retained_edge_analyzer.analyze(escalation_results, adjusted_results)
@@ -134,6 +174,7 @@ class ArmdEskapeCascadeRunner:
             validated_edge_results,
             culture_episodes,
         )
+        explainability_outputs = self._regression_analyzer.explainability_outputs()
         retained_edges = self._retained_edge_analyzer.analyze(escalation_results, adjusted_results)
         dependence_results = self._pair_dependence_analyzer.analyze(filtered_pairs, retained_edges)
         rule_concordance = self._guideline_concordance_analyzer.analyze(filtered_pairs, retained_edges)
@@ -142,13 +183,17 @@ class ArmdEskapeCascadeRunner:
             conditional_probabilities=conditional_probabilities,
             escalation_results=escalation_results,
             adjusted_results=adjusted_results,
+            adjusted_model_shap_global=explainability_outputs["adjusted_model_shap_global"],
+            adjusted_model_shap_values=explainability_outputs["adjusted_model_shap_values"],
+            adjusted_model_shap_metadata=explainability_outputs["adjusted_model_shap_metadata"],
+            adjusted_model_shap_domain=explainability_outputs["adjusted_model_shap_domain"],
             retained_edges=retained_edges,
             validation_results=validation_results,
             dependence_results=dependence_results,
             rule_concordance=rule_concordance,
             cotesting_pairs=cotesting_pairs,
             cotesting_probabilities=cotesting_probabilities,
-            output_dir=output_dir,
+            output_dir=organism_dir,
         )
         outputs.update(
             self._report_builder.export(
@@ -156,26 +201,22 @@ class ArmdEskapeCascadeRunner:
                 adjusted_results=adjusted_results,
                 validation_results=validation_results,
                 dependence_results=dependence_results,
-                output_dir=output_dir,
+                output_dir=organism_dir,
             )
         )
-        outputs.update(
-            self._write_existence_summary(
-                dataset="armd",
-                target=request.target,
-                output_dir=output_dir,
-                retained_edges=retained_edges,
-                validation_results=validation_results,
-                filtered_rows=len(filtered),
-                culture_episode_rows=len(culture_episodes),
-                drug_pair_rows=len(drug_pair_episodes),
-                source_scope=request.source_scope,
-                site=request.site,
-            )
+        summary = self._existence_summary(
+            dataset="armd",
+            target=request.target,
+            organism=organism,
+            retained_edges=retained_edges,
+            validation_results=validation_results,
+            filtered_rows=len(subset),
+            culture_episode_rows=len(culture_episodes),
+            drug_pair_rows=len(drug_pair_episodes),
+            source_scope=request.source_scope,
+            site=request.site,
         )
-        outputs["filtered_input"] = filter_path
-        outputs["matched_labels"] = matched_labels_path
-        return outputs
+        return outputs, summary
 
     def _load_cohort(self, request: ArmdEskapeRequest) -> pd.DataFrame:
         if request.source_scope == "combined":
@@ -219,11 +260,11 @@ class ArmdEskapeCascadeRunner:
             return escalation_results.head(0).copy()
         return escalation_results.merge(validated, on=keys, how="inner")
 
-    def _write_existence_summary(
+    def _existence_summary(
         self,
         dataset: str,
         target: EskapeTarget,
-        output_dir: Path,
+        organism: str,
         retained_edges: pd.DataFrame,
         validation_results: pd.DataFrame,
         filtered_rows: int,
@@ -231,7 +272,8 @@ class ArmdEskapeCascadeRunner:
         drug_pair_rows: int,
         source_scope: str,
         site: str | None,
-    ) -> dict[str, Path]:
+        decision_rule: str | None = None,
+    ) -> pd.DataFrame:
         status_series = validation_results.get("validation_status", pd.Series(dtype="string"))
         robust = int((status_series == "robust").sum())
         supported = int((status_series == "supported").sum())
@@ -245,6 +287,7 @@ class ArmdEskapeCascadeRunner:
                     "site": site or "combined",
                     "eskape_target": target.display_name,
                     "scientific_focus": target.scientific_focus,
+                    "organism": organism,
                     "filtered_rows": int(filtered_rows),
                     "culture_episode_rows": int(culture_episode_rows),
                     "drug_pair_rows": int(drug_pair_rows),
@@ -255,7 +298,7 @@ class ArmdEskapeCascadeRunner:
                     "insufficient_edges": insufficient,
                     "validated_edges": robust + supported,
                     "cascade_exists": bool((robust + supported) > 0),
-                    "decision_rule": (
+                    "decision_rule": decision_rule or (
                         "Validated robust/supported edges present"
                         if (robust + supported) > 0
                         else "No validated robust/supported edges present"
@@ -263,11 +306,4 @@ class ArmdEskapeCascadeRunner:
                 }
             ]
         )
-        csv_path = output_dir / "eskape_existence_summary.csv"
-        json_path = output_dir / "eskape_existence_summary.json"
-        summary.to_csv(csv_path, index=False)
-        json_path.write_text(summary.to_json(orient="records", indent=2), encoding="utf-8")
-        return {
-            "existence_summary_csv": csv_path,
-            "existence_summary_json": json_path,
-        }
+        return summary

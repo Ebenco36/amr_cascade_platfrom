@@ -48,6 +48,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         required=True,
         help="Total number of shards (used to validate all shards are present).",
     )
+    p.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Merge again even when a merged result from the same inputs exists.",
+    )
     return p
 
 
@@ -61,6 +66,13 @@ def main() -> None:
     )
     from amr_cascade_platform.cli.main import build_context
     from amr_cascade_platform.core.logging.logger_factory import LoggerFactory
+    from amr_cascade_platform.core.utils.provenance import (
+        atomic_write_json,
+        atomic_write_parquet,
+        read_json,
+        sidecar_path,
+        validation_fingerprint,
+    )
     from amr_cascade_platform.core.utils.scopes import scoped_output_dir
 
     LoggerFactory.configure()
@@ -78,10 +90,24 @@ def main() -> None:
     )
     shard_dir = cascade_dir / "validation_shards"
     output_path = cascade_dir / "validation_results.parquet"
+    gold_dir = scoped_output_dir(
+        root=path_manager.paths.gold,
+        scope=args.gold_scope,
+        site=args.site,
+        organism=args.organism,
+    )
+    fingerprint, components = validation_fingerprint(project_root, settings, gold_dir / "drug_pair_episodes.parquet")
 
-    if output_path.exists():
-        logger.info("Merged validation results already exist: %s", output_path)
-        return
+    if output_path.exists() and not args.overwrite:
+        recorded = (read_json(sidecar_path(output_path)) or {}).get("fingerprint")
+        if recorded == fingerprint:
+            logger.info("Merged validation results for these inputs already exist: %s", output_path)
+            return
+        logger.warning(
+            "Existing %s was produced from different gold data, configuration or code "
+            "(recorded fingerprint %s, expected %s); merging again.",
+            output_path, recorded, fingerprint,
+        )
 
     shard_total = args.shard_total
     shard_paths = sorted(shard_dir.glob("shard_*.parquet"))
@@ -105,14 +131,30 @@ def main() -> None:
             f"Missing: {', '.join(p.name for p in sorted(missing))}"
         )
 
+    # Every shard must come from the same gold data, configuration and code as
+    # this merge: a leftover shard from an earlier run would otherwise be merged
+    # silently (its edge keys can match while its seeds or iterations do not).
+    stale = [
+        path.name for path in sorted(expected)
+        if (read_json(sidecar_path(path)) or {}).get("fingerprint") != fingerprint
+    ]
+    if stale:
+        raise RuntimeError(
+            f"{len(stale)} of {shard_total} shards in {shard_dir} were produced from different gold data, "
+            f"configuration or code than this merge (fingerprint {fingerprint}); refusing to merge them. "
+            f"Rerun those shard jobs (run_cascade_validation_shard.py recomputes a mismatched shard): "
+            f"{', '.join(stale)}"
+        )
     if not shard_paths:
         raise FileNotFoundError(
             f"No shard parquets found in {shard_dir}. "
             "Ensure all run_cascade_validation_shard.py jobs completed."
         )
 
-    logger.info("Loading %d shard files from %s", len(shard_paths), shard_dir)
-    shards = [pd.read_parquet(p) for p in shard_paths]
+    # Only this run's shard set: files from an earlier run with a different
+    # --shard-total also match shard_*.parquet and must not be merged.
+    logger.info("Loading %d shard files from %s", len(expected), shard_dir)
+    shards = [pd.read_parquet(p) for p in sorted(expected)]
     non_empty = [s for s in shards if not s.empty]
     logger.info(
         "Loaded %d shards (%d non-empty, %d total edges before FDR)",
@@ -123,7 +165,8 @@ def main() -> None:
     merged = analyzer.merge_shards(shards)
 
     cascade_dir.mkdir(parents=True, exist_ok=True)
-    merged.to_parquet(output_path, index=False)
+    atomic_write_parquet(merged, output_path)
+    atomic_write_json({"fingerprint": fingerprint, **components, "shard_total": shard_total, "rows": len(merged)}, sidecar_path(output_path))
     logger.info(
         "Merged validation results written: %s (%d edges, %d validated)",
         output_path, len(merged),

@@ -10,9 +10,17 @@ from __future__ import annotations
 
 import importlib
 import os
+from pathlib import Path
 import site
 import sys
 import sysconfig
+import tempfile
+
+
+# SHAP imports Matplotlib. Compute-node home directories may be read-only, so
+# force its font/config cache into the job's writable temporary directory before
+# importing any runtime module.
+os.environ.setdefault("MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "amr_cascade_matplotlib"))
 
 
 REQUIRED_MODULES = (
@@ -20,6 +28,7 @@ REQUIRED_MODULES = (
     "pyarrow",
     "scipy",
     "sklearn",
+    "shap",
     "amr_cascade_platform",
 )
 
@@ -50,7 +59,33 @@ def main() -> int:
         for item in missing:
             print(f"  - {item}", file=sys.stderr)
         return 127
-    return 0
+    return _check_code_identity()
+
+
+def _check_code_identity() -> int:
+    """Stop a job whose checkout is not the code its submission recorded.
+
+    HPC submission exports AMR_CASCADE_EXPECTED_CODE (provenance.code_identity at
+    submit time). If src/, scripts/ or configs/ changed while the job waited in
+    the queue, running would mix code versions within one run, so the job stops
+    here instead. Unset (local runs): nothing to compare.
+    """
+    expected = os.environ.get("AMR_CASCADE_EXPECTED_CODE", "").strip()
+    if not expected:
+        return 0
+    from amr_cascade_platform.core.utils.provenance import code_identity
+
+    found = code_identity(Path(__file__).resolve().parents[1])
+    if found == expected:
+        print(f"OK code identity {found}", file=sys.stderr)
+        return 0
+    print(
+        "Code identity check failed: this job was submitted for code "
+        f"{expected} but the checkout is now {found}. Restore the submitted "
+        "checkout, or resubmit from the current one.",
+        file=sys.stderr,
+    )
+    return 3
 
 
 if __name__ == "__main__":

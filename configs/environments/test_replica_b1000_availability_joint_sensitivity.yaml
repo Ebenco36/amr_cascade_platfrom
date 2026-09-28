@@ -1,0 +1,29 @@
+# test_replica_b1000 counterpart of hpc_availability_joint_sensitivity.yaml: minimum
+# observed support 5 and one-year availability eras together. Its data_root symlinks the
+# replica's upstream layers (the end-to-end runner creates the links) and keeps its own
+# gold and artifacts.
+environment:
+  name: test_replica_b1000_availability_joint_sensitivity
+  data_root: test_replica_b1000_availability_joint_sensitivity
+  execution_mode: local
+  default_data_layer: raw
+  allow_raw_processing: true
+
+features:
+  auto_build_comorbidity: false
+  auto_prepare_silver_feature_sources: false
+
+cascade:
+  validation:
+    permutation_iterations: 1000
+    bootstrap_iterations: 1000
+
+gold:
+  eligibility:
+    availability_min_observed: 5
+    availability_era_years: 1
+
+reporting:
+  tables_dir: test_replica_b1000_availability_joint_sensitivity/outputs/tables
+  figures_dir: test_replica_b1000_availability_joint_sensitivity/outputs/figures
+  reports_dir: test_replica_b1000_availability_joint_sensitivity/outputs/reports

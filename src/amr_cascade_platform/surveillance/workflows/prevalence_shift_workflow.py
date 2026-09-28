@@ -248,7 +248,7 @@ class PrevalenceShiftWorkflow:
                     "Shift (percentage points)",
                     "Lower bound",
                     "Upper bound",
-                    "rho independent/cascade",
+                    "rho no-trigger/cascade",
                     "Cascade trigger fraction",
                 ]
             )
@@ -263,7 +263,7 @@ class PrevalenceShiftWorkflow:
         )
         table["Lower bound"] = table["prevalence_lower_bound_pct"].map(PrevalenceShiftWorkflow._format_percent)
         table["Upper bound"] = table["prevalence_upper_bound_pct"].map(PrevalenceShiftWorkflow._format_percent)
-        table["rho independent/cascade"] = table["rho_independent_vs_cascade"].map(
+        table["rho no-trigger/cascade"] = table["rho_independent_vs_cascade"].map(
             lambda value: f"{value:.2f}" if pd.notna(value) else "NA"
         )
         table["Cascade trigger fraction"] = table["cascade_trigger_fraction"].map(
@@ -280,7 +280,7 @@ class PrevalenceShiftWorkflow:
                 "Shift (percentage points)",
                 "Lower bound",
                 "Upper bound",
-                "rho independent/cascade",
+                "rho no-trigger/cascade",
                 "Cascade trigger fraction",
             ],
         ]
@@ -299,15 +299,15 @@ class PrevalenceShiftWorkflow:
                     "Observed non-evaluable n",
                     "Unknown binary outcome n",
                     "Cascade-triggered observed n",
-                    "Independent observed n",
+                    "No-trigger observed n",
                     "Cascade-triggered tested n",
-                    "Independent tested n",
+                    "No-trigger tested n",
                     "Cascade eligible n",
-                    "Independent eligible n",
+                    "No-trigger eligible n",
                     "Cascade eligible weight",
-                    "Independent eligible weight",
+                    "No-trigger eligible weight",
                     "Mean abs SMD (observed vs unobserved)",
-                    "Mean abs SMD (independent evaluable vs unobserved)",
+                    "Mean abs SMD (no-trigger evaluable vs unobserved)",
                     "Mean abs SMD (cascade evaluable vs unobserved)",
                     "Flagged covariates (observed vs unobserved)",
                     "Denominator inflation effect",
@@ -323,21 +323,21 @@ class PrevalenceShiftWorkflow:
         table["Observed non-evaluable n"] = table["non_evaluable_observed_n"]
         table["Unknown binary outcome n"] = table["unknown_binary_outcome_n"]
         table["Cascade-triggered observed n"] = table["cascade_triggered_observed_n"]
-        table["Independent observed n"] = table["independent_observed_n"]
+        table["No-trigger observed n"] = table["independent_observed_n"]
         table["Cascade-triggered tested n"] = table["cascade_triggered_tested_n"]
-        table["Independent tested n"] = table["independent_tested_n"]
+        table["No-trigger tested n"] = table["independent_tested_n"]
         table["Cascade eligible n"] = table["cascade_eligible_n"]
-        table["Independent eligible n"] = table["independent_eligible_n"]
+        table["No-trigger eligible n"] = table["independent_eligible_n"]
         table["Cascade eligible weight"] = table["w_casc_eligible"].map(
             lambda value: f"{value:.3f}" if pd.notna(value) else "NA"
         )
-        table["Independent eligible weight"] = table["w_ind_eligible"].map(
+        table["No-trigger eligible weight"] = table["w_ind_eligible"].map(
             lambda value: f"{value:.3f}" if pd.notna(value) else "NA"
         )
         table["Mean abs SMD (observed vs unobserved)"] = table["mean_abs_smd_tested_vs_untested"].map(
             lambda value: f"{value:.2f}" if pd.notna(value) else "NA"
         )
-        table["Mean abs SMD (independent evaluable vs unobserved)"] = table["mean_abs_smd_independent_vs_untested"].map(
+        table["Mean abs SMD (no-trigger evaluable vs unobserved)"] = table["mean_abs_smd_independent_vs_untested"].map(
             lambda value: f"{value:.2f}" if pd.notna(value) else "NA"
         )
         table["Mean abs SMD (cascade evaluable vs unobserved)"] = table["mean_abs_smd_cascade_vs_untested"].map(
@@ -357,15 +357,15 @@ class PrevalenceShiftWorkflow:
                 "Observed non-evaluable n",
                 "Unknown binary outcome n",
                 "Cascade-triggered observed n",
-                "Independent observed n",
+                "No-trigger observed n",
                 "Cascade-triggered tested n",
-                "Independent tested n",
+                "No-trigger tested n",
                 "Cascade eligible n",
-                "Independent eligible n",
+                "No-trigger eligible n",
                 "Cascade eligible weight",
-                "Independent eligible weight",
+                "No-trigger eligible weight",
                 "Mean abs SMD (observed vs unobserved)",
-                "Mean abs SMD (independent evaluable vs unobserved)",
+                "Mean abs SMD (no-trigger evaluable vs unobserved)",
                 "Mean abs SMD (cascade evaluable vs unobserved)",
                 "Flagged covariates (observed vs unobserved)",
                 "Denominator inflation effect",
@@ -520,7 +520,7 @@ class PrevalenceShiftWorkflow:
                     "Binary-evaluable tested n",
                     "Unknown binary outcome n",
                     "Cascade trigger fraction",
-                    "rho independent/cascade",
+                    "rho no-trigger/cascade",
                 ]
             )
         table = tipping_points.copy()
@@ -544,7 +544,7 @@ class PrevalenceShiftWorkflow:
         table["Cascade trigger fraction"] = table["cascade_trigger_fraction"].map(
             lambda value: f"{value:.1%}" if pd.notna(value) else "NA"
         )
-        table["rho independent/cascade"] = table["rho_independent_vs_cascade"].map(
+        table["rho no-trigger/cascade"] = table["rho_independent_vs_cascade"].map(
             lambda value: f"{value:.2f}" if pd.notna(value) else "NA"
         )
         return table.loc[
@@ -562,7 +562,7 @@ class PrevalenceShiftWorkflow:
                 "Binary-evaluable tested n",
                 "Unknown binary outcome n",
                 "Cascade trigger fraction",
-                "rho independent/cascade",
+                "rho no-trigger/cascade",
             ],
         ]
 

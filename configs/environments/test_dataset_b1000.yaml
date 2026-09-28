@@ -1,0 +1,31 @@
+# test_dataset at the production resampling budget (B = 1000), for a full
+# end-to-end check on the Mac:
+#   bash scripts/run_replica_end_to_end.sh --env test_dataset_b1000
+# Same data root, sample layer and output folders as test_dataset.yaml. As on
+# the cluster (hpc.yaml), comorbidity pre-aggregation and silver feature
+# sources are separate stages, and the three availability-denominator
+# sensitivities have their own environments.
+environment:
+  name: test_dataset_b1000
+  data_root: test_dataset
+  execution_mode: local
+  default_data_layer: sample
+  allow_raw_processing: false
+
+features:
+  auto_build_comorbidity: false
+  auto_prepare_silver_feature_sources: false
+
+cascade:
+  validation:
+    permutation_iterations: 1000
+    bootstrap_iterations: 1000
+
+reporting:
+  tables_dir: test_dataset/outputs/tables
+  figures_dir: test_dataset/outputs/figures
+  reports_dir: test_dataset/outputs/reports
+  availability_sensitivity_environments:
+    support_5: test_dataset_b1000_availability_sensitivity
+    one_year_era: test_dataset_b1000_availability_annual_sensitivity
+    joint: test_dataset_b1000_availability_joint_sensitivity

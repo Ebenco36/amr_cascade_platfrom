@@ -1,6 +1,8 @@
+import math
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from amr_cascade_platform.cascade.analyzers.cascade_pair_dependence_analyzer import CascadePairDependenceAnalyzer
 from amr_cascade_platform.core.config.config_loader import ConfigLoader
@@ -137,7 +139,7 @@ def test_mutual_eligible_das_restricts_both_directions_to_common_opportunity_uni
     settings = ConfigLoader(project_root).load("mac")
     analyzer = CascadePairDependenceAnalyzer(settings)
 
-    def _row(anon_id, upstream, downstream, tested, upstream_eligible):
+    def _row(anon_id, upstream, downstream, result, tested, upstream_eligible):
         return {
             "anon_id": anon_id,
             "pat_enc_csn_id_coded": f"e_{anon_id}",
@@ -147,6 +149,7 @@ def test_mutual_eligible_das_restricts_both_directions_to_common_opportunity_uni
             "source_site": "armd",
             "upstream_antibiotic": upstream,
             "downstream_antibiotic": downstream,
+            "upstream_susceptibility": result,
             "downstream_tested": tested,
             "downstream_eligible": 1,
             "upstream_eligible": upstream_eligible,
@@ -155,15 +158,15 @@ def test_mutual_eligible_das_restricts_both_directions_to_common_opportunity_uni
     drug_pairs = pd.DataFrame(
         [
             # A->B: 4 rows, only 2 have A (the upstream drug) itself eligible.
-            _row("p1", "A", "B", 1, upstream_eligible=1),
-            _row("p2", "A", "B", 1, upstream_eligible=1),
-            _row("p3", "A", "B", 0, upstream_eligible=0),
-            _row("p4", "A", "B", 0, upstream_eligible=0),
+            _row("p1", "A", "B", "RESISTANT", 1, upstream_eligible=1),
+            _row("p2", "A", "B", "SUSCEPTIBLE", 0, upstream_eligible=1),
+            _row("p3", "A", "B", "RESISTANT", 1, upstream_eligible=0),
+            _row("p4", "A", "B", "SUSCEPTIBLE", 1, upstream_eligible=0),
             # B->A: 4 rows, all with B (the upstream drug) eligible.
-            _row("p5", "B", "A", 1, upstream_eligible=1),
-            _row("p6", "B", "A", 1, upstream_eligible=1),
-            _row("p7", "B", "A", 0, upstream_eligible=1),
-            _row("p8", "B", "A", 0, upstream_eligible=1),
+            _row("p5", "B", "A", "RESISTANT", 1, upstream_eligible=1),
+            _row("p6", "B", "A", "SUSCEPTIBLE", 1, upstream_eligible=1),
+            _row("p7", "B", "A", "RESISTANT", 0, upstream_eligible=1),
+            _row("p8", "B", "A", "SUSCEPTIBLE", 0, upstream_eligible=1),
         ]
     )
     retained_edges = pd.DataFrame(
@@ -176,10 +179,23 @@ def test_mutual_eligible_das_restricts_both_directions_to_common_opportunity_uni
     result = analyzer.analyze(drug_pairs, retained_edges)
     row = result.loc[result["upstream_antibiotic"].eq("A") & result["downstream_antibiotic"].eq("B")].iloc[0]
 
-    assert "directional_asymmetry_score_mutual_eligible" in result.columns
     assert row["mutual_eligible_pair_support_n"] == 2.0
     assert row["mutual_eligible_reverse_support_n"] == 4.0
-    assert pd.notna(row["directional_asymmetry_score_mutual_eligible"])
+    # It is the DAS formula, log ER(A->B) - log ER(B->A), on the mutually eligible
+    # rows only (p3 and p4 drop out): A->B has R 1/1 and S 0/1 observed, so
+    # ER = (1.5/2) / (0.5/2) = 3; B->A has R 1/2 and S 1/2, so ER = 1.
+    assert row["mutual_eligible_escalation_ratio"] == pytest.approx(3.0)
+    assert row["mutual_eligible_reverse_escalation_ratio"] == pytest.approx(1.0)
+    assert row["directional_asymmetry_score_mutual_eligible"] == pytest.approx(math.log(3.0))
+    reverse_row = result.loc[result["upstream_antibiotic"].eq("B") & result["downstream_antibiotic"].eq("A")].iloc[0]
+    assert reverse_row["directional_asymmetry_score_mutual_eligible"] == pytest.approx(-math.log(3.0))
+    # Support ratio and episode overlap within the same universe: 2 vs 4 rows, and
+    # the directions share no episode.
+    assert row["mutual_eligible_directional_support_ratio"] == pytest.approx(0.5)
+    assert row["mutual_eligible_directional_episode_overlap"] == 0.0
+    # The co-observation rate asymmetry stays available under its own name: both
+    # directions observe their downstream drug in half the rows.
+    assert row["testing_asymmetry_score_mutual_eligible"] == pytest.approx(0.0)
 
 
 def test_mutual_eligible_diagnostics_are_nan_without_upstream_eligible_column() -> None:

@@ -43,10 +43,14 @@ Options:
   --run-features                  Build combined model-ready features.
   --skip-features                 Keep feature build disabled. Accepted for compatibility.
   --run-training                  Train combined downstream-testing models.
+  --run-threshold-comparison      Compare validation-site holdout with patient-grouped
+                                  OOF threshold selection on the same clinical model.
   --skip-training                 Keep training disabled. Accepted for compatibility.
   --skip-pooled-sensitivity       Accepted for compatibility; pooled runs are disabled here.
   --skip-sensitivity              Accepted for compatibility; sensitivity runs are disabled here.
   --estimators A,B                Restrict training to specific estimators.
+  --threshold-strategy MODE       validation_holdout (legacy) or grouped_oof
+                                  (patient-grouped training CV).
   --dry-run                       Print subprocess commands without running.
   --help                          Show this message.
 
@@ -69,6 +73,7 @@ ESKAPE_SAMPLE_MIN_ROWS="25"
 PYTHON_BIN="${PYTHON_BIN:-}"
 REPORT_FORMATS=(html png pdf svg)
 ESTIMATORS=()
+THRESHOLD_STRATEGY=""
 
 REUSE_EXISTING=1
 DRY_RUN=0
@@ -86,6 +91,7 @@ RUN_REPORTING=1
 RUN_SITE_CASCADE=0
 RUN_FEATURES=0
 RUN_TRAINING=0
+RUN_THRESHOLD_COMPARISON=0
 
 timestamp() {
   date +"%Y-%m-%d %H:%M:%S"
@@ -251,6 +257,10 @@ cascade_ready() {
      -f "${dir}/network_edges.parquet" &&
      -f "${dir}/network_nodes.parquet" &&
      -f "${dir}/network_graph.json" &&
+     -f "${dir}/adjusted_model_shap_global.parquet" &&
+     -f "${dir}/adjusted_model_shap_values.parquet" &&
+     -f "${dir}/adjusted_model_shap_metadata.parquet" &&
+     -f "${dir}/adjusted_model_shap_domain.parquet" &&
      "${dir}/network_graph.json" -nt "${dir}/retained_edges.parquet" ]]
 }
 
@@ -290,13 +300,35 @@ training_ready() {
      -f "${dir}/xgboost_predictions.parquet" ]]
 }
 
-reporting_ready() {
+threshold_comparison_ready() {
   local scope="$1"
   local site="${2:-}"
   local organism="${3:-}"
   local dir
+  dir="$(scope_dir_path "${MODELING_TASK_ROOT}" "${scope}" "${site}" "${organism}")/threshold_strategy_comparison"
+  [[ -f "${dir}/threshold_strategy_curves.parquet" &&
+     -f "${dir}/threshold_strategy_selected.parquet" &&
+     -f "${dir}/threshold_strategy_test_metrics.parquet" &&
+     -f "${dir}/threshold_strategy_comparison_summary.json" ]]
+}
+
+reporting_ready() {
+  local scope="$1"
+  local site="${2:-}"
+  local organism="${3:-}"
+  local dir cascade_dir comparison_dir
   dir="$(scope_dir_path "${REPORTS_ROOT}" "${scope}" "${site}" "${organism}")"
-  [[ -f "${dir}/report_manifest.json" ]]
+  cascade_dir="$(scope_dir_path "${CASCADE_ARTIFACT_ROOT}" "${scope}" "${site}" "${organism}")"
+  comparison_dir="$(scope_dir_path "${MODELING_TASK_ROOT}" "${scope}" "${site}" "${organism}")/threshold_strategy_comparison"
+  [[ -f "${dir}/report_manifest.json" &&
+     -f "${cascade_dir}/adjusted_model_shap_metadata.parquet" &&
+     "${dir}/report_manifest.json" -nt "${cascade_dir}/adjusted_model_shap_metadata.parquet" ]] || return 1
+  if [[ "${RUN_THRESHOLD_COMPARISON}" -eq 1 ]]; then
+    [[ -f "${comparison_dir}/threshold_strategy_comparison_summary.json" &&
+       "${dir}/report_manifest.json" -nt "${comparison_dir}/threshold_strategy_comparison_summary.json" ]] || return 1
+    grep -q 'figure_threshold_strategy_comparison' "${dir}/report_manifest.json" || return 1
+  fi
+  return 0
 }
 
 should_run() {
@@ -407,6 +439,11 @@ parse_args() {
         split_csv_to_array "$2" ESTIMATORS
         shift 2
         ;;
+      --threshold-strategy)
+        [[ $# -ge 2 ]] || die "--threshold-strategy requires a value"
+        THRESHOLD_STRATEGY="$2"
+        shift 2
+        ;;
       --resume-existing) REUSE_EXISTING=1; shift ;;
       --force-rerun-existing) REUSE_EXISTING=0; shift ;;
       --skip-preflight) RUN_PREFLIGHT=0; shift ;;
@@ -423,6 +460,7 @@ parse_args() {
       --run-features) RUN_FEATURES=1; shift ;;
       --skip-features) RUN_FEATURES=0; shift ;;
       --run-training) RUN_TRAINING=1; shift ;;
+      --run-threshold-comparison) RUN_THRESHOLD_COMPARISON=1; shift ;;
       --skip-training) RUN_TRAINING=0; shift ;;
       --skip-pooled-sensitivity) shift ;;
       --skip-sensitivity) shift ;;
@@ -434,6 +472,9 @@ parse_args() {
 }
 
 parse_args "$@"
+if [[ -n "${THRESHOLD_STRATEGY}" && "${THRESHOLD_STRATEGY}" != "validation_holdout" && "${THRESHOLD_STRATEGY}" != "grouped_oof" ]]; then
+  die "--threshold-strategy must be validation_holdout or grouped_oof"
+fi
 resolve_python
 cd "${PROJECT_ROOT}"
 export PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
@@ -448,6 +489,8 @@ log "Resume existing: ${REUSE_EXISTING}"
 log "Site cascade: ${RUN_SITE_CASCADE}"
 log "Features: ${RUN_FEATURES}"
 log "Training: ${RUN_TRAINING}"
+log "Threshold-strategy comparison: ${RUN_THRESHOLD_COMPARISON}"
+log "Threshold strategy: ${THRESHOLD_STRATEGY:-configured default}"
 log "Python: ${PYTHON_BIN}"
 
 if [[ "${RUN_PREFLIGHT}" -eq 1 ]]; then
@@ -627,11 +670,14 @@ for raw_organism in "${ORGANISMS[@]}"; do
 
   training_dirty=0
   if [[ "${RUN_TRAINING}" -eq 1 ]]; then
-    if should_run "${feature_dirty}" training_ready "combined" "" "${organism}"; then
+    training_config_dirty=0
+    [[ -n "${THRESHOLD_STRATEGY}" ]] && training_config_dirty=1
+    if should_run "$((feature_dirty || training_config_dirty))" training_ready "combined" "" "${organism}"; then
       train_cmd=("${PYTHON_BIN}" scripts/run_training.py --env "${ENV_NAME}" --scope combined --organism "${organism}")
       for estimator in "${ESTIMATORS[@]}"; do
         [[ -n "${estimator}" ]] && train_cmd+=(--estimator "${estimator}")
       done
+      [[ -n "${THRESHOLD_STRATEGY}" ]] && train_cmd+=(--threshold-strategy "${THRESHOLD_STRATEGY}")
       run_task "training ${organism}" "${train_cmd[@]}"
       training_dirty=1
       wait_wave
@@ -640,9 +686,22 @@ for raw_organism in "${ORGANISMS[@]}"; do
     fi
   fi
 
+  threshold_comparison_dirty=0
+  if [[ "${RUN_THRESHOLD_COMPARISON}" -eq 1 ]]; then
+    if should_run "${feature_dirty}" threshold_comparison_ready "combined" "" "${organism}"; then
+      run_task "threshold comparison ${organism}" "${PYTHON_BIN}" \
+        scripts/run_threshold_strategy_comparison.py --env "${ENV_NAME}" \
+        --scope combined --organism "${organism}" --split-strategy site
+      threshold_comparison_dirty=1
+      wait_wave
+    else
+      log "SKIP threshold comparison ${organism}: ready"
+    fi
+  fi
+
   if [[ "${RUN_REPORTING}" -eq 1 ]]; then
     report_upstream_dirty=0
-    [[ "${prevalence_dirty}" -eq 1 || "${training_dirty}" -eq 1 ]] && report_upstream_dirty=1
+    [[ "${prevalence_dirty}" -eq 1 || "${training_dirty}" -eq 1 || "${threshold_comparison_dirty}" -eq 1 ]] && report_upstream_dirty=1
     if should_run "${report_upstream_dirty}" reporting_ready "combined" "" "${organism}"; then
       report_cmd=("${PYTHON_BIN}" scripts/run_reporting.py --env "${ENV_NAME}" --scope combined --organism "${organism}")
       for fmt in "${REPORT_FORMATS[@]}"; do

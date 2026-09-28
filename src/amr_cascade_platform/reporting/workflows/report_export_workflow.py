@@ -10,7 +10,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pandas as pd
+import pyarrow.parquet as pq
 
+from amr_cascade_platform.core.utils.provenance import run_provenance
 from amr_cascade_platform.cascade.analyzers.cascade_validation_analyzer import CascadeValidationAnalyzer
 from amr_cascade_platform.cascade.outputs.cascade_report_builder import CascadeReportBuilder
 from amr_cascade_platform.cascade.outputs.network_exporter import NetworkExporter
@@ -22,6 +24,7 @@ from amr_cascade_platform.reporting.builders.manuscript_table_builder import Man
 from amr_cascade_platform.surveillance.workflows.prevalence_shift_workflow import PrevalenceShiftWorkflow
 from amr_cascade_platform.visualization.report.antibiotic_classification import AntibioticClassificationResolver
 from amr_cascade_platform.visualization.report.figure_manager import FigureManager
+from amr_cascade_platform.visualization.report.plotly_shap_plotter import PlotlyShapPlotter
 from amr_cascade_platform.infrastructure.storage.dataset_store import DatasetStore
 
 logger = logging.getLogger(__name__)
@@ -214,6 +217,18 @@ class ReportExportWorkflow:
         pathway_flows = self._dataset_store.read_pandas(scope_artifact_dir / "pathway_flows.parquet")
         retained_edges = self._dataset_store.read_pandas(scope_artifact_dir / "retained_edges.parquet")
         validation_results = self._dataset_store.read_pandas(scope_artifact_dir / "validation_results.parquet")
+        adjusted_model_shap_global = self._read_if_exists(
+            scope_artifact_dir / "adjusted_model_shap_global.parquet"
+        )
+        # The sampled SHAP values (one row per explained row and feature: tens of
+        # millions on the full cohort) are read only for the pairs drawn, below.
+        adjusted_model_shap_values_path = scope_artifact_dir / "adjusted_model_shap_values.parquet"
+        adjusted_model_shap_metadata = self._read_if_exists(
+            scope_artifact_dir / "adjusted_model_shap_metadata.parquet"
+        )
+        adjusted_model_shap_domain = self._read_if_exists(
+            scope_artifact_dir / "adjusted_model_shap_domain.parquet"
+        )
         network_nodes = self._dataset_store.read_pandas(scope_artifact_dir / "network_nodes.parquet")
         network_edges = self._dataset_store.read_pandas(scope_artifact_dir / "network_edges.parquet")
         validated_edge_report = self._validated_edge_report(edge_report)
@@ -233,6 +248,26 @@ class ReportExportWorkflow:
         if not prevalence_mnar_tipping_points.empty:
             path = tables_dir / "table_k_mnar_tipping_points.csv"
             PrevalenceShiftWorkflow._format_mnar_tipping_point_table(prevalence_mnar_tipping_points).to_csv(path, index=False)
+            outputs[path.name] = path
+        shap_domain_by_pair, shap_domain_summary = PlotlyShapPlotter.domain_summary(adjusted_model_shap_domain)
+        shap_ranking = PlotlyShapPlotter.rank_pairs(adjusted_model_shap_global, shap_domain_by_pair)
+        if not adjusted_model_shap_global.empty:
+            path = tables_dir / "table_adjusted_model_shap_global.csv"
+            adjusted_model_shap_global.to_csv(path, index=False)
+            outputs[path.name] = path
+            # For investigating every pair, not only those drawn: the pair ranking
+            # used to choose the figures, and each pair's attribution by domain.
+            for filename, frame in (
+                ("table_adjusted_model_shap_pair_ranking.csv", shap_ranking),
+                ("table_adjusted_model_shap_domain_by_pair.csv", shap_domain_by_pair),
+                ("table_adjusted_model_shap_domain_summary.csv", shap_domain_summary),
+            ):
+                path = tables_dir / filename
+                frame.to_csv(path, index=False)
+                outputs[path.name] = path
+        if not adjusted_model_shap_metadata.empty:
+            path = tables_dir / "table_adjusted_model_shap_metadata.csv"
+            adjusted_model_shap_metadata.to_csv(path, index=False)
             outputs[path.name] = path
 
         if not retained_edges.empty:
@@ -259,6 +294,9 @@ class ReportExportWorkflow:
         model_metrics = None
         model_threshold_metrics = None
         model_predictions = None
+        threshold_strategy_curves = pd.DataFrame()
+        threshold_strategy_selected = pd.DataFrame()
+        threshold_strategy_test_metrics = pd.DataFrame()
         if modeling_dir.exists():
             metrics_path = modeling_dir / "metrics.parquet"
             threshold_path = modeling_dir / "threshold_metrics.parquet"
@@ -284,6 +322,26 @@ class ReportExportWorkflow:
                     )
             if prediction_frames:
                 model_predictions = pd.concat(prediction_frames, ignore_index=True)
+            threshold_comparison_dir = modeling_dir / "threshold_strategy_comparison"
+            threshold_strategy_curves = self._read_if_exists(
+                threshold_comparison_dir / "threshold_strategy_curves.parquet"
+            )
+            threshold_strategy_selected = self._read_if_exists(
+                threshold_comparison_dir / "threshold_strategy_selected.parquet"
+            )
+            threshold_strategy_test_metrics = self._read_if_exists(
+                threshold_comparison_dir / "threshold_strategy_test_metrics.parquet"
+            )
+            for filename, frame in (
+                ("table_i_threshold_strategy_curves.csv", threshold_strategy_curves),
+                ("table_i_threshold_strategy_selected.csv", threshold_strategy_selected),
+                ("table_i_threshold_strategy_test_metrics.csv", threshold_strategy_test_metrics),
+            ):
+                if frame.empty:
+                    continue
+                path = tables_dir / filename
+                frame.to_csv(path, index=False)
+                outputs[path.name] = path
 
         figure_exports: dict[str, Path] = {}
         if "primary_cascade_forest" in selected_figures and not edge_report.empty:
@@ -596,6 +654,33 @@ class ReportExportWorkflow:
                     formats=figure_formats,
                 )
             )
+        if (
+            "threshold_strategy_comparison" in selected_figures
+            and not threshold_strategy_curves.empty
+            and not threshold_strategy_selected.empty
+            and not threshold_strategy_test_metrics.empty
+        ):
+            figure_exports.update(
+                self._figure_manager.export_threshold_strategy_comparison(
+                    curves=threshold_strategy_curves,
+                    selected=threshold_strategy_selected,
+                    test_metrics=threshold_strategy_test_metrics,
+                    output_stem=figures_dir / "figure_threshold_strategy_comparison",
+                    formats=figure_formats,
+                )
+            )
+        if "adjusted_model_shap" in selected_figures and not adjusted_model_shap_global.empty:
+            shap_pairs = self._shap_figure_pairs(shap_ranking)
+            figure_exports.update(
+                self._figure_manager.export_adjusted_model_shap(
+                    global_importance=adjusted_model_shap_global,
+                    sampled_values=self._read_shap_values_for_pairs(adjusted_model_shap_values_path, shap_pairs),
+                    output_dir=figures_dir,
+                    formats=figure_formats,
+                    pairs=shap_pairs,
+                    domain_summary=shap_domain_summary,
+                )
+            )
         if "validation_diagnostics" in selected_figures and not edge_report.empty:
             figure_exports.update(
                 self._figure_manager.export_validation_diagnostics(
@@ -722,6 +807,16 @@ class ReportExportWorkflow:
             "figure_exports": figure_outputs,
             "missing_figure_groups": missing_figure_groups,
             "exclusion_flow_reconciliation": exclusion_flow_problems,
+            # Code, configuration, input and package versions behind these outputs.
+            "provenance": run_provenance(
+                self._paths.project_root,
+                self._settings,
+                {
+                    "eligible_pairs": scoped_output_dir(self._paths.paths.gold, request.scope, site=request.site, organism=request.organism) / "eligible_pairs.parquet",
+                    "edge_report": scope_artifact_dir / "edge_report.parquet",
+                    "validation_results": scope_artifact_dir / "validation_results.parquet",
+                },
+            ),
             "outputs": {name: str(path) for name, path in outputs.items()},
         }
         summary_path = reports_dir / "report_manifest.json"
@@ -772,6 +867,12 @@ class ReportExportWorkflow:
             "model_roc_curve": "figure_model_roc",
             "model_calibration": "figure_model_calibration",
             "model_threshold_analysis": "figure_model_threshold_analysis",
+            "threshold_strategy_comparison": "figure_threshold_strategy_comparison",
+            "adjusted_model_shap": (
+                "figure_adjusted_model_shap_domain_summary",
+                "figure_adjusted_model_shap_importance__",
+                "figure_adjusted_model_shap_beeswarm__",
+            ),
             "validation_diagnostics": "figure_validation_diagnostics",
             "er_landscape": "figure_er_landscape",
             "mnar_prevalence_shift_distribution": "figure_mnar_prevalence_shift_distribution",
@@ -820,6 +921,38 @@ class ReportExportWorkflow:
 
     def _read_if_exists(self, path: Path) -> pd.DataFrame:
         return self._dataset_store.read_pandas(path) if path.exists() else pd.DataFrame()
+
+    def _shap_figure_pairs(self, ranking: pd.DataFrame) -> list[tuple[str, str]]:
+        """The pairs drawn individually: the top of the ranking (reporting.shap_max_pair_figures; 0 = all)."""
+        if ranking.empty:
+            return []
+        pairs = [
+            (str(up), str(down))
+            for up, down in zip(ranking["upstream_antibiotic"], ranking["downstream_antibiotic"])
+        ]
+        limit = int(self._settings.reporting.shap_max_pair_figures)
+        return pairs if limit <= 0 else pairs[:limit]
+
+    @staticmethod
+    def _read_shap_values_for_pairs(path: Path, pairs: list[tuple[str, str]]) -> pd.DataFrame:
+        """The sampled SHAP rows of ``pairs`` only, read with a parquet filter then matched exactly."""
+        if not pairs or not path.exists():
+            return pd.DataFrame()
+        keys = ["upstream_antibiotic", "downstream_antibiotic"]
+        table = pq.read_table(
+            path,
+            filters=[
+                ("upstream_antibiotic", "in", sorted({up for up, _ in pairs})),
+                ("downstream_antibiotic", "in", sorted({down for _, down in pairs})),
+            ],
+        )
+        frame = table.to_pandas()
+        if frame.empty:
+            return frame
+        for key in keys:
+            frame[key] = frame[key].astype(str)
+        wanted = pd.DataFrame(pairs, columns=keys)
+        return frame.merge(wanted, on=keys, how="inner")
 
     @staticmethod
     def _validated_edge_report(edge_report: pd.DataFrame) -> pd.DataFrame:

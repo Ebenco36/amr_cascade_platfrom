@@ -24,7 +24,7 @@ class PlotlyModelEvaluationPlotter:
         "xgboost": "#E69F00",
     }
     MODEL_LABELS = {
-        "logistic_regression": "Logistic Regression",
+        "logistic_regression": "Logistic Regression (primary)",
         "random_forest": "Random Forest",
         "xgboost": "XGBoost",
     }
@@ -255,26 +255,51 @@ class PlotlyModelEvaluationPlotter:
             )
         return self._exporter.write(fig, output_stem, formats, static_fallback=lambda fmt, path: self._write_calibration_static(plot_data, fmt, path))
 
+    _METRIC_LABELS = {"balanced_accuracy": "Balanced accuracy", "mcc": "MCC", "f1": "F1", "precision": "Precision", "recall": "Recall"}
+
+    @staticmethod
+    def _selection_metric(threshold_metrics: pd.DataFrame) -> str:
+        column = threshold_metrics.get("threshold_selection_metric")
+        if column is not None and column.notna().any():
+            return str(column.dropna().iloc[0])
+        return "f1"
+
+    @staticmethod
+    def _selection_source_phrase(threshold_metrics: pd.DataFrame) -> str:
+        """Where the decision thresholds were chosen, as training recorded it."""
+        column = threshold_metrics.get("threshold_selection_strategy")
+        strategy = str(column.dropna().iloc[0]) if column is not None and column.notna().any() else "validation_holdout"
+        if strategy == "grouped_oof":
+            return "on patient-grouped out-of-fold training predictions"
+        return "on the validation split"
+
+    @classmethod
+    def _threshold_metric_specs(cls, selection_metric: str) -> list[tuple[str, str]]:
+        """The selection metric first, then the other operating characteristics."""
+        order = [selection_metric] + [m for m in ("balanced_accuracy", "mcc", "f1", "precision", "recall") if m != selection_metric]
+        return [(metric, cls._METRIC_LABELS.get(metric, metric)) for metric in order]
+
     def export_threshold_analysis(
         self,
         threshold_metrics: pd.DataFrame,
         output_stem: Path,
         formats: tuple[str, ...],
-        split: str = "test",
+        split: str = "validation",
     ) -> dict[str, Path]:
         plot_data = threshold_metrics.loc[threshold_metrics["split"] == split].copy()
         if plot_data.empty:
             fig = self._empty_figure(f"No threshold metrics available for split='{split}'")
         else:
-            metric_specs = [("precision", "Precision"), ("recall", "Recall"), ("f1", "F1"), ("mcc", "MCC")]
-            cols = 2
+            selection_metric = self._selection_metric(plot_data)
+            metric_specs = self._threshold_metric_specs(selection_metric)
+            cols = 3
             rows = (len(metric_specs) + cols - 1) // cols
             fig = make_subplots(
                 rows=rows,
                 cols=cols,
                 subplot_titles=[label for _, label in metric_specs],
-                horizontal_spacing=0.08,
-                vertical_spacing=0.40,
+                horizontal_spacing=0.09,
+                vertical_spacing=0.24,
             )
             for annotation in fig.layout.annotations:
                 annotation.font = {"size": 9}
@@ -324,8 +349,16 @@ class PlotlyModelEvaluationPlotter:
                         )
             self._apply_standard_layout(
                 fig,
-                title=f"Threshold Sensitivity by Model ({split.title()} Split)",
-                width=max(1450, 700 * cols),
+                # The subtitle says where the thresholds were chosen as training recorded
+                # it: under grouped_oof they come from training OOF predictions, not from
+                # the validation curves drawn here.
+                title=(
+                    f"Threshold selection by model ({split} split)"
+                    f"<br><sup>Diamonds: each model's threshold maximising "
+                    f"{self._METRIC_LABELS.get(selection_metric, selection_metric).lower()} "
+                    f"{self._selection_source_phrase(plot_data)}</sup>"
+                ),
+                width=max(1450, 560 * cols),
                 height=max(self._height, 520 * rows + 200),
                 margin={"l": 70, "r": 40, "t": 110, "b": 170},
             )
@@ -334,13 +367,23 @@ class PlotlyModelEvaluationPlotter:
                 col = (idx - 1) % cols + 1
                 fig.update_xaxes(
                     title={"text": "Threshold", "font": {"size": 11}}, tickfont={"size": 10},
-                    row=row, col=col, range=[0.04, 0.91],
+                    row=row, col=col, range=[0.02, 0.98], dtick=0.2,
                 )
                 fig.update_yaxes(
                     title={"text": label, "font": {"size": 11}}, tickfont={"size": 10},
                     row=row, col=col, tickformat=".3g",
                 )
-        return self._exporter.write(fig, output_stem, formats, static_fallback=lambda fmt, path: self._write_threshold_static(plot_data, fmt, path))
+        return self._exporter.write(
+            fig,
+            output_stem,
+            formats,
+            static_fallback=lambda fmt, path: self._write_threshold_static(
+                plot_data,
+                fmt,
+                path,
+                split=split,
+            ),
+        )
 
     def _apply_standard_layout(
         self,
@@ -477,11 +520,17 @@ class PlotlyModelEvaluationPlotter:
         fig.savefig(path, format=fmt, dpi=300, bbox_inches="tight")
         plt.close(fig)
 
-    def _write_threshold_static(self, plot_data: pd.DataFrame, fmt: str, path: Path) -> None:
-        metrics = [("precision", "Precision"), ("recall", "Recall"), ("f1", "F1"), ("mcc", "MCC")]
-        cols = 2
+    def _write_threshold_static(
+        self,
+        plot_data: pd.DataFrame,
+        fmt: str,
+        path: Path,
+        split: str,
+    ) -> None:
+        metrics = self._threshold_metric_specs(self._selection_metric(plot_data))
+        cols = 3
         rows = (len(metrics) + cols - 1) // cols
-        fig, axes = plt.subplots(rows, cols, figsize=(15, 6.0 * rows), sharex=True)
+        fig, axes = plt.subplots(rows, cols, figsize=(18, 5.6 * rows), sharex=True)
         axes_array = np.atleast_1d(axes).ravel()
         for ax, (metric, label) in zip(axes_array, metrics):
             for model_name, subset in plot_data.groupby("model_name", sort=False):
@@ -512,7 +561,7 @@ class PlotlyModelEvaluationPlotter:
             ax.set_ylabel(label)
             ax.grid(color="#E8EEF5", linewidth=0.8)
             ax.spines[["top", "right"]].set_visible(False)
-            ax.set_xlim(0.04, 0.91)
+            ax.set_xlim(0.02, 0.98)
         for ax in axes_array[len(metrics):]:
             ax.axis("off")
         handles, labels = axes_array[0].get_legend_handles_labels()
@@ -525,7 +574,14 @@ class PlotlyModelEvaluationPlotter:
             ncol=4,
             fontsize=13,
         )
-        fig.suptitle("Threshold Sensitivity by Model", fontsize=18, y=0.98)
+        fig.suptitle(
+            f"Threshold selection by model ({split} split)\n"
+            f"Diamonds: each model's threshold maximising "
+            f"{self._METRIC_LABELS.get(self._selection_metric(plot_data), 'the selection metric').lower()} "
+            f"{self._selection_source_phrase(plot_data)}",
+            fontsize=18,
+            y=0.98,
+        )
         fig.subplots_adjust(left=0.07, right=0.985, top=0.82, bottom=0.22, wspace=0.22)
         fig.savefig(path, format=fmt, dpi=300, bbox_inches="tight")
         plt.close(fig)

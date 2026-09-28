@@ -254,25 +254,18 @@ def _scale_marks(spec: dict, factor: float) -> None:
     """Markers and lines grow by ``factor`` so they keep their weight next to the larger text."""
 
     def scale(node: dict, key: str) -> None:
+        # Scalars only: an array of marker sizes encodes data (bubble charts), and
+        # enlarging it uniformly would only add overlap.
         value = node.get(key)
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             node[key] = value * factor
-        elif isinstance(value, list) and value and all(isinstance(v, (int, float)) or v is None for v in value):
-            node[key] = [v * factor if isinstance(v, (int, float)) else v for v in value]
-        elif hasattr(value, "tolist"):
-            node[key] = [v * factor if isinstance(v, (int, float)) else v for v in value.tolist()]
 
     for trace in spec.get("data", []):
         if not _cartesian(trace):
             continue
         marker = trace.get("marker")
         if isinstance(marker, dict):
-            if isinstance(marker.get("sizeref"), (int, float)) and marker["sizeref"]:
-                power = 2 if marker.get("sizemode") == "area" else 1
-                marker["sizeref"] = marker["sizeref"] / factor**power
-                scale(marker, "sizemin")
-            else:
-                scale(marker, "size")
+            scale(marker, "size")
             if isinstance(marker.get("line"), dict):
                 scale(marker["line"], "width")
         if isinstance(trace.get("line"), dict):
@@ -315,6 +308,59 @@ def _wrap_annotations(page: _Page, base_font: float) -> None:
         font_px = _font_size(annotation, base_font)
         if _longest_line(text) * _CHAR_WIDTH * font_px > page.width * 0.94:
             annotation["text"] = wrap_markup(text, (page.width * 0.94) / (_CHAR_WIDTH * font_px))
+
+
+def _domain_width(spec: dict, page: _Page, x: float) -> float | None:
+    """Pixel width of the narrowest x-axis domain that contains paper position ``x`` (a subplot column)."""
+    widths = []
+    for key in _axis_keys(spec, "x"):
+        low, high = _domain(page.layout.get(key) or {})
+        if low - 1e-6 <= x <= high + 1e-6 and high - low < 0.999:
+            widths.append((high - low) * page.plot_width())
+    return min(widths) if widths else None
+
+
+def _wrap_subplot_titles(spec: dict, page: _Page, base_font: float) -> None:
+    """Subplot titles (centred over a column) wrap to that column instead of running into the next one."""
+    for annotation in page.layout.get("annotations", []) or []:
+        text, x = annotation.get("text"), annotation.get("x")
+        if not isinstance(text, str) or not isinstance(x, (int, float)) or annotation.get("showarrow"):
+            continue
+        if annotation.get("xref", "paper") != "paper" or annotation.get("xanchor", "auto") not in ("center", "auto"):
+            continue
+        width = _domain_width(spec, page, float(x))
+        font_px = _font_size(annotation, base_font)
+        if width and _longest_line(text) * _CHAR_WIDTH * font_px > 0.98 * width:
+            annotation["text"] = wrap_markup(text, 0.98 * width / (_CHAR_WIDTH * font_px))
+
+
+def _fit_axis_titles(spec: dict, page: _Page, base_font: float) -> None:
+    """Axis titles wrap to their axis length; narrow numeric axes get fewer, unrotated ticks."""
+    layout = page.layout
+    for letter in ("x", "y"):
+        for key in _axis_keys(spec, letter):
+            axis = layout.get(key)
+            if not isinstance(axis, dict) or axis.get("visible") is False:
+                continue
+            low, high = _domain(axis)
+            length = (high - low) * (page.plot_width() if letter == "x" else page.plot_height)
+            title = _title_dict(axis)
+            if title:
+                title_px = _font_size(title, round(base_font * 1.2))
+                if _longest_line(title["text"]) * _CHAR_WIDTH * title_px > 0.98 * length:
+                    title["text"] = wrap_markup(title["text"], 0.98 * length / (_CHAR_WIDTH * title_px))
+            numeric = axis.get("type") == "linear" or (
+                axis.get("type") in (None, "-") and not _categories(spec, key, letter)
+                and any(_as_list(trace.get(letter)) for trace in spec.get("data", []) if _cartesian(trace) and _trace_axis_ref(trace, letter) == key)
+            )
+            if letter == "x" and numeric and not any(k in axis for k in ("tickvals", "dtick", "nticks")):
+                tick_px = _font_size({"font": axis.get("tickfont")}, base_font) if axis.get("tickfont") else base_font
+                tickformat = str(axis.get("tickformat") or "")
+                characters = 5 if re.search(r"\.[3-9]", tickformat) or "%" in tickformat else 4  # "0.25", "1000"
+                label_px = characters * _CHAR_WIDTH * tick_px + tick_px
+                capacity = int(length // label_px)
+                if capacity < 6:  # only narrow axes; Plotly's own spacing is fine otherwise
+                    axis["nticks"] = max(3, capacity)
 
 
 def _reserve_axis_room(spec: dict) -> None:
@@ -423,7 +469,9 @@ def _fit_x_labels(axis: dict, categories: list[str], ticks: list | None, per_cat
     if max(_longest_line(label) for label in categories) * _CHAR_WIDTH * font_px <= available:
         axis["tickangle"] = 0
         return True
-    words = max(len(word) for label in categories for line in _lines(_TAG.sub("", label)) for word in line.split() or [""])
+    # Split lines before stripping tags: removing "<br>" first would glue the last
+    # word of one line to the first word of the next.
+    words = max((len(word) for label in categories for line in _lines(label) for word in _TAG.sub("", line).split()), default=0)
     max_chars = int(available / (_CHAR_WIDTH * font_px))
     if words > max_chars or max_chars < 4:
         return False
@@ -627,6 +675,8 @@ def prepare_for_print(figure_json: dict, width: float, height: float, font_scale
     _reserve_axis_room(spec)
     _reserve_y_labels(spec, page, base_font)
     _fit_category_axes(spec, page, base_font)
+    _wrap_subplot_titles(spec, page, base_font)
+    _fit_axis_titles(spec, page, base_font)
     _layout_vertical(spec, page, base_font, title_height, screen)
     _unclip_bar_labels(spec)
     layout["width"], layout["height"] = int(round(page.width)), int(round(page.height()))

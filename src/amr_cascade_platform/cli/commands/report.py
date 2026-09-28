@@ -30,6 +30,8 @@ def register_reporting_command(subparsers, project_root: Path, context_builder) 
         "model_roc_curve",
         "model_calibration",
         "model_threshold_analysis",
+        "threshold_strategy_comparison",
+        "adjusted_model_shap",
         "validation_diagnostics",
         "er_landscape",
         "mnar_prevalence_shift_distribution",

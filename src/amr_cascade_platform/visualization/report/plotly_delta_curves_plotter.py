@@ -199,23 +199,38 @@ class PrevalenceDeltaCurvePlotter:
         tier_drugs["not_evaluable"] = sorted(tier_drugs["not_evaluable"])
 
         tier_definitions = [*self._SENSITIVITY_TIERS, ("not_evaluable", "Not Evaluable", None, None)]
-        populated = [
-            (key, label, self._TIER_COLORS[key], tier_drugs[key])
-            for key, label, _, _ in tier_definitions
-            if tier_drugs[key]
-        ]
-        if not populated:
-            fig, ax = plt.subplots(figsize=(8, 4))
-            ax.axis("off")
-            ax.text(0.5, 0.5, "No organism-drug pairs met the prevalence-shift support thresholds.",
-                    ha="center", va="center", fontsize=13, fontfamily=self._FONT)
-            return [(None, fig)]
+        any_drugs = any(tier_drugs.values())
+        figures: list[tuple[str | None, plt.Figure]] = []
+        for tier_key, tier_label, _, _ in tier_definitions:
+            color, drugs = self._TIER_COLORS[tier_key], tier_drugs[tier_key]
+            if drugs:
+                figures.append((tier_key, self._build_tier_figure(tier_key, tier_label, color, drugs, estimated,
+                                                                  span_by_drug, naive_lookup, organism)))
+            elif tier_key != "not_evaluable":
+                # The manuscript places each tier's figure, so an empty tier still gets one.
+                figures.append((tier_key, self._build_empty_tier_figure(tier_label, color, organism, any_drugs)))
+        return figures
 
-        return [
-            (tier_key, self._build_tier_figure(tier_key, tier_label, color, drugs, estimated,
-                                                span_by_drug, naive_lookup, organism))
-            for tier_key, tier_label, color, drugs in populated
-        ]
+    def _build_empty_tier_figure(self, tier_label: str, color: str, organism: str, any_drugs: bool) -> plt.Figure:
+        fig, ax = plt.subplots(figsize=(8, 4.4))
+        # A framed empty panel rather than axis("off"): the tight bounding box used on
+        # save keeps the frame, so the image stays full size instead of shrinking to the text.
+        ax.set_xticks([])
+        ax.set_yticks([])
+        for spine in ax.spines.values():
+            spine.set_color("#D0D5DD")
+        message = (
+            "No drug's MNAR estimate fell in this tier."
+            if any_drugs
+            else "No organism-drug pairs met the prevalence-shift support thresholds."
+        )
+        ax.text(0.5, 0.5, message, ha="center", va="center", fontsize=13, fontfamily=self._FONT,
+                color="#475467", transform=ax.transAxes)
+        title = f"Cascade-Aware MNAR Prevalence Sensitivity Curves — {tier_label} (0 drugs)"
+        if organism:
+            title += f" — {format_organism_label(organism)}"
+        fig.suptitle(title, fontsize=12, fontfamily=self._FONT, fontweight="bold", color=color)
+        return fig
 
     def _build_tier_figure(
         self,

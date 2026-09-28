@@ -23,6 +23,15 @@ def _log_stage(label: str, start_time: float) -> None:
     elapsed = time.monotonic() - start_time
     print(f"[stage-profile] {label}: peak_rss={peak_rss_mb:.0f}MB elapsed={elapsed:.1f}s", flush=True)
 
+from amr_cascade_platform.core.utils.provenance import (
+    atomic_write_json,
+    clear_success_marker,
+    read_json,
+    run_provenance,
+    sidecar_path,
+    validation_fingerprint,
+    write_success_marker,
+)
 from amr_cascade_platform.cascade.analyzers.conditional_probability_analyzer import ConditionalProbabilityAnalyzer
 from amr_cascade_platform.cascade.analyzers.cotesting_filter_analyzer import CoTestingFilterAnalyzer
 from amr_cascade_platform.cascade.analyzers.cascade_validation_analyzer import CascadeValidationAnalyzer
@@ -144,17 +153,31 @@ class CascadeAnalysisWorkflow:
             site=request.site,
             organism=request.organism,
         )
+        # Withdraw an earlier run's completion marker before anything here is
+        # rewritten: if this run dies partway, the DAG must not take the directory's
+        # mix of new and stale files as a finished cascade.
+        clear_success_marker(output_dir)
 
         # Load pre-computed validation results if available (written by
         # merge_cascade_validation_shards.py after all SLURM shard jobs complete).
         # This lets the main cascade job skip the ~800-hour validation loop when
         # sharded parallelism was used.
         precomputed_validation_path = output_dir / "validation_results.parquet"
+        validation_id, validation_components = validation_fingerprint(self._paths.project_root, self._settings, pair_path)
         if precomputed_validation_path.exists() and not request.ignore_precomputed_validation:
             logger.info(
                 "Loading pre-computed validation results from shard merge: %s",
                 precomputed_validation_path,
             )
+            recorded = (read_json(sidecar_path(precomputed_validation_path)) or {}).get("fingerprint")
+            if recorded is not None and recorded != validation_id:
+                raise ValueError(
+                    f"{precomputed_validation_path} was produced from different gold data, configuration or "
+                    f"code (fingerprint {recorded}, expected {validation_id}); rerun the validation shards and "
+                    "merge (they recompute a mismatched shard) or move the directory aside (--fix-stale-cascade)."
+                )
+            if recorded is None:
+                logger.warning("%s has no provenance record; relying on the edge-key check only.", precomputed_validation_path)
             validation_results = self._dataset_store.read_pandas(precomputed_validation_path)
             self._validate_precomputed_validation_matches_retained_edges(
                 validation_results=validation_results,
@@ -175,6 +198,7 @@ class CascadeAnalysisWorkflow:
             validated_edge_results,
             culture_episodes,
         )
+        explainability_outputs = self._regression_analyzer.explainability_outputs()
         _log_stage("downstream_testing_regression", start_time)
         del culture_episodes
         gc.collect()
@@ -189,6 +213,10 @@ class CascadeAnalysisWorkflow:
             conditional_probabilities=conditional_probabilities,
             escalation_results=escalation_results,
             adjusted_results=adjusted_results,
+            adjusted_model_shap_global=explainability_outputs["adjusted_model_shap_global"],
+            adjusted_model_shap_values=explainability_outputs["adjusted_model_shap_values"],
+            adjusted_model_shap_metadata=explainability_outputs["adjusted_model_shap_metadata"],
+            adjusted_model_shap_domain=explainability_outputs["adjusted_model_shap_domain"],
             retained_edges=retained_edges,
             validation_results=validation_results,
             dependence_results=dependence_results,
@@ -196,6 +224,10 @@ class CascadeAnalysisWorkflow:
             cotesting_pairs=cotesting_pairs,
             cotesting_probabilities=cotesting_probabilities,
             output_dir=output_dir,
+        )
+        atomic_write_json(
+            {"fingerprint": validation_id, **validation_components, "rows": len(validation_results)},
+            sidecar_path(outputs["validation_results"]),
         )
         _log_stage("result_writer", start_time)
         report_outputs = self._report_builder.export(
@@ -251,6 +283,13 @@ class CascadeAnalysisWorkflow:
                     ).as_posix(),
                 )
             )
+        # Written last: the HPC DAG treats a cascade directory as finished only
+        # when this marker exists (a killed job leaves none).
+        outputs["success_marker"] = write_success_marker(
+            output_dir,
+            {name: Path(path) for name, path in outputs.items() if isinstance(path, (str, Path)) and Path(path).parent == output_dir},
+            run_provenance(self._paths.project_root, self._settings, {"drug_pair_episodes": pair_path}),
+        )
         return outputs
 
     def _resolve_gold_dir(self, request: CascadeAnalysisRequest) -> Path:

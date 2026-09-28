@@ -12,7 +12,11 @@ usage() {
 Usage:
   bash scripts/submit_everything_hpc.sh [options]
 
-With no options, submits:
+With no options, first installs Python packages, then submits:
+  0. Python packages: creates .venv if missing and installs every package in
+     requirements-hpc.txt (which includes requirements.txt) whenever the
+     requirement files changed since the last install; otherwise nothing to do.
+     Runs once, on this login node, before anything is queued.
   1. Primary run (--fix-stale; site cascade with site-comparison figures,
      features, training, all figures, audits; ESKAPE only with --with-eskape)
   2. Availability sensitivity: support >= 5
@@ -22,7 +26,8 @@ With no options, submits:
      - site-by-era permutation, validated patterns    (after cascade validation merge)
      - patient-cluster bootstrap, robust patterns     (after cascade validation merge)
      - ridge-penalty refit, validated patterns        (after cascade validation merge)
-     - supplementary prediction tables and figures    (after training)
+     - supplementary prediction tables and figures    (after training, the report and
+                                                       its readiness audit)
      - supplementary tables and quoted numbers        (after the report job, the site
                                                        cascades, all follow-ups above, and
                                                        the three sensitivity runs' validation)
@@ -35,12 +40,16 @@ Cohort/hardware pass-through (forwarded to every real submission below):
                                 with more than one they are skipped with a note.
   --partition NAME             Also used for the prediction and table jobs.
   --cascade-partition NAME     Also used for the shard and ridge follow-ups.
-  --python-bin PATH
+  --python-bin PATH            Base Python 3.12 used to create .venv. Every job,
+                                follow-ups included, runs .venv/bin/python.
   --force-rerun-existing
 
+Python packages (step 0):
+  --delete-venv                Rebuild .venv from scratch (it is shared by every
+                                run, so it is rebuilt once).
+  --skip-install               Use .venv as it is: only check that it imports.
+
 Main-run-only pass-through:
-  --delete-venv                Only applied once, on the primary run -- the
-                                venv is shared, not per sensitivity.
   --with-eskape                Also run the ESKAPE-family validation. Off by
                                 default: neither paper uses it.
   --eskape-targets T1,T2       Targets for --with-eskape.
@@ -63,10 +72,11 @@ When --skip-main is used, give the primary run's job IDs yourself (a finished
 job needs no dependency; omit its ID):
   --validation-merge-job JOBID Cascade validation merge (alias: --era-stratified-after).
   --training-job JOBID         Training job, for the prediction follow-up.
-  --report-job JOBID           Report job, for the supplementary-table job.
+  --report-job JOBID           Report job, for the prediction and supplementary-table jobs.
+  --readiness-audit-job JOBID  Publication readiness audit job, for the prediction job.
 
 Follow-up sizing:
-  --era-stratified-shards N    Default: 16 (1 = a single job, no merge)
+  --era-stratified-shards N    Default: 48 (1 = a single job, no merge)
   --era-stratified-mem SIZE    Per shard. Default: 512G (loads the full pair table)
   --era-stratified-time HH:MM:SS  Per shard. Default: 24:00:00
   --patient-cluster-shards N   Default: 16 (1 = a single job, no merge)
@@ -75,6 +85,8 @@ Follow-up sizing:
   --ridge-mem SIZE             Default: 512G
   --ridge-time HH:MM:SS        Default: 24:00:00
 
+  --allow-dirty-checkout       Forward to every submission: allow src/, scripts/ or
+                               configs/ to differ from the checked-out commit.
   --dry-run                    Forward --dry-run to every real submission
                                 below, and print each follow-up sbatch command
                                 instead of calling sbatch.
@@ -97,6 +109,7 @@ CASCADE_PARTITION=""
 PYTHON_BIN=""
 FORCE_RERUN_EXISTING=0
 DELETE_VENV=0
+SKIP_INSTALL=0
 ESKAPE_TARGETS=""
 WITH_ESKAPE=0
 SKIP_MAIN=0
@@ -111,9 +124,13 @@ SKIP_SUPPLEMENTARY_TABLES=0
 VALIDATION_MERGE_JOB=""
 TRAINING_JOB=""
 REPORT_JOB=""
+READINESS_JOB=""
 ERA_STRATIFIED_MEM="512G"
 ERA_STRATIFIED_TIME="24:00:00"
-ERA_STRATIFIED_SHARDS=16
+# 48 rather than 16: at B = 1000 the site-by-era permutation cost ~144 s per pattern on
+# replica-sized data; with ~33x the rows per pattern and ~540 validated patterns on the
+# real data, 16 shards put each shard near or past its 24 h limit.
+ERA_STRATIFIED_SHARDS=48
 PATIENT_CLUSTER_MEM="512G"
 PATIENT_CLUSTER_TIME="24:00:00"
 PATIENT_CLUSTER_SHARDS=16
@@ -124,6 +141,7 @@ PREDICTION_TIME="04:00:00"
 TABLES_MEM="64G"
 TABLES_TIME="02:00:00"
 DRY_RUN=0
+ALLOW_DIRTY_CHECKOUT=0
 
 need_value() { [[ $# -ge 2 ]] || { echo "$1 requires a value" >&2; exit 2; }; }
 
@@ -136,6 +154,7 @@ while [[ $# -gt 0 ]]; do
     --python-bin) need_value "$@"; PYTHON_BIN="$2"; shift 2 ;;
     --force-rerun-existing) FORCE_RERUN_EXISTING=1; shift ;;
     --delete-venv) DELETE_VENV=1; shift ;;
+    --skip-install) SKIP_INSTALL=1; shift ;;
     --with-eskape) WITH_ESKAPE=1; shift ;;
     --eskape-targets) need_value "$@"; ESKAPE_TARGETS="$2"; shift 2 ;;
     --skip-main) SKIP_MAIN=1; shift ;;
@@ -155,6 +174,7 @@ while [[ $# -gt 0 ]]; do
     --validation-merge-job|--era-stratified-after) need_value "$@"; VALIDATION_MERGE_JOB="$2"; shift 2 ;;
     --training-job) need_value "$@"; TRAINING_JOB="$2"; shift 2 ;;
     --report-job) need_value "$@"; REPORT_JOB="$2"; shift 2 ;;
+    --readiness-audit-job) need_value "$@"; READINESS_JOB="$2"; shift 2 ;;
     --era-stratified-mem) need_value "$@"; ERA_STRATIFIED_MEM="$2"; shift 2 ;;
     --era-stratified-time) need_value "$@"; ERA_STRATIFIED_TIME="$2"; shift 2 ;;
     --era-stratified-shards) need_value "$@"; ERA_STRATIFIED_SHARDS="$2"; shift 2 ;;
@@ -164,6 +184,7 @@ while [[ $# -gt 0 ]]; do
     --ridge-mem) need_value "$@"; RIDGE_MEM="$2"; shift 2 ;;
     --ridge-time) need_value "$@"; RIDGE_TIME="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
+    --allow-dirty-checkout) ALLOW_DIRTY_CHECKOUT=1; shift ;;
     --help|-h) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -184,23 +205,38 @@ common_args=()
 [[ -n "${PYTHON_BIN}" ]] && common_args+=(--python-bin "${PYTHON_BIN}")
 [[ "${FORCE_RERUN_EXISTING}" -eq 1 ]] && common_args+=(--force-rerun-existing)
 [[ "${DRY_RUN}" -eq 1 ]] && common_args+=(--dry-run)
+[[ "${ALLOW_DIRTY_CHECKOUT}" -eq 1 ]] && common_args+=(--allow-dirty-checkout)
+[[ "${SKIP_INSTALL}" -eq 1 ]] && common_args+=(--skip-install)
 
 main_args=(${common_args[@]+"${common_args[@]}"})
-[[ "${DELETE_VENV}" -eq 1 ]] && main_args+=(--delete-venv)
 if [[ -n "${ESKAPE_TARGETS}" && "${WITH_ESKAPE}" -eq 0 ]]; then
   echo "--eskape-targets has no effect without --with-eskape" >&2
   exit 2
 fi
 [[ -n "${ESKAPE_TARGETS}" ]] && main_args+=(--eskape-targets "${ESKAPE_TARGETS}")
 
-# --run-publication-package minus ESKAPE, which only runs with --with-eskape.
-package_args=(--run-site-cascade --include-site-comparison-figures --run-features --run-training --run-all-figures --run-audit --run-readiness-audit)
+# --run-publication-package minus ESKAPE, which only runs with --with-eskape. Keep the two
+# in step: the threshold-strategy comparison (validation holdout vs patient-grouped OOF)
+# is reported in the Supplement, so it is part of every full run.
+package_args=(--run-site-cascade --include-site-comparison-figures --run-features --run-training --run-threshold-comparison --run-all-figures --run-audit --run-readiness-audit)
 [[ "${WITH_ESKAPE}" -eq 1 ]] && package_args+=(--run-eskape)
 
 # Job IDs printed by submit_pipeline_dag_hpc.sh, e.g. "Report ESCHERICHIA COLI: 123".
 job_id_after() {
   printf '%s\n' "$1" | grep -E "^$2" | tail -1 | awk -F': ' '{print $2}' || true
 }
+
+# Step 0, once for the whole wave and before anything is queued: every job
+# (primary, sensitivities, follow-ups) runs the shared .venv. The runs below then
+# find its packages up to date and install nothing.
+setup_args=(--setup-only)
+[[ -n "${PYTHON_BIN}" ]] && setup_args+=(--python-bin "${PYTHON_BIN}")
+[[ "${DELETE_VENV}" -eq 1 ]] && setup_args+=(--delete-venv)
+[[ "${SKIP_INSTALL}" -eq 1 ]] && setup_args+=(--skip-install)
+[[ "${DRY_RUN}" -eq 1 ]] && setup_args+=(--dry-run)
+echo "=== [0/4] Python packages: requirements-hpc.txt -> .venv ==="
+bash scripts/submit_pipeline_dag_hpc.sh "${setup_args[@]}"
+echo ""
 
 site_cascade_jobs=""
 combined_cascade_job=""
@@ -213,6 +249,7 @@ if [[ "${SKIP_MAIN}" -eq 0 ]]; then
   VALIDATION_MERGE_JOB="$(job_id_after "${main_output}" "Cascade validation merge ")"
   TRAINING_JOB="$(job_id_after "${main_output}" "Training ")"
   REPORT_JOB="$(job_id_after "${main_output}" "Report ")"
+  READINESS_JOB="$(job_id_after "${main_output}" "Publication readiness audit ")"
   combined_cascade_job="$(job_id_after "${main_output}" "Combined cascade ")"
   site_cascade_jobs="$(printf '%s\n' "${main_output}" | grep -E "^Site cascade [^|]+\| " | grep -v "^Site cascade validation merge" | awk -F': ' '{print $2}' | paste -sd: - || true)"
 else
@@ -223,11 +260,16 @@ setup_sensitivity_symlinks() {
   local data_root="$1"
   if [[ ! -d "${data_root}" ]]; then
     mkdir -p "${data_root}"
-    for d in raw sample bronze silver harmonized metadata reference interim features; do
+    for d in raw sample bronze silver harmonized reference interim features; do
       ln -s "${PROJECT_ROOT}/data/${d}" "${data_root}/${d}"
     done
   fi
-  mkdir -p "${data_root}/gold" "${data_root}/artifacts"
+  # Its own metadata directory, not a link to data/metadata: the variant's gold build
+  # writes gold_build_*.json there, which through a link overwrote the primary run's
+  # record (read by the manuscript and supplementary builders). Nothing in a
+  # sensitivity run reads metadata, so an empty directory is all it needs.
+  [[ -L "${data_root}/metadata" ]] && rm "${data_root}/metadata"
+  mkdir -p "${data_root}/metadata" "${data_root}/gold" "${data_root}/artifacts"
 }
 
 # submit_sensitivity DATA_ROOT ENV: queue one availability-sensitivity run and record the job
@@ -289,14 +331,24 @@ if [[ -n "${ORGANISMS}" ]]; then
   organism="${ORGANISMS}"
 fi
 
-python_bin="${PYTHON_BIN:-${PROJECT_ROOT}/.venv/bin/python}"
+# The venv step 0 maintains, as in submit_pipeline_dag_hpc.sh's own jobs;
+# --python-bin only chooses the Python that creates it.
+python_bin="${PROJECT_ROOT}/.venv/bin/python"
+# The code identity the follow-up jobs must run (see submit_pipeline_dag_hpc.sh, which
+# already refused a dirty checkout unless --allow-dirty-checkout was given).
+CODE_IDENTITY=""
+if [[ -x "${python_bin}" ]]; then
+  CODE_IDENTITY="$(cd "${PROJECT_ROOT}" && PYTHONNOUSERSITE=1 "${python_bin}" -c \
+    'import sys; sys.path.insert(0, "src"); from amr_cascade_platform.core.utils.provenance import code_identity; print(code_identity("."))' \
+    2>/dev/null || true)"
+fi
 cpus="${CPUS_PER_TASK:-8}"
 cascade_partition="${CASCADE_PARTITION:-long}"
 main_partition="${PARTITION:-main}"
 
 # Same job environment as submit_pipeline_dag_hpc.sh's submit_job.
 wrap_command() {
-  printf '%s' "cd '${PROJECT_ROOT}' && export PYTHONNOUSERSITE=1 && export MPLCONFIGDIR='${PROJECT_ROOT}/.cache/matplotlib' && mkdir -p \"\${MPLCONFIGDIR}\" && export AMR_CASCADE_PYTHON='${python_bin}' && \"\${AMR_CASCADE_PYTHON}\" scripts/check_python_runtime.py || { echo \"ERROR: venv Python not working on \$(hostname): \${AMR_CASCADE_PYTHON}\" >&2; exit 127; } && export PYTHONUNBUFFERED=1 && export OMP_NUM_THREADS='${cpus}' && export OPENBLAS_NUM_THREADS='${cpus}' && export MKL_NUM_THREADS='${cpus}' && $1"
+  printf '%s' "cd '${PROJECT_ROOT}' && export PYTHONNOUSERSITE=1 && export MPLCONFIGDIR='${PROJECT_ROOT}/.cache/matplotlib' && mkdir -p \"\${MPLCONFIGDIR}\" && export AMR_CASCADE_PYTHON='${python_bin}' && export AMR_CASCADE_EXPECTED_CODE='${CODE_IDENTITY}' && \"\${AMR_CASCADE_PYTHON}\" scripts/check_python_runtime.py || { echo \"ERROR: start-up check failed on \$(hostname) (see above): a broken venv (\${AMR_CASCADE_PYTHON}) or a checkout changed since submission.\" >&2; exit 127; } && export PYTHONUNBUFFERED=1 && export OMP_NUM_THREADS='${cpus}' && export OPENBLAS_NUM_THREADS='${cpus}' && export MKL_NUM_THREADS='${cpus}' && $1"
 }
 
 # follow_up NAME PARTITION MEM TIME DEPENDENCIES(colon-separated, may be empty) COMMAND
@@ -365,7 +417,12 @@ if [[ "${SKIP_RIDGE}" -eq 0 ]]; then
   finished_jobs+=("${ridge_job}")
 fi
 if [[ "${SKIP_PREDICTION}" -eq 0 ]]; then
-  prediction_job="$(follow_up amr_supplementary_prediction "${main_partition}" "${PREDICTION_MEM}" "${PREDICTION_TIME}" "${TRAINING_JOB}" \
+  # After the report and its readiness audit, as in the local runner: the prediction
+  # writes supp_pred_* into the report's figure directory, the report archives every
+  # earlier top-level figure there, and the audit fails on files outside its manifest.
+  # Held on training alone, a prediction that finished first lost its figures.
+  prediction_deps="$(join_ids "${TRAINING_JOB}" "${REPORT_JOB}" "${READINESS_JOB}")"
+  prediction_job="$(follow_up amr_supplementary_prediction "${main_partition}" "${PREDICTION_MEM}" "${PREDICTION_TIME}" "${prediction_deps}" \
     "\"\${AMR_CASCADE_PYTHON}\" scripts/run_supplementary_prediction.py --env hpc --organism '${organism}'")"
   echo "Supplementary prediction tables and figures: ${prediction_job}"
   finished_jobs+=("${prediction_job}")

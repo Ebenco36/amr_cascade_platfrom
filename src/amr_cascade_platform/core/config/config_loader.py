@@ -10,6 +10,7 @@ from amr_cascade_platform.core.config.config_models import (
     AppConfig,
     BronzeConfig,
     CascadeConfig,
+    CascadeExplainabilityConfig,
     CascadeOutputConfig,
     CascadeValidationConfig,
     CleaningConfig,
@@ -147,6 +148,9 @@ class ConfigLoader:
                     observed_result_values=tuple(raw["gold"]["observed_result_values"]),
                     excluded_assay_labels=tuple(raw["gold"]["excluded_assay_labels"]),
                     eligibility=EligibilityConfig(**raw["gold"]["eligibility"]),
+                    primary_ast_entity_types=tuple(
+                        raw["gold"].get("primary_ast_entity_types", ("ANTIBACTERIAL", "COMPOSITE_AST"))
+                    ),
                 ),
                 cascade=CascadeConfig(
                     primary_observation_layer=raw["cascade"]["primary_observation_layer"],
@@ -172,6 +176,18 @@ class ConfigLoader:
                         raw["cascade"].get("retained_min_adjusted_odds_ratio", 1.0),
                     ),
                     validation=CascadeValidationConfig(**raw["cascade"]["validation"]),
+                    explainability=CascadeExplainabilityConfig(
+                        **raw["cascade"].get(
+                            "explainability",
+                            {
+                                "enabled": True,
+                                "background_size": 500,
+                                "explanation_sample_size": 1000,
+                                "random_seed": 20260421,
+                                "additivity_tolerance": 1e-8,
+                            },
+                        )
+                    ),
                     outputs=CascadeOutputConfig(**raw["cascade"]["outputs"]),
                 ),
                 reporting=ReportingConfig(
@@ -187,6 +203,7 @@ class ConfigLoader:
                     image_height=raw["reporting"]["image_height"],
                     thin_availability_support=int(raw["reporting"].get("thin_availability_support", 5)),
                     antibiogram_min_tested=int(raw["reporting"].get("antibiogram_min_tested", 30)),
+                    shap_max_pair_figures=int(raw["reporting"].get("shap_max_pair_figures", 20)),
                     availability_sensitivity_environments=tuple(
                         (str(label), str(environment))
                         for label, environment in (raw["reporting"].get("availability_sensitivity_environments") or {}).items()
@@ -216,6 +233,12 @@ class ConfigLoader:
                     temporal_validation_end_year=raw["modeling"]["temporal_validation_end_year"],
                     temporal_test_end_year=raw["modeling"]["temporal_test_end_year"],
                     estimators=tuple(raw["modeling"]["estimators"]),
+                    primary_estimator=raw["modeling"].get(
+                        "primary_estimator", "logistic_regression"
+                    ),
+                    primary_feature_set=raw["modeling"].get(
+                        "primary_feature_set", "full"
+                    ),
                     include_cascade_features=raw["modeling"]["include_cascade_features"],
                     output_dir=raw["modeling"]["output_dir"],
                     random_state=raw["modeling"]["random_state"],
@@ -250,6 +273,15 @@ class ConfigLoader:
                     threshold_selection_metric=raw["evaluation"]["threshold_selection_metric"],
                     threshold_candidates=tuple(raw["evaluation"]["threshold_candidates"]),
                     reporting_threshold_metrics=tuple(raw["evaluation"]["reporting_threshold_metrics"]),
+                    threshold_selection_strategy=raw["evaluation"].get(
+                        "threshold_selection_strategy",
+                        "validation_holdout",
+                    ),
+                    threshold_cv_folds=int(raw["evaluation"].get("threshold_cv_folds", 5)),
+                    threshold_cv_group_column=raw["evaluation"].get(
+                        "threshold_cv_group_column",
+                        "anon_id",
+                    ),
                 ),
                 prevalence=PrevalenceConfig(
                     output_dir=raw["prevalence"]["output_dir"],

@@ -487,6 +487,16 @@ def test_fit_converges_and_recovers_the_upstream_effect_on_a_large_pair(tmp_path
     assert fit["coefficient_ci_lower"]["upstream_positive"] < fit["coefficients"]["upstream_positive"] < fit["coefficient_ci_upper"]["upstream_positive"]
 
 
+def test_two_sided_normal_p_values_remain_positive_for_extreme_finite_z_scores() -> None:
+    z_scores = np.array([0.0, 8.0, 20.0, np.nan])
+
+    p_values = DownstreamTestingRegression._two_sided_normal_p_values(z_scores)
+
+    assert p_values[0] == 1.0
+    assert 0.0 < p_values[2] < p_values[1] < 1.0
+    assert np.isnan(p_values[3])
+
+
 def test_separated_upstream_result_is_flagged_not_reported(tmp_path: Path) -> None:
     project_root = Path(__file__).resolve().parents[2]
     settings = ConfigLoader(project_root).load("mac")
@@ -511,4 +521,3 @@ def test_separated_upstream_result_is_flagged_not_reported(tmp_path: Path) -> No
 
     assert result["non_estimable_reason"] == "quasi_separation"
     assert pd.isna(result["adjusted_odds_ratio"]) and pd.isna(result["adjusted_or_ci_e_value"])
-

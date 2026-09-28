@@ -44,6 +44,7 @@ logger = logging.getLogger(__name__)
 KEY_COLUMNS = ("anon_id", "pat_enc_csn_id_coded", "order_proc_id_coded")
 TIME_COLUMNS = ("order_time_jittered", "order_time_jittered_utc")
 _SEP = "\x1f"
+_PANEL_BUNDLING_THRESHOLD = 0.95
 
 
 @dataclass(frozen=True)
@@ -716,8 +717,8 @@ def _fidelity(real: dict, states: np.ndarray, labels: list[str]) -> dict:
     pairs = [(row, replica_pairs[(row["upstream"], row["downstream"])]) for row in real["pairs"] if (row["upstream"], row["downstream"]) in replica_pairs]
     real_log_er = np.log([row["escalation_ratio"] for row, _ in pairs]) if pairs else np.empty(0)
     replica_log_er = np.log([row["escalation_ratio"] for _, row in pairs]) if pairs else np.empty(0)
-    real_screen = np.array([row["co_report_min"] >= 0.95 for row, _ in pairs])
-    replica_screen = np.array([row["co_report_min"] >= 0.95 for _, row in pairs])
+    real_screen = np.array([row["co_report_min"] >= _PANEL_BUNDLING_THRESHOLD for row, _ in pairs])
+    replica_screen = np.array([row["co_report_min"] >= _PANEL_BUNDLING_THRESHOLD for _, row in pairs])
 
     def _spearman(a: np.ndarray, b: np.ndarray) -> float | None:
         if len(a) < 3:

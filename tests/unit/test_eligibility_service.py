@@ -331,3 +331,51 @@ def test_benzylpenicillin_reference_entry_marks_penicillin_g_intrinsic_for_e_col
     assert by_drug.loc["PENICILLIN G", "is_intrinsic_resistance"] == 1
     assert by_drug.loc["PENICILLIN G", "is_eligible"] == 0
     assert by_drug.loc["CEFTRIAXON", "is_eligible"] == 1
+
+
+def _ecoli_row(episode: str, antibiotic: str | None = None, result: str | None = None) -> dict:
+    row = {
+        "anon_id": f"P{episode}",
+        "pat_enc_csn_id_coded": episode,
+        "order_proc_id_coded": episode,
+        "order_time_jittered": "2021-06-01",
+        "organism": "ESCHERICHIA COLI",
+        "source_site": "armd",
+    }
+    if antibiotic is not None:
+        row.update({"antibiotic": antibiotic, "susceptibility": result, "was_tested": 1})
+    return row
+
+
+def test_availability_support_counts_episodes_not_rows_and_eligibility_comes_first() -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    settings = ConfigLoader(project_root).load("mac")
+    settings = replace(settings, gold=replace(settings.gold, eligibility=replace(settings.gold.eligibility, availability_min_observed=2)))
+    service = EligibilityService(settings, PathManager(project_root, settings).paths.reference)
+    culture_episodes = pd.DataFrame([_ecoli_row("1"), _ecoli_row("2")])
+    culture_drug_episodes = pd.DataFrame(
+        [
+            # One episode with discordant results for one drug: one observation of availability.
+            _ecoli_row("1", "CIPROFLOXACIN", "RESISTANT"),
+            _ecoli_row("1", "CIPROFLOXACIN", "SUSCEPTIBLE"),
+            _ecoli_row("1", "GENTAMICIN", "SUSCEPTIBLE"),
+            _ecoli_row("2", "GENTAMICIN", "SUSCEPTIBLE"),
+            # Intrinsic resistance (benzylpenicillin for E. coli) with a recorded result.
+            _ecoli_row("1", "PENICILLIN G", "RESISTANT"),
+            _ecoli_row("2", "PENICILLIN G", "RESISTANT"),
+        ]
+    )
+
+    eligible = service.build_episode_eligibility(culture_episodes, culture_drug_episodes).drop_duplicates(
+        ["pat_enc_csn_id_coded", "antibiotic"]
+    ).set_index(["pat_enc_csn_id_coded", "antibiotic"])
+
+    assert int(eligible.loc[("1", "CIPROFLOXACIN"), "availability_support_n"]) == 1
+    assert int(eligible.loc[("1", "CIPROFLOXACIN"), "is_operationally_available"]) == 0
+    assert int(eligible.loc[("1", "GENTAMICIN"), "availability_support_n"]) == 2
+    assert eligible.loc[("1", "GENTAMICIN"), "eligibility_state"] == "eligible"
+    assert eligible.loc[("1", "GENTAMICIN"), "observation_status"] == "observed_tested"
+    intrinsic = eligible.loc[("1", "PENICILLIN G")]
+    assert int(intrinsic["is_observed_tested"]) == 1 and int(intrinsic["is_eligible"]) == 0
+    assert intrinsic["eligibility_state"] == "intrinsic_resistance"
+    assert intrinsic["observation_status"] == "structural_intrinsic_resistance"

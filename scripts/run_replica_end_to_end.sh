@@ -20,17 +20,24 @@ Build the replica first:
   python scripts/create_raw_replica_dataset.py all --scale 0.03
 
 Options:
-  --env NAME              Environment config. Default: test_replica
+  --env NAME              Environment config. Default: test_replica. Ingestion reads the
+                          environment's default_data_layer. test_dataset_b1000 runs
+                          test_dataset (sample layer) at the production B = 1000.
   --organism NAME         Default: ESCHERICHIA COLI
   --shards N              Validation shards, combined scope and sensitivities. Default: 4
   --site-shards N         Validation shards per site. Default: 2
   --follow-up-shards N    Shards for the site-by-era and patient-cluster follow-ups. Default: 2
   --skip-sensitivities    Do not run the three availability-denominator sensitivities.
+  --parallel              Run independent stages (sites, shards, sensitivities, follow-ups)
+                          at the same time, as the cluster does. Off by default: on a laptop
+                          ten concurrent validation shards exhaust memory. Without it, one
+                          pipeline process runs at a time.
   --from STEP             Resume at STEP, keeping earlier outputs. Steps, in order:
                           ingestion preprocessing harmonization comorbidity cascades
                           prevalence_features training report audits follow_ups
                           supplementary_tables package_dry_run inventory
                           (cascades = site and combined gold + validation + cascade;
+                          training = model training and the threshold-strategy comparison;
                           follow_ups = availability sensitivities, site-by-era
                           permutation, patient-cluster bootstrap, ridge refit and
                           supplementary prediction)
@@ -58,6 +65,7 @@ RUN_SENSITIVITIES=1
 FROM_STEP=""
 PYTHON_BIN="${PROJECT_ROOT}/.venv/bin/python"
 DRY_RUN=0
+PARALLEL=0
 
 STEPS=(ingestion preprocessing harmonization comorbidity cascades prevalence_features training report
        audits follow_ups supplementary_tables package_dry_run inventory)
@@ -74,6 +82,7 @@ while [[ $# -gt 0 ]]; do
     --from) need_value "$@"; FROM_STEP="$2"; shift 2 ;;
     --python) need_value "$@"; PYTHON_BIN="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
+    --parallel) PARALLEL=1; shift ;;
     --help|-h) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -88,22 +97,27 @@ if [[ -n "${FROM_STEP}" ]] && ! printf '%s\n' "${STEPS[@]}" | grep -qx "${FROM_S
 fi
 [[ -x "${PYTHON_BIN}" ]] || { echo "Python not found: ${PYTHON_BIN}" >&2; exit 2; }
 
-DATA_ROOT="$("${PYTHON_BIN}" - "${PROJECT_ROOT}" "${ENV_NAME}" <<'PY'
+# Data root and the layer ingestion reads: the environment's default_data_layer
+# (raw for the replica; sample for test_dataset, whose raw layer is guarded).
+ENV_INFO="$("${PYTHON_BIN}" - "${PROJECT_ROOT}" "${ENV_NAME}" <<'PY'
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(sys.argv[1]) / "src"))
 from amr_cascade_platform.core.config.config_loader import ConfigLoader
-print(ConfigLoader(Path(sys.argv[1])).load(sys.argv[2]).environment.data_root)
+environment = ConfigLoader(Path(sys.argv[1])).load(sys.argv[2]).environment
+print(environment.data_root, environment.default_data_layer)
 PY
 )"
+DATA_ROOT="${ENV_INFO% *}"
+SOURCE_LAYER="${ENV_INFO##* }"
 DATA_ROOT_ABS="${PROJECT_ROOT}/${DATA_ROOT}"
 if [[ "$(cd "${DATA_ROOT_ABS}" 2>/dev/null && pwd -P)" == "$(cd "${PROJECT_ROOT}/data" && pwd -P)" ]]; then
   echo "Refusing to run: ${ENV_NAME} points at the real data root (${DATA_ROOT})." >&2
   exit 2
 fi
 for site in "${SITES[@]}"; do
-  compgen -G "${DATA_ROOT_ABS}/raw/${site}/*cohort.csv" > /dev/null || {
-    echo "No replica raw files under ${DATA_ROOT_ABS}/raw/${site}; run scripts/create_raw_replica_dataset.py first." >&2
+  compgen -G "${DATA_ROOT_ABS}/${SOURCE_LAYER}/${site}/*cohort.csv" > /dev/null || {
+    echo "No ${SOURCE_LAYER} input files under ${DATA_ROOT_ABS}/${SOURCE_LAYER}/${site} (for the replica, run scripts/create_raw_replica_dataset.py first)." >&2
     exit 2
   }
 done
@@ -112,7 +126,12 @@ LOG_DIR="${DATA_ROOT_ABS}/logs/e2e"
 mkdir -p "${LOG_DIR}"
 export PYTHONNOUSERSITE=1 PYTHONUNBUFFERED=1
 export MPLCONFIGDIR="${PROJECT_ROOT}/.cache/matplotlib"
-export OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 MKL_NUM_THREADS=2
+# Cap the maths libraries' threads: one process at a time may use a few cores;
+# concurrent processes get one each, so the machine is never oversubscribed.
+THREADS=4
+[[ "${PARALLEL}" -eq 1 ]] && THREADS=1
+export OMP_NUM_THREADS="${THREADS}" OPENBLAS_NUM_THREADS="${THREADS}" MKL_NUM_THREADS="${THREADS}" \
+  VECLIB_MAXIMUM_THREADS="${THREADS}" NUMEXPR_NUM_THREADS="${THREADS}"
 mkdir -p "${MPLCONFIGDIR}"
 
 RUN_STARTED=$(date +%s)
@@ -149,9 +168,15 @@ run() {
   printf '%-44s ok (%ss)\n' "${name}" "$((end - start))"
 }
 
-# in_parallel FUNCTION ARG... : FUNCTION ARG for each ARG at once.
+# in_parallel FUNCTION ARG... : FUNCTION ARG for each ARG -- at once with --parallel,
+# otherwise one after another (stopping at the first failure).
 in_parallel() {
   local function_name="$1"; shift
+  if [[ "${PARALLEL}" -eq 0 ]]; then
+    local each
+    for each in "$@"; do "${function_name}" "${each}" || return 1; done
+    return 0
+  fi
   local pids=() item status=0
   for item in "$@"; do
     "${function_name}" "${item}" &
@@ -165,6 +190,11 @@ in_parallel() {
 
 # concurrently "CMD ARGS" "CMD ARGS" ... : run whole commands (functions) at once.
 concurrently() {
+  if [[ "${PARALLEL}" -eq 0 ]]; then
+    local each
+    for each in "$@"; do eval "${each}" || return 1; done
+    return 0
+  fi
   local pids=() command status=0
   for command in "$@"; do
     eval "${command}" &
@@ -176,7 +206,8 @@ concurrently() {
   return "${status}"
 }
 
-PY=("${PYTHON_BIN}")
+# Lower priority so the machine stays responsive while the pipeline runs.
+PY=(nice -n 10 "${PYTHON_BIN}")
 O="${ORGANISM}"
 
 validate_scope() {
@@ -186,8 +217,25 @@ validate_scope() {
   [[ "${scope}" == "site" ]] && site_args=(--site "${site}")
   local gold_scope_args=(--source-scope "${scope}")
   run "${label}_gold" "${PY[@]}" scripts/run_gold.py --env "${env}" "${gold_scope_args[@]}" ${site_args[@]+"${site_args[@]}"} --organism "${O}"
+  # As on the cluster: describe the dataset as soon as the combined gold layer
+  # exists, alongside the validation shards (primary run only).
+  local summary_pid=""
+  if [[ "${label}" == "combined" ]]; then
+    if [[ "${PARALLEL}" -eq 1 ]]; then
+      run dataset_summary "${PY[@]}" scripts/run_dataset_summary.py --env "${env}" --scope combined --organism "${O}" \
+        --figure-format png --figure-format pdf --figure-format html &
+      summary_pid="$!"
+    else
+      run dataset_summary "${PY[@]}" scripts/run_dataset_summary.py --env "${env}" --scope combined --organism "${O}" \
+        --figure-format png --figure-format pdf --figure-format html || return 1
+    fi
+  fi
   local i pids=() status=0
   for ((i = 0; i < shards; i++)); do
+    if [[ "${PARALLEL}" -eq 0 ]]; then
+      run "${label}_validation_shard_${i}" "${PY[@]}" scripts/run_cascade_validation_shard.py --env "${env}" --gold-scope "${scope}" ${site_args[@]+"${site_args[@]}"} --organism "${O}" --shard-index "${i}" --shard-total "${shards}" || return 1
+      continue
+    fi
     run "${label}_validation_shard_${i}" "${PY[@]}" scripts/run_cascade_validation_shard.py --env "${env}" --gold-scope "${scope}" ${site_args[@]+"${site_args[@]}"} --organism "${O}" --shard-index "${i}" --shard-total "${shards}" &
     pids+=("$!")
   done
@@ -195,14 +243,15 @@ validate_scope() {
   [[ "${status}" -eq 0 ]] || return 1
   run "${label}_validation_merge" "${PY[@]}" scripts/merge_cascade_validation_shards.py --env "${env}" --gold-scope "${scope}" ${site_args[@]+"${site_args[@]}"} --organism "${O}" --shard-total "${shards}"
   run "${label}_cascade" "${PY[@]}" scripts/run_cascade_analysis.py --env "${env}" --gold-scope "${scope}" ${site_args[@]+"${site_args[@]}"} --organism "${O}"
+  if [[ -n "${summary_pid}" ]]; then wait "${summary_pid}" || return 1; fi
 }
 
-ingest_site() { run "ingestion_$1" "${PY[@]}" scripts/run_ingestion.py --env "${ENV_NAME}" --site "$1" --source-layer raw; }
+ingest_site() { run "ingestion_$1" "${PY[@]}" scripts/run_ingestion.py --env "${ENV_NAME}" --site "$1" --source-layer "${SOURCE_LAYER}"; }
 preprocess_site() { run "preprocessing_$1" "${PY[@]}" scripts/run_preprocessing.py --env "${ENV_NAME}" --site "$1"; }
 comorbidity_site() { run "comorbidity_$1" "${PY[@]}" scripts/pre_aggregate_comorbidities.py --env "${ENV_NAME}" --site "$1" --min-coverage 0.8; }
 site_cascade() { validate_scope "${ENV_NAME}" site "$1" "${SITE_SHARDS}" "site_$1"; }
 
-echo "Replica end-to-end run | env ${ENV_NAME} | data root ${DATA_ROOT} | organism ${O}"
+echo "End-to-end run | env ${ENV_NAME} | data root ${DATA_ROOT} | input layer ${SOURCE_LAYER} | organism ${O}"
 echo "Logs: ${LOG_DIR}"
 if [[ -z "${FROM_STEP}" && "${DRY_RUN}" -eq 0 ]]; then
   for layer in bronze silver harmonized interim gold features artifacts metadata outputs; do
@@ -225,16 +274,23 @@ prevalence() {
 }
 features() { run features "${PY[@]}" scripts/run_feature_build.py --env "${ENV_NAME}" --scope combined --organism "${O}"; }
 if should_run prevalence_features; then concurrently prevalence features; fi
-if should_run training; then run training "${PY[@]}" scripts/run_training.py --env "${ENV_NAME}" --scope combined --organism "${O}"; fi
+training() { run training "${PY[@]}" scripts/run_training.py --env "${ENV_NAME}" --scope combined --organism "${O}"; }
+# As on the cluster (--run-threshold-comparison, part of every full run): validation-site
+# holdout vs patient-grouped OOF threshold selection for the primary estimator.
+threshold_comparison() {
+  run threshold_comparison "${PY[@]}" scripts/run_threshold_strategy_comparison.py --env "${ENV_NAME}" \
+    --scope combined --organism "${O}" --split-strategy site
+}
+if should_run training; then concurrently training threshold_comparison; fi
 if should_run report; then
   # Same figure list as submit_pipeline_dag_hpc.sh --run-all-figures
-  # --include-site-comparison-figures, with --fail-on-missing-figures.
+  # --include-site-comparison-figures --run-threshold-comparison, with --fail-on-missing-figures.
   figures=(cascade_directional cascade_evidence_scatter cascade_consequence_summary operational_availability_suite observation_coverage descriptive_summaries
            prevalence_shift_forest prevalence_shift_curves mnar_tipping_point upstream_contribution_forest
            downstream_trigger_forest threshold_sensitivity model_metrics_comparison model_pr_curve model_roc_curve
-           model_calibration model_threshold_analysis validation_diagnostics er_landscape
+           model_calibration model_threshold_analysis adjusted_model_shap validation_diagnostics er_landscape
            mnar_prevalence_shift_distribution validation_funnel panel_bundling temporal_stability consort_diagram
-           dataset_characterization site_vs_combined_summary cross_site_concordance)
+           dataset_characterization site_vs_combined_summary cross_site_concordance threshold_strategy_comparison)
   figure_args=()
   for figure in "${figures[@]}"; do figure_args+=(--figure "${figure}"); done
   run report "${PY[@]}" scripts/run_reporting.py --env "${ENV_NAME}" --scope combined --organism "${O}"     --figure-format html --figure-format png --figure-format svg --figure-format pdf --fail-on-missing-figures "${figure_args[@]}"
@@ -253,9 +309,11 @@ sensitivity() {
     # Same layout as setup_sensitivity_symlinks in submit_everything_hpc.sh:
     # upstream layers shared, gold and artifacts rebuilt under the variant.
     rm -rf "${variant_root:?}"
-    mkdir -p "${variant_root}/gold" "${variant_root}/artifacts"
+    # metadata is the variant's own (see submit_everything_hpc.sh): through a link its
+    # gold build overwrote the primary run's gold_build_*.json record.
+    mkdir -p "${variant_root}/gold" "${variant_root}/artifacts" "${variant_root}/metadata"
     local d
-    for d in raw sample bronze silver harmonized metadata reference interim features; do
+    for d in raw sample bronze silver harmonized reference interim features; do
       ln -s "${DATA_ROOT_ABS}/${d}" "${variant_root}/${d}"
     done
   fi
@@ -264,6 +322,10 @@ sensitivity() {
 follow_up() {
   local analysis="$1" label="$2" i pids=() status=0
   for ((i = 0; i < FOLLOW_UP_SHARDS; i++)); do
+    if [[ "${PARALLEL}" -eq 0 ]]; then
+      run "${label}_shard_${i}" "${PY[@]}" scripts/run_validated_pattern_sensitivity.py --analysis "${analysis}" --env "${ENV_NAME}"       --gold-scope combined --organism "${O}" --shard-total "${FOLLOW_UP_SHARDS}" --shard-index "${i}" || return 1
+      continue
+    fi
     run "${label}_shard_${i}" "${PY[@]}" scripts/run_validated_pattern_sensitivity.py --analysis "${analysis}" --env "${ENV_NAME}"       --gold-scope combined --organism "${O}" --shard-total "${FOLLOW_UP_SHARDS}" --shard-index "${i}" &
     pids+=("$!")
   done

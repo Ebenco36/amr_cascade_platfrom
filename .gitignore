@@ -122,6 +122,9 @@ test_dataset/
 # Synthetic replica of data/raw and its end-to-end runs (scripts/create_raw_replica_dataset.py)
 test_replica/
 test_replica_availability_*/
+# Availability-sensitivity roots of the test_dataset end-to-end run (test_dataset_b1000)
+test_dataset_b1000_availability_*/
+test_replica_b1000_availability_*/
 test_dataset_large/
 playing.ipynb
 diagnostics/
@@ -135,3 +138,8 @@ data_availability_joint_sensitivity/
 data_availability_sensitivity/
 amr_cascade_hpc_outputs_20260906_093614/
 duplicate_keynote_shared.pdf
+
+test.ipynb
+testing.md
+tut.ipynb
+HPC_USAGE.md

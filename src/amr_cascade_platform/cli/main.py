@@ -19,6 +19,7 @@ from amr_cascade_platform.cli.commands.prevalence import register_prevalence_com
 from amr_cascade_platform.cli.commands.report import register_reporting_command
 from amr_cascade_platform.cli.commands.sample import register_sampling_command
 from amr_cascade_platform.cli.commands.train import register_training_command
+from amr_cascade_platform.cli.commands.threshold_comparison import register_threshold_comparison_command
 from amr_cascade_platform.core.config.config_loader import ConfigLoader
 from amr_cascade_platform.core.config.environment_resolver import EnvironmentResolver
 from amr_cascade_platform.core.exceptions.custom_exceptions import AmrCascadeError
@@ -59,6 +60,7 @@ def main() -> None:
     register_audit_command(subparsers, project_root, build_context)
     register_feature_build_command(subparsers, project_root, build_context)
     register_training_command(subparsers, project_root, build_context)
+    register_threshold_comparison_command(subparsers, project_root, build_context)
     register_sampling_command(subparsers, project_root, build_context)
     register_comorbidity_command(subparsers, project_root, build_context)
 

@@ -207,6 +207,10 @@ cascade_ready() {
   dir="$(scope_dir_path "${PROJECT_ROOT}/data/artifacts/cascade" "${scope}" "${site}" "${organism}")"
   [[ -f "${dir}/retained_edges.parquet" &&
      -f "${dir}/edge_report.parquet" &&
+     -f "${dir}/adjusted_model_shap_global.parquet" &&
+     -f "${dir}/adjusted_model_shap_values.parquet" &&
+     -f "${dir}/adjusted_model_shap_metadata.parquet" &&
+     -f "${dir}/adjusted_model_shap_domain.parquet" &&
      -f "${dir}/cascade_summary.json" ]]
 }
 

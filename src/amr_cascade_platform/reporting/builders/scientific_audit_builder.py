@@ -458,6 +458,29 @@ class ScientificAuditBuilder:
         threshold_invariant = bool(not threshold.empty and threshold["retained_edges_n"].nunique() == 1)
         sparse_pathways = bool(pathways.empty or len(pathways) <= 2)
         test_metrics = metrics.loc[metrics["split"] == "test"].copy() if not metrics.empty else pd.DataFrame()
+        protocol = modeling_summary.get("modeling_protocol") or {
+            "candidate_estimators": list(self._settings.modeling.estimators),
+            "primary_estimator": self._settings.modeling.primary_estimator,
+            "primary_feature_set": self._settings.modeling.primary_feature_set,
+            "primary_model_basis": "prespecified_before_sealed_test_evaluation",
+        }
+        primary_model = modeling_summary.get("primary_model") or {
+            "model_name": self._settings.modeling.primary_estimator,
+            "feature_set": self._settings.modeling.primary_feature_set,
+            "role": "prespecified_primary",
+            "available_in_run": bool(
+                not metrics.empty
+                and metrics["model_name"].eq(self._settings.modeling.primary_estimator).any()
+            ),
+        }
+        descriptive_leader = modeling_summary.get(
+            "test_performance_leader_descriptive"
+        ) or modeling_summary.get("best_test_model", {})
+        if descriptive_leader:
+            descriptive_leader = {
+                **descriptive_leader,
+                "role": "descriptive_only_not_model_selection",
+            }
 
         return {
             "scope": scope_dir,
@@ -487,7 +510,9 @@ class ScientificAuditBuilder:
                 "pathway_flow_sparse": sparse_pathways,
             },
             "modeling": {
-                "best_test_model": modeling_summary.get("best_test_model", {}),
+                "protocol": protocol,
+                "primary_model": primary_model,
+                "test_performance_leader_descriptive": descriptive_leader,
                 "test_metrics": test_metrics.to_dict(orient="records"),
             },
             "interpretation_boundary": {
@@ -560,7 +585,10 @@ class ScientificAuditBuilder:
                 f"- pathway_flow_sparse: {payload['sparsity_flags']['pathway_flow_sparse']}",
                 "",
                 "## Modeling",
-                f"- best_test_model: {json.dumps(payload['modeling']['best_test_model'])}",
+                f"- protocol: {json.dumps(payload['modeling']['protocol'])}",
+                f"- primary_model: {json.dumps(payload['modeling']['primary_model'])}",
+                "- test_performance_leader_descriptive: "
+                f"{json.dumps(payload['modeling']['test_performance_leader_descriptive'])}",
                 "- test_metrics:",
             ]
         )

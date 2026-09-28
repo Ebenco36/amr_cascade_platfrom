@@ -152,7 +152,7 @@ class PlotlyConsortPlotter:
                 ("Retained candidate pairs", f"N = {_fmt(s['retained'])} pairs", "Checked by permutation, bootstrap, and replication"),
             ],
             "exclusions": [
-                ["Not in the observed layer: other organisms,", "results other than R/S/I, ESBL confirmation", "assays, exact duplicate rows"],
+                ["Not in the observed layer: other organisms,", "results other than R/S/I, screening and", "confirmation assays, exact duplicate rows"],
                 ["Downstream antibiotic intrinsically resistant or", "unavailable at that site and era;", "intermediate upstream results"],
                 [f"Removed by the co-testing screen: {_fmt(s['screened_out'])} pairs", f"(both co-observation probabilities ≥ {r.cotesting_threshold:.2f},", f"≥ {r.min_total_support} rows in each direction)"],
                 [f"Below support thresholds: {_fmt(s['below_support'])} pairs", f"(n < {r.min_total_support}, n_R < {r.min_result_support}, or n_S < {r.min_result_support})", self._event_rule_line(s)],

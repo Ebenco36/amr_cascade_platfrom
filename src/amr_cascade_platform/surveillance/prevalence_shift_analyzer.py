@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 
@@ -15,6 +16,13 @@ from amr_cascade_platform.cascade.analyzers.cascade_validation_analyzer import C
 from amr_cascade_platform.core.config.config_models import Settings
 from amr_cascade_platform.core.utils.antibiotic_names import normalize_antibiotic_label
 from amr_cascade_platform.modeling.estimators.preprocessing import build_tabular_preprocessor
+
+logger = logging.getLogger(__name__)
+
+# Failures of the MNAR resistance model itself (one outcome class, a singular or
+# non-finite design) that make a drug not estimable. Any other exception is a
+# defect and is not caught.
+_EXPECTED_MNAR_FIT_ERRORS = (ValueError, np.linalg.LinAlgError, FloatingPointError)
 
 
 @dataclass(frozen=True)
@@ -76,7 +84,13 @@ class PrevalenceShiftAnalyzer:
         "cov_prior_procedure_90d",
         "cov_prior_procedure_available",
     )
+    # Three upstream states per drug: no validated upstream drug observed, observed
+    # only susceptible, or observed resistant. The resistant-trigger features alone
+    # code the first two identically, although "not observed" is not "observed
+    # susceptible"; the observed-trigger features separate them.
     _MNAR_CASCADE_FEATURES = (
+        "cascade_any_validated_trigger_observed",
+        "cascade_validated_trigger_count",
         "cascade_any_validated_positive_trigger",
         "cascade_validated_positive_trigger_count",
     )
@@ -164,6 +178,7 @@ class PrevalenceShiftAnalyzer:
         "mnar_shift_from_naive_pct",
         "mnar_unknown_expected_resistant_n",
         "mnar_status",
+        "mnar_failure_reason",
     )
     _MNAR_TIPPING_POINT_COLUMNS = (
         "organism",
@@ -483,16 +498,18 @@ class PrevalenceShiftAnalyzer:
         )
         if not cascade_features.empty:
             frame = frame.merge(cascade_features, on=pair_keys, how="left", validate="one_to_one")
-        for column, default in {
-            "cascade_any_validated_trigger_observed": 0,
-            "cascade_any_validated_positive_trigger": 0,
-            "cascade_validated_trigger_count": 0,
-            "cascade_validated_positive_trigger_count": 0,
-            "cascade_max_validated_trigger_er": math.nan,
-            "cascade_max_validated_trigger_adjusted_or": math.nan,
-        }.items():
+        # Episodes without a validated upstream result get no row from the merge:
+        # their indicators and counts are zero, not missing.
+        for column in (
+            "cascade_any_validated_trigger_observed",
+            "cascade_any_validated_positive_trigger",
+            "cascade_validated_trigger_count",
+            "cascade_validated_positive_trigger_count",
+        ):
+            frame[column] = frame[column].fillna(0).astype(int) if column in frame.columns else 0
+        for column in ("cascade_max_validated_trigger_er", "cascade_max_validated_trigger_adjusted_or"):
             if column not in frame.columns:
-                frame[column] = default
+                frame[column] = math.nan
         return frame
 
     def _build_cascade_features(
@@ -849,7 +866,13 @@ class PrevalenceShiftAnalyzer:
                 model.predict_proba(subset.loc[:, feature_columns])[:, 1],
                 index=subset.index,
             ).clip(1e-6, 1.0 - 1e-6)
-        except Exception:
+        except _EXPECTED_MNAR_FIT_ERRORS as error:
+            # Only the estimator's own failure modes (e.g. one outcome class after
+            # filtering, a singular or non-finite design) make a drug not estimable;
+            # anything else is a defect and propagates. The reason is kept with the
+            # rows (mnar_failure_reason) and logged.
+            reason = f"{type(error).__name__}: {error}"
+            logger.warning("MNAR resistance model not estimable for %s: %s", base.get("drug", "?"), reason)
             return [
                 {
                     **base,
@@ -860,6 +883,7 @@ class PrevalenceShiftAnalyzer:
                     "mnar_shift_from_naive_pct": math.nan,
                     "mnar_unknown_expected_resistant_n": math.nan,
                     "mnar_status": "model_failed",
+                    "mnar_failure_reason": reason,
                 }
                 for lambda_value in lambda_grid
             ]

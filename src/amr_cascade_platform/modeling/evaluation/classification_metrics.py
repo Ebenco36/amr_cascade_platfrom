@@ -72,8 +72,14 @@ class ClassificationMetrics:
         """
 
         threshold_table = self.threshold_sweep(y_true=y_true, y_probability=y_probability, thresholds=thresholds)
-        if threshold_table.empty or objective not in threshold_table.columns:
+        if threshold_table.empty:
             return default_threshold, threshold_table
+        if objective not in threshold_table.columns:
+            # A misspelt objective must not silently fall back to the default cutoff.
+            raise ValueError(
+                f"Unknown threshold_selection_metric {objective!r}; expected one of "
+                f"{sorted(column for column in threshold_table.columns if column != 'threshold')}."
+            )
         ranked = threshold_table.sort_values(
             by=[objective, "recall", "precision", "threshold"],
             ascending=[False, False, False, True],

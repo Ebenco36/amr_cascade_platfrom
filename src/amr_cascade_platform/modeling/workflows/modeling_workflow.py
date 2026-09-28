@@ -8,9 +8,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pandas as pd
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 from amr_cascade_platform.core.config.config_models import Settings
+from amr_cascade_platform.core.exceptions.custom_exceptions import DataDiscoveryError
 from amr_cascade_platform.core.logging.logger_factory import LoggerFactory
 from amr_cascade_platform.core.paths.path_manager import PathManager
 from amr_cascade_platform.core.utils.scopes import scoped_output_dir
@@ -31,6 +33,10 @@ from amr_cascade_platform.modeling.estimators.neural_network_estimator import Ne
 from amr_cascade_platform.modeling.estimators.random_forest_estimator import RandomForestEstimator
 from amr_cascade_platform.modeling.estimators.xgboost_estimator import XGBoostEstimator
 from amr_cascade_platform.modeling.evaluation.classification_metrics import ClassificationMetrics
+from amr_cascade_platform.modeling.thresholding import (
+    ThresholdSelectionResult,
+    build_threshold_selector,
+)
 
 
 @dataclass(frozen=True)
@@ -41,6 +47,7 @@ class ModelingRequest:
     ablation: bool = False
     organism: str | None = None
     split_strategy: str | None = None
+    threshold_selection_strategy: str | None = None
 
 
 @dataclass(frozen=True)
@@ -69,17 +76,33 @@ class ModelingWorkflow:
     def run(self, request: ModelingRequest) -> dict[str, Path]:
         if request.scope != "combined":
             raise ValueError("Current modeling workflow supports scope='combined' only.")
+        self._validate_modeling_protocol()
 
         selection = self._load_modeling_dataset(request)
         dataset = selection.dataset
         split_strategy_name = request.split_strategy or self._settings.modeling.default_split_strategy
+        threshold_selector = build_threshold_selector(
+            self._settings,
+            self._metrics,
+            strategy=request.threshold_selection_strategy,
+        )
         feature_sets = self._feature_set_selector.select(
             base_dataset=selection.base_dataset,
             full_dataset=dataset,
             requested_sets=request.feature_sets,
             ablation=request.ablation,
         )
-        run_label = self._run_label(request, feature_sets, split_strategy_name)
+        # Refuse a strategy/feature-set combination the strategy cannot use (grouped
+        # OOF with precomputed cascade features) before any model is fitted, rather
+        # than after the earlier feature sets of an ablation have trained.
+        for feature_set in feature_sets:
+            threshold_selector.validate_feature_columns(feature_set.feature_columns)
+        run_label = self._run_label(
+            request,
+            feature_sets,
+            split_strategy_name,
+            threshold_selector.name,
+        )
         use_parquet_site_loading = selection.persisted and split_strategy_name == "site"
         split = None
         if use_parquet_site_loading:
@@ -144,6 +167,7 @@ class ModelingWorkflow:
                 row_counts,
                 metrics_frame,
                 feature_sets,
+                threshold_selection_strategy=threshold_selector.name,
                 skip_reason=insufficient_reason,
             )
             outputs["summary"] = summary_path
@@ -158,6 +182,8 @@ class ModelingWorkflow:
                     threshold_recommendations,
                     summary_path,
                 )
+            else:
+                self._warn_if_restricted_run_is_unpublished(request, feature_sets)
             return outputs
 
         metrics_rows: list[dict[str, object]] = []
@@ -182,6 +208,12 @@ class ModelingWorkflow:
             outputs[f"{feature_set.name}__feature_dataset"] = feature_dataset_path
             for estimator in estimators:
                 self._logger.info("Training %s on feature set %s", estimator.name, feature_set.name)
+                estimator_factory = lambda estimator_name=estimator.name: self._build_estimator(
+                    estimator_name,
+                    feature_set.categorical_columns,
+                    feature_set.numeric_columns,
+                )
+                threshold_result: ThresholdSelectionResult | None = None
                 if use_parquet_site_loading:
                     train_frame = self._load_site_partition(
                         selection.source_path,
@@ -208,11 +240,24 @@ class ModelingWorkflow:
                         train_frame.loc[:, feature_set.feature_columns],
                         train_frame["target"],
                     )
-                    del train_frame
+                    if not threshold_selector.uses_external_validation:
+                        threshold_result = threshold_selector.select(
+                            predictions=pd.DataFrame(),
+                            train_frame=train_frame,
+                            feature_columns=feature_set.feature_columns,
+                            id_columns=tuple(dataset.id_columns),
+                            estimator_factory=estimator_factory,
+                            model_name=estimator.name,
+                            feature_set_name=feature_set.name,
+                        )
+                        del train_frame
+                    else:
+                        del train_frame
                     # Post-hoc isotonic calibration for tree estimators.
-                    # Fitted on validation data only — never on training data —
-                    # so there is no leakage into test-set evaluation.
-                    if hasattr(estimator, "calibrate"):
+                    # The legacy strategy uses validation-site calibration. The
+                    # grouped-OOF strategy leaves both external sites untouched
+                    # and therefore keeps tree probabilities uncalibrated.
+                    if hasattr(estimator, "calibrate") and threshold_selector.uses_external_validation:
                         val_frame = self._load_site_partition(
                             selection.source_path,
                             self._settings.modeling.validation_sites,
@@ -257,8 +302,22 @@ class ModelingWorkflow:
                         split.train.loc[:, feature_set.feature_columns],
                         split.train["target"],
                     )
+                    if not threshold_selector.uses_external_validation:
+                        threshold_result = threshold_selector.select(
+                            predictions=pd.DataFrame(),
+                            train_frame=split.train,
+                            feature_columns=feature_set.feature_columns,
+                            id_columns=tuple(dataset.id_columns),
+                            estimator_factory=estimator_factory,
+                            model_name=estimator.name,
+                            feature_set_name=feature_set.name,
+                        )
                     # Post-hoc isotonic calibration for tree estimators.
-                    if hasattr(estimator, "calibrate") and not split.validation.empty:
+                    if (
+                        hasattr(estimator, "calibrate")
+                        and not split.validation.empty
+                        and threshold_selector.uses_external_validation
+                    ):
                         estimator.calibrate(
                             split.validation.loc[:, feature_set.feature_columns],
                             split.validation["target"],
@@ -270,15 +329,60 @@ class ModelingWorkflow:
                             len(split.validation),
                         )
                     raw_predictions = self._predict_all_splits(estimator.name, estimator, split, dataset, feature_set)
-                selected_threshold, threshold_table = self._select_threshold(raw_predictions, estimator.name, feature_set.name)
+                if threshold_result is None:
+                    threshold_result = threshold_selector.select(
+                        predictions=raw_predictions,
+                        train_frame=pd.DataFrame(),
+                        feature_columns=feature_set.feature_columns,
+                        id_columns=tuple(dataset.id_columns),
+                        estimator_factory=estimator_factory,
+                        model_name=estimator.name,
+                        feature_set_name=feature_set.name,
+                    )
+                selected_threshold = threshold_result.selected_threshold
+                threshold_table = threshold_result.threshold_table
+                candidates = tuple(self._settings.evaluation.threshold_candidates)
+                at_grid_boundary = bool(candidates) and selected_threshold in (min(candidates), max(candidates))
+                if at_grid_boundary:
+                    self._logger.warning(
+                        "Selected threshold %.2f for %s/%s lies on the edge of the candidate grid: "
+                        "the %s optimum may lie outside it.",
+                        selected_threshold, feature_set.name, estimator.name,
+                        self._settings.evaluation.threshold_selection_metric,
+                    )
+                self._logger.info(
+                    "Selected threshold %.3f for %s/%s using %s %s",
+                    selected_threshold,
+                    feature_set.name,
+                    estimator.name,
+                    threshold_result.selection_source,
+                    self._settings.evaluation.threshold_selection_metric,
+                )
+                selection_prediction_path = (
+                    feature_dir / f"{estimator.name}_threshold_selection_predictions.parquet"
+                )
+                self._parquet_store.write_pandas(
+                    threshold_result.selection_predictions,
+                    selection_prediction_path,
+                )
+                outputs[
+                    f"{feature_set.name}__{estimator.name}_threshold_selection_predictions"
+                ] = selection_prediction_path
                 selected_threshold_rows.append(
                     {
                         "model_name": estimator.name,
                         "feature_set": feature_set.name,
-                        "selection_split": "validation",
+                        "selection_strategy": threshold_result.strategy,
+                        "selection_split": threshold_result.selection_source,
                         "selection_metric": self._settings.evaluation.threshold_selection_metric,
                         "selected_threshold": selected_threshold,
                         "default_threshold": self._settings.evaluation.probability_threshold,
+                        "selection_rows": threshold_result.selection_rows,
+                        "selection_groups": threshold_result.selection_groups,
+                        "group_column": threshold_result.group_column,
+                        "cv_folds": threshold_result.cv_folds,
+                        "fold_assignment": threshold_result.fold_assignment,
+                        "at_grid_boundary": at_grid_boundary,
                     }
                 )
                 threshold_recommendation_rows.extend(
@@ -287,6 +391,8 @@ class ModelingWorkflow:
                         feature_set_name=feature_set.name,
                         threshold_table=threshold_table,
                         selected_threshold=selected_threshold,
+                        selection_strategy=threshold_result.strategy,
+                        selection_source=threshold_result.selection_source,
                     )
                 )
                 predictions = self._apply_frozen_threshold(raw_predictions, selected_threshold)
@@ -299,10 +405,17 @@ class ModelingWorkflow:
                     predictions,
                     feature_set.name,
                     selected_threshold,
-                    threshold_table,
+                    threshold_result,
                 )
                 metrics_rows.extend(estimator_metrics)
                 threshold_rows.extend(estimator_thresholds)
+                selection_metrics, selection_thresholds = self._evaluate_threshold_selection(
+                    model_name=estimator.name,
+                    feature_set_name=feature_set.name,
+                    result=threshold_result,
+                )
+                metrics_rows.extend(selection_metrics)
+                threshold_rows.extend(selection_thresholds)
 
         metrics_frame = pd.DataFrame(metrics_rows)
         metrics_path = artifact_dir / "metrics.parquet"
@@ -331,7 +444,15 @@ class ModelingWorkflow:
             outputs["ablation_summary"] = ablation_path
 
         summary_path = artifact_dir / "modeling_summary.json"
-        self._write_summary(summary_path, outputs, dataset, row_counts, metrics_frame, feature_sets)
+        self._write_summary(
+            summary_path,
+            outputs,
+            dataset,
+            row_counts,
+            metrics_frame,
+            feature_sets,
+            threshold_selection_strategy=threshold_selector.name,
+        )
         outputs["summary"] = summary_path
 
         if self._should_publish_to_task_root(request, feature_sets):
@@ -344,6 +465,8 @@ class ModelingWorkflow:
                 threshold_recommendations,
                 summary_path,
             )
+        else:
+            self._warn_if_restricted_run_is_unpublished(request, feature_sets)
         return outputs
 
     @staticmethod
@@ -363,13 +486,18 @@ class ModelingWorkflow:
         request: ModelingRequest,
         feature_sets: tuple[ModelingFeatureSet, ...],
         split_strategy_name: str,
+        threshold_selection_strategy: str = "validation_holdout",
     ) -> str:
         feature_label = "__".join(feature_set.name for feature_set in feature_sets)
         if request.ablation or len(feature_sets) > 1:
-            return f"{split_strategy_name}__ablation__{feature_label}"
-        if request.estimators:
-            return f"{split_strategy_name}__{feature_label}__{'__'.join(request.estimators)}"
-        return f"{split_strategy_name}__all_models"
+            label = f"{split_strategy_name}__ablation__{feature_label}"
+        elif request.estimators:
+            label = f"{split_strategy_name}__{feature_label}__{'__'.join(request.estimators)}"
+        else:
+            label = f"{split_strategy_name}__all_models"
+        if threshold_selection_strategy != "validation_holdout":
+            label = f"{label}__threshold_{threshold_selection_strategy}"
+        return label
 
     def _resolve_split_strategy(self, split_strategy_name: str):
         if split_strategy_name == "site":
@@ -386,6 +514,17 @@ class ModelingWorkflow:
         )
         enriched_path = features_dir / self._settings.feature_build.combined_output_filename
         if not enriched_path.exists():
+            requested_sets = set(request.feature_sets or ())
+            requires_clinical_features = (
+                request.ablation
+                or request.feature_sets is None
+                or bool(requested_sets & {"clinical_no_cascade", "full"})
+            )
+            if requires_clinical_features:
+                raise DataDiscoveryError(
+                    "Clinical/full model training requires the enriched model-ready feature matrix: "
+                    f"{enriched_path}. Run feature construction before training."
+                )
             base_path = features_dir / "pair_testing_feature_matrix.parquet"
             bundle = self._feature_builder.build(scope=request.scope, organism=request.organism)
             if not base_path.exists():
@@ -394,10 +533,21 @@ class ModelingWorkflow:
             return ModelingDatasetSelection(dataset=bundle, base_dataset=bundle, source_path=base_path, persisted=True)
 
         layout = self._feature_builder.feature_layout()
-        schema_columns = tuple(pq.ParquetFile(enriched_path).schema_arrow.names)
+        schema_arrow = pq.ParquetFile(enriched_path).schema_arrow
+        schema_columns = tuple(schema_arrow.names)
         base_numeric = tuple(layout["numeric_columns"])
         metadata_path = features_dir / self._settings.feature_build.metadata_filename
-        clinical_numeric = self._feature_set_selector._clinical_numeric_columns(  # noqa: SLF001
+        # Feature metadata is scoped exactly like the model-ready matrix. Using the
+        # unscoped combined directory silently converted a requested "full" model
+        # into a context/cascade-only model for organism-stratified runs.
+        if not metadata_path.exists():
+            raise DataDiscoveryError(
+                "Model-ready clinical feature matrix exists without its scoped metadata: "
+                f"{metadata_path}. Rebuild features before training; refusing to silently "
+                "downgrade the full model to context/cascade-only features."
+            )
+        self._feature_set_selector = ModelingFeatureSetSelector(metadata_path)
+        clinical_columns = self._feature_set_selector._clinical_columns(  # noqa: SLF001
             type(
                 "SchemaOnlyBundle",
                 (),
@@ -406,6 +556,17 @@ class ModelingWorkflow:
                     "numeric_columns": base_numeric,
                 },
             )()
+        )
+        schema_types = {field.name: field.type for field in schema_arrow}
+        clinical_categorical = tuple(
+            column
+            for column in clinical_columns
+            if pa.types.is_string(schema_types[column])
+            or pa.types.is_large_string(schema_types[column])
+            or pa.types.is_dictionary(schema_types[column])
+        )
+        clinical_numeric = tuple(
+            column for column in clinical_columns if column not in clinical_categorical
         )
         base_bundle = type("ModelingBundle", (), {})()
         base_bundle.dataframe = pd.DataFrame(columns=list(schema_columns))
@@ -417,9 +578,11 @@ class ModelingWorkflow:
         full_bundle = type("ModelingBundle", (), {})()
         full_bundle.dataframe = pd.DataFrame(columns=list(schema_columns))
         full_bundle.feature_columns = layout["feature_columns"] + tuple(
-            column for column in clinical_numeric if column not in layout["feature_columns"]
+            column for column in clinical_columns if column not in layout["feature_columns"]
         )
-        full_bundle.categorical_columns = layout["categorical_columns"]
+        full_bundle.categorical_columns = layout["categorical_columns"] + tuple(
+            column for column in clinical_categorical if column not in layout["categorical_columns"]
+        )
         full_bundle.numeric_columns = base_numeric + tuple(
             column for column in clinical_numeric if column not in base_numeric
         )
@@ -435,25 +598,26 @@ class ModelingWorkflow:
         estimators: list[object] = []
         estimator_names = requested_estimators or self._settings.modeling.estimators
         for estimator_name in estimator_names:
-            if estimator_name == "logistic_regression":
-                estimators.append(
-                    LogisticRegressionEstimator(self._settings, categorical_columns, numeric_columns)
-                )
-            elif estimator_name == "random_forest":
-                estimators.append(
-                    RandomForestEstimator(self._settings, categorical_columns, numeric_columns)
-                )
-            elif estimator_name == "xgboost":
-                estimators.append(
-                    XGBoostEstimator(self._settings, categorical_columns, numeric_columns)
-                )
-            elif estimator_name == "neural_network":
-                estimators.append(
-                    NeuralNetworkEstimator(self._settings, categorical_columns, numeric_columns)
-                )
-            else:
-                raise ValueError(f"Unsupported estimator configured: {estimator_name}")
+            estimators.append(
+                self._build_estimator(estimator_name, categorical_columns, numeric_columns)
+            )
         return estimators
+
+    def _build_estimator(
+        self,
+        estimator_name: str,
+        categorical_columns: tuple[str, ...],
+        numeric_columns: tuple[str, ...],
+    ):
+        if estimator_name == "logistic_regression":
+            return LogisticRegressionEstimator(self._settings, categorical_columns, numeric_columns)
+        if estimator_name == "random_forest":
+            return RandomForestEstimator(self._settings, categorical_columns, numeric_columns)
+        if estimator_name == "xgboost":
+            return XGBoostEstimator(self._settings, categorical_columns, numeric_columns)
+        if estimator_name == "neural_network":
+            return NeuralNetworkEstimator(self._settings, categorical_columns, numeric_columns)
+        raise ValueError(f"Unsupported estimator configured: {estimator_name}")
 
     def _site_split_row_counts(self, source_path: Path) -> dict[str, int]:
         split_column = self._settings.modeling.split_column
@@ -569,31 +733,6 @@ class ModelingWorkflow:
             )
         return pd.concat(frames, ignore_index=True)
 
-    def _select_threshold(
-        self,
-        predictions: pd.DataFrame,
-        model_name: str,
-        feature_set_name: str,
-    ) -> tuple[float, pd.DataFrame]:
-        validation_predictions = predictions.loc[predictions["split"] == "validation"].copy()
-        if validation_predictions.empty:
-            return self._settings.evaluation.probability_threshold, pd.DataFrame()
-        selected_threshold, threshold_table = self._metrics.select_threshold(
-            y_true=validation_predictions["target"],
-            y_probability=validation_predictions["predicted_probability"],
-            objective=self._settings.evaluation.threshold_selection_metric,
-            thresholds=self._settings.evaluation.threshold_candidates,
-            default_threshold=self._settings.evaluation.probability_threshold,
-        )
-        self._logger.info(
-            "Selected threshold %.3f for %s/%s using validation %s",
-            selected_threshold,
-            feature_set_name,
-            model_name,
-            self._settings.evaluation.threshold_selection_metric,
-        )
-        return selected_threshold, threshold_table
-
     @staticmethod
     def _apply_frozen_threshold(predictions: pd.DataFrame, threshold: float) -> pd.DataFrame:
         result = predictions.copy()
@@ -607,7 +746,7 @@ class ModelingWorkflow:
         predictions: pd.DataFrame,
         feature_set_name: str,
         selected_threshold: float,
-        validation_threshold_table: pd.DataFrame,
+        threshold_result: ThresholdSelectionResult,
     ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
         metrics_rows: list[dict[str, object]] = []
         threshold_rows: list[dict[str, object]] = []
@@ -623,16 +762,17 @@ class ModelingWorkflow:
                     "feature_set": feature_set_name,
                     "split": split_name,
                     "decision_threshold": selected_threshold,
+                    "threshold_selection_strategy": threshold_result.strategy,
                     "threshold_selection_metric": self._settings.evaluation.threshold_selection_metric,
                     **metrics,
                 }
             )
-            # The validation threshold table is the only one used to choose the
-            # operating point. We still export per-split sweeps for diagnostic
-            # review, but the selected threshold is frozen before test scoring.
+            # Reuse the selection sweep only when this split actually selected
+            # the threshold. Otherwise export a diagnostic-only split sweep.
             threshold_table = (
-                validation_threshold_table.copy()
-                if split_name == "validation" and not validation_threshold_table.empty
+                threshold_result.threshold_table.copy()
+                if split_name == threshold_result.selection_source
+                and not threshold_result.threshold_table.empty
                 else self._metrics.threshold_sweep(
                     y_true=frame["target"],
                     y_probability=frame["predicted_probability"],
@@ -643,10 +783,46 @@ class ModelingWorkflow:
             threshold_table["feature_set"] = feature_set_name
             threshold_table["split"] = split_name
             threshold_table["selected_threshold"] = selected_threshold
+            threshold_table["threshold_selection_strategy"] = threshold_result.strategy
             threshold_table["threshold_selection_metric"] = self._settings.evaluation.threshold_selection_metric
             threshold_table["selected_for_decision"] = threshold_table["threshold"].eq(selected_threshold)
             threshold_rows.extend(threshold_table.to_dict(orient="records"))
         return metrics_rows, threshold_rows
+
+    def _evaluate_threshold_selection(
+        self,
+        *,
+        model_name: str,
+        feature_set_name: str,
+        result: ThresholdSelectionResult,
+    ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+        if result.selection_source != "training_oof" or result.selection_predictions.empty:
+            return [], []
+        selection_metrics = self._metrics.evaluate(
+            y_true=result.selection_predictions["target"],
+            y_probability=result.selection_predictions["predicted_probability"],
+            threshold=result.selected_threshold,
+        )
+        metrics_row = {
+            "model_name": model_name,
+            "feature_set": feature_set_name,
+            "split": result.selection_source,
+            "decision_threshold": result.selected_threshold,
+            "threshold_selection_strategy": result.strategy,
+            "threshold_selection_metric": self._settings.evaluation.threshold_selection_metric,
+            **selection_metrics,
+        }
+        threshold_table = result.threshold_table.copy()
+        threshold_table["model_name"] = model_name
+        threshold_table["feature_set"] = feature_set_name
+        threshold_table["split"] = result.selection_source
+        threshold_table["selected_threshold"] = result.selected_threshold
+        threshold_table["threshold_selection_strategy"] = result.strategy
+        threshold_table["threshold_selection_metric"] = self._settings.evaluation.threshold_selection_metric
+        threshold_table["selected_for_decision"] = threshold_table["threshold"].eq(
+            result.selected_threshold
+        )
+        return [metrics_row], threshold_table.to_dict(orient="records")
 
     def _build_threshold_recommendations(
         self,
@@ -654,6 +830,8 @@ class ModelingWorkflow:
         feature_set_name: str,
         threshold_table: pd.DataFrame,
         selected_threshold: float,
+        selection_strategy: str,
+        selection_source: str,
     ) -> list[dict[str, object]]:
         if threshold_table.empty:
             return []
@@ -670,6 +848,8 @@ class ModelingWorkflow:
                 {
                     "model_name": model_name,
                     "feature_set": feature_set_name,
+                    "selection_strategy": selection_strategy,
+                    "selection_split": selection_source,
                     "metric_name": metric_name,
                     "recommended_threshold": float(best["threshold"]),
                     "metric_value": float(best[metric_name]),
@@ -687,6 +867,7 @@ class ModelingWorkflow:
         row_counts: dict[str, int],
         metrics_frame: pd.DataFrame,
         feature_sets: tuple[ModelingFeatureSet, ...],
+        threshold_selection_strategy: str,
         skip_reason: str | None = None,
     ) -> None:
         payload = {
@@ -710,7 +891,18 @@ class ModelingWorkflow:
                 "validation": int(row_counts["validation"]),
                 "test": int(row_counts["test"]),
             },
-            "best_test_model": self._best_model(metrics_frame),
+            "threshold_selection": {
+                "strategy": threshold_selection_strategy,
+                "metric": self._settings.evaluation.threshold_selection_metric,
+                "candidate_thresholds": list(self._settings.evaluation.threshold_candidates),
+                "cv_folds": int(self._settings.evaluation.threshold_cv_folds),
+                "cv_group_column": self._settings.evaluation.threshold_cv_group_column,
+            },
+            "modeling_protocol": self._modeling_protocol(),
+            "primary_model": self._primary_model_summary(metrics_frame),
+            "test_performance_leader_descriptive": self._test_performance_leader(
+                metrics_frame
+            ),
             "outputs": {name: str(path_value) for name, path_value in outputs.items()},
         }
         if skip_reason is not None:
@@ -720,7 +912,8 @@ class ModelingWorkflow:
             json.dump(payload, handle, indent=2)
 
     @staticmethod
-    def _best_model(metrics_frame: pd.DataFrame) -> dict[str, object]:
+    def _test_performance_leader(metrics_frame: pd.DataFrame) -> dict[str, object]:
+        """Describe, but never select from, the sealed-test performance leader."""
         if metrics_frame.empty:
             return {}
         test_rows = metrics_frame[metrics_frame["split"] == "test"].copy()
@@ -731,18 +924,142 @@ class ModelingWorkflow:
         return {
             "model_name": best["model_name"],
             "feature_set": best.get("feature_set"),
+            "role": "descriptive_only_not_model_selection",
+            "ranking_rule": "pr_auc_then_roc_auc_then_f1",
             "pr_auc": float(best["pr_auc"]),
             "roc_auc": float(best["roc_auc"]) if pd.notna(best["roc_auc"]) else None,
             "f1": float(best["f1"]),
             "mcc": float(best["mcc"]) if "mcc" in best and pd.notna(best["mcc"]) else None,
         }
 
+    def _modeling_protocol(self) -> dict[str, object]:
+        primary = self._settings.modeling.primary_estimator
+        return {
+            "candidate_estimators": list(self._settings.modeling.estimators),
+            "primary_estimator": primary,
+            "primary_feature_set": self._settings.modeling.primary_feature_set,
+            "primary_model_basis": "prespecified_before_sealed_test_evaluation",
+            "benchmark_estimators": [
+                name for name in self._settings.modeling.estimators if name != primary
+            ],
+            "split_roles": {
+                "train": {
+                    "sites": list(self._settings.modeling.train_sites),
+                    "role": "model_fitting",
+                },
+                "validation": {
+                    "sites": list(self._settings.modeling.validation_sites),
+                    "role": "development_calibration_and_threshold_selection",
+                },
+                "test": {
+                    "sites": list(self._settings.modeling.test_sites),
+                    "role": "sealed_final_evaluation_not_model_or_threshold_selection",
+                },
+            },
+            "threshold_policy": (
+                "Each estimator receives its own development-data threshold. "
+                "The grouped-OOF versus validation-holdout comparison is a sensitivity "
+                "analysis for the prespecified primary estimator using leakage-safe "
+                "clinical_no_cascade features."
+            ),
+        }
+
+    def _primary_model_summary(self, metrics_frame: pd.DataFrame) -> dict[str, object]:
+        primary = self._settings.modeling.primary_estimator
+        feature_set = self._settings.modeling.primary_feature_set
+        summary: dict[str, object] = {
+            "model_name": primary,
+            "feature_set": feature_set,
+            "role": "prespecified_primary",
+            "available_in_run": False,
+            "metrics_by_split": {},
+        }
+        if metrics_frame.empty:
+            return summary
+        rows = metrics_frame.loc[
+            metrics_frame["model_name"].eq(primary)
+            & metrics_frame["feature_set"].eq(feature_set)
+        ]
+        if rows.empty:
+            return summary
+        metrics_by_split: dict[str, dict[str, object]] = {}
+        metric_columns = (
+            "decision_threshold",
+            "prevalence",
+            "roc_auc",
+            "pr_auc",
+            "brier_score",
+            "balanced_accuracy",
+            "precision",
+            "recall",
+            "f1",
+            "mcc",
+        )
+        for row in rows.itertuples(index=False):
+            values: dict[str, object] = {}
+            for column in metric_columns:
+                value = getattr(row, column, None)
+                values[column] = float(value) if pd.notna(value) else None
+            metrics_by_split[str(row.split)] = values
+        summary["available_in_run"] = True
+        summary["metrics_by_split"] = metrics_by_split
+        return summary
+
+    def _validate_modeling_protocol(self) -> None:
+        primary = self._settings.modeling.primary_estimator
+        if primary not in self._settings.modeling.estimators:
+            raise ValueError(
+                "modeling.primary_estimator must also appear in modeling.estimators: "
+                f"{primary!r} not in {self._settings.modeling.estimators!r}."
+            )
+        valid_feature_sets = {
+            "observed_only",
+            "cascade_aware",
+            "clinical_no_cascade",
+            "full",
+        }
+        if self._settings.modeling.primary_feature_set not in valid_feature_sets:
+            raise ValueError(
+                "Unsupported modeling.primary_feature_set: "
+                f"{self._settings.modeling.primary_feature_set!r}."
+            )
+
+    def _warn_if_restricted_run_is_unpublished(
+        self,
+        request: ModelingRequest,
+        feature_sets: tuple[ModelingFeatureSet, ...],
+    ) -> None:
+        """Say so when a full-feature-set run skips publishing because it trained only some estimators.
+
+        The task root holds the all-estimator results that reporting, the audits and
+        the supplementary prediction read; a subset run must not replace them, but
+        leaving them stale without a word made that easy to miss.
+        """
+        if (
+            request.estimators is not None
+            and not request.ablation
+            and len(feature_sets) == 1
+            and feature_sets[0].name == "full"
+        ):
+            self._logger.warning(
+                "Training restricted to %s: its results stay in the run directory, and the task-root "
+                "outputs that reporting, audits and the supplementary prediction read were not updated. "
+                "Train all configured estimators (%s) to refresh them.",
+                ", ".join(request.estimators),
+                ", ".join(self._settings.modeling.estimators),
+            )
+
     @staticmethod
     def _should_publish_to_task_root(
         request: ModelingRequest,
         feature_sets: tuple[ModelingFeatureSet, ...],
     ) -> bool:
-        return not request.ablation and len(feature_sets) == 1 and feature_sets[0].name == "full"
+        return (
+            request.estimators is None
+            and not request.ablation
+            and len(feature_sets) == 1
+            and feature_sets[0].name == "full"
+        )
 
     def _publish_standard_outputs(
         self,

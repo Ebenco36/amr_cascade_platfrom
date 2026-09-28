@@ -15,11 +15,14 @@ Options:
   --sites SITE1,SITE2               Default: armd,armd_ecuh,armd_utsw
   --organisms O1,O2                 Default: ESCHERICHIA COLI
   --python-bin PATH                 Default: ./.venv/bin/python
-  --estimators A,B                  Default: logistic_regression
+  --estimators A,B                  Default: all configured estimators (modeling.estimators).
+                                    Restricting them trains a subset whose outputs are not
+                                    published to the modeling task root that the report,
+                                    audits and supplementary prediction read.
   --resume-existing                 Reuse completed DAG artifacts. Default.
   --force-rerun-existing            Rerun enabled DAG stages.
   --skip-pipeline                   Run audits only.
-  --skip-training                   Do not require/run training.
+  --skip-training                   Do not require/run training or the threshold-strategy comparison.
   --min-primary-validated-edges N   Default: 1
   --min-table-count N               Default: 10
   --min-figure-count N              Minimum per PDF/PNG/SVG/HTML. Default: 1
@@ -32,7 +35,7 @@ ENV_NAME="mac"
 SITES="armd,armd_ecuh,armd_utsw"
 ORGANISMS="ESCHERICHIA COLI"
 PYTHON_BIN="${PYTHON_BIN:-${PROJECT_ROOT}/.venv/bin/python}"
-ESTIMATORS="logistic_regression"
+ESTIMATORS=""
 REUSE_FLAG="--resume-existing"
 RUN_PIPELINE=1
 RUN_TRAINING=1
@@ -109,7 +112,9 @@ if [[ "${RUN_PIPELINE}" -eq 1 ]]; then
     --python-bin "${PYTHON_BIN}"
   )
   if [[ "${RUN_TRAINING}" -eq 1 ]]; then
-    pipeline_cmd+=(--run-training --estimators "${ESTIMATORS}")
+    # As on the cluster, the threshold-strategy comparison is part of every full run.
+    pipeline_cmd+=(--run-training --run-threshold-comparison)
+    [[ -n "${ESTIMATORS}" ]] && pipeline_cmd+=(--estimators "${ESTIMATORS}")
   fi
   "${pipeline_cmd[@]}"
 fi

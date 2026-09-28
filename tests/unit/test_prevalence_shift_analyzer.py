@@ -116,6 +116,17 @@ def test_prevalence_shift_analyzer_computes_bounds_and_mnar_shift() -> None:
     assert "cov_vital_temp" not in row["mnar_feature_columns"]
     assert "cov_prior_abx_any_90d" in row["mnar_feature_columns"]
     assert "cascade_any_validated_positive_trigger" in row["mnar_feature_columns"]
+    assert "cascade_any_validated_trigger_observed" in row["mnar_feature_columns"]
+    assert "cascade_validated_trigger_count" in row["mnar_feature_columns"]
+    # The model sees three upstream states: ciprofloxacin resistant (e1),
+    # susceptible (e2) and never observed (e4). The last two differ only in
+    # whether the validated upstream drug was observed.
+    states = bundle.episode_level_data.set_index("pat_enc_csn_id_coded")[
+        ["cascade_any_validated_trigger_observed", "cascade_any_validated_positive_trigger"]
+    ]
+    assert states.loc["e1"].tolist() == [1, 1]
+    assert states.loc["e2"].tolist() == [1, 0]
+    assert states.loc["e4"].tolist() == [0, 0]
     assert math.isclose(float(row["cascade_eligible_n"]), 2, rel_tol=0.0, abs_tol=1e-12)
     assert math.isclose(float(row["independent_eligible_n"]), 2, rel_tol=0.0, abs_tol=1e-12)
     assert math.isclose(float(row["w_casc_eligible"]), 0.5, rel_tol=0.0, abs_tol=1e-12)
@@ -383,3 +394,28 @@ def test_prevalence_shift_only_reports_downstream_drugs_from_validated_escalatio
 
     assert set(bundle.pair_results["drug"]) == {"MEROPENEM"}
     assert set(bundle.episode_level_data["antibiotic"]) == {"MEROPENEM"}
+
+
+def test_mnar_estimator_failures_are_recorded_and_defects_propagate(monkeypatch) -> None:
+    import pytest
+
+    analyzer = PrevalenceShiftAnalyzer(_settings())
+    edges = pd.DataFrame(
+        [{"upstream_antibiotic": "CIPROFLOXACIN", "downstream_antibiotic": "MEROPENEM", "escalation_ratio": 2.5,
+          "adjusted_odds_ratio": 1.8, "validation_status": "robust"}]
+    )
+
+    def not_estimable(*_args, **_kwargs):
+        raise ValueError("This solver needs samples of at least 2 classes")
+
+    monkeypatch.setattr(analyzer, "_fit_mnar_resistance_model", not_estimable)
+    curves = analyzer.analyze(_eligible_pairs(), _tested_rows(), _covariates(), edges).mnar_curve_results
+    assert set(curves["mnar_status"]) == {"model_failed"}
+    assert curves["mnar_failure_reason"].str.startswith("ValueError: This solver needs").all()
+
+    def defect(*_args, **_kwargs):
+        raise KeyError("cov_not_built")
+
+    monkeypatch.setattr(analyzer, "_fit_mnar_resistance_model", defect)
+    with pytest.raises(KeyError):
+        analyzer.analyze(_eligible_pairs(), _tested_rows(), _covariates(), edges)

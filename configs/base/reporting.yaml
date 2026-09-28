@@ -35,6 +35,8 @@ reporting:
     - model_roc_curve
     - model_calibration
     - model_threshold_analysis
+    - threshold_strategy_comparison
+    - adjusted_model_shap
     - validation_diagnostics
     - er_landscape
     - mnar_prevalence_shift_distribution
@@ -50,6 +52,10 @@ reporting:
   plotly_template: plotly_white
   image_width: 1600
   image_height: 900
+  # Adjusted-model SHAP: pairs drawn as individual importance + beeswarm figures, ranked by the
+  # upstream result's mean |SHAP| (0 = every pair; ~540 pairs on the full cohort is ~4,300 files).
+  # Every pair stays in the SHAP tables and the cross-pair domain summary figure.
+  shap_max_pair_figures: 20
   # Eligible opportunities in site-era strata with fewer observed results than this
   # are counted as resting on thin availability evidence; 5 is the stricter
   # availability sensitivity's minimum (gold.eligibility.availability_min_observed).

@@ -54,6 +54,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         required=True,
         help="Total number of shards the edge set is split into.",
     )
+    p.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Recompute this shard even when one from the same gold data, configuration and code exists.",
+    )
     return p
 
 
@@ -95,6 +100,13 @@ def main() -> None:
     from amr_cascade_platform.cli.main import build_context
     from amr_cascade_platform.core.exceptions.custom_exceptions import DataDiscoveryError
     from amr_cascade_platform.core.logging.logger_factory import LoggerFactory
+    from amr_cascade_platform.core.utils.provenance import (
+        atomic_write_json,
+        atomic_write_parquet,
+        read_json,
+        sidecar_path,
+        validation_fingerprint,
+    )
     from amr_cascade_platform.core.utils.scopes import scoped_output_dir
     from amr_cascade_platform.infrastructure.storage.dataset_store import DatasetStore
 
@@ -133,9 +145,20 @@ def main() -> None:
     shard_dir = cascade_dir / "validation_shards"
     shard_path = shard_dir / f"shard_{shard_idx:04d}_of_{shard_total:04d}.parquet"
 
-    if shard_path.exists():
-        logger.info("Shard already exists, nothing to do: %s", shard_path)
-        return
+    # A shard is reused only when it came from the same gold data, configuration
+    # (seeds, iteration counts, thresholds) and code; anything else is recomputed.
+    expected, components = validation_fingerprint(project_root, settings, pair_path)
+    provenance_path = sidecar_path(shard_path)
+    if shard_path.exists() and not args.overwrite:
+        recorded = (read_json(provenance_path) or {}).get("fingerprint")
+        if recorded == expected:
+            logger.info("Shard already exists for these inputs, nothing to do: %s", shard_path)
+            return
+        logger.warning(
+            "Existing shard %s was produced from different gold data, configuration or code "
+            "(recorded fingerprint %s, expected %s); recomputing it.",
+            shard_path, recorded, expected,
+        )
 
     shard_dir.mkdir(parents=True, exist_ok=True)
 
@@ -180,7 +203,8 @@ def main() -> None:
             shard_idx, shard_total,
         )
 
-    shard_result.to_parquet(shard_path, index=False)
+    atomic_write_parquet(shard_result, shard_path)
+    atomic_write_json({"fingerprint": expected, **components, "rows": len(shard_result)}, provenance_path)
     logger.info("Shard %d/%d written: %s (%d rows)", shard_idx, shard_total, shard_path, len(shard_result))
 
 
