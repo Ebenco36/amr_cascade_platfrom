@@ -7,10 +7,17 @@ from amr_cascade_platform.core.config.config_loader import ConfigLoader
 from amr_cascade_platform.core.paths.path_manager import PathManager
 
 
-def test_guideline_concordance_analyzer_reports_structural_and_documented_matches() -> None:
+def test_guideline_concordance_analyzer_reports_structural_and_documented_matches(tmp_path: Path) -> None:
     project_root = Path(__file__).resolve().parents[2]
     settings = ConfigLoader(project_root).load("mac")
-    analyzer = GuidelineConcordanceAnalyzer(settings, PathManager(project_root, settings))
+    # The analyzer reads each site's laboratory rules file from the data folder,
+    # which is not in git; give it its own, so the test runs on a clean checkout.
+    rules_dir = tmp_path / settings.environment.data_root / "raw" / "armd"
+    rules_dir.mkdir(parents=True)
+    pd.DataFrame(
+        {"Organism": ["ACINETOBACTER"], "Antibiotic": ["CEFOTAXIME"], "Rule": ["SAME AS CEFTRIAXONE IF REPORTED"]}
+    ).to_csv(rules_dir / "implied_susceptibility_rules.csv", index=False)
+    analyzer = GuidelineConcordanceAnalyzer(settings, PathManager(tmp_path, settings))
 
     drug_pairs = pd.DataFrame(
         [
