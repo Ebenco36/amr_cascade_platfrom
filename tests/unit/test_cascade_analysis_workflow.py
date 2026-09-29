@@ -116,3 +116,57 @@ def test_precomputed_validation_check_still_rejects_mismatched_keys() -> None:
             retained_edges=retained_edges,
             validation_path=Path("validation_results.parquet"),
         )
+
+
+def _mandatory_outputs(directory: Path) -> dict[str, Path]:
+    outputs = {}
+    for name in CascadeAnalysisWorkflow._MANDATORY_OUTPUTS:
+        path = directory / f"{name}.parquet"
+        path.write_bytes(b"x")
+        outputs[name] = path
+    return outputs
+
+
+def test_precomputed_validation_without_provenance_is_refused_unless_allowed(tmp_path: Path) -> None:
+    path = tmp_path / "validation_results.parquet"
+    path.write_bytes(b"x")
+
+    with pytest.raises(ValueError, match="no provenance record"):
+        CascadeAnalysisWorkflow._check_validation_provenance(path, "abc", allow_unrecorded=False)
+    CascadeAnalysisWorkflow._check_validation_provenance(path, "abc", allow_unrecorded=True)
+
+
+def test_precomputed_validation_provenance_must_match_the_current_fingerprint(tmp_path: Path) -> None:
+    from amr_cascade_platform.core.utils.provenance import atomic_write_json, sidecar_path
+
+    path = tmp_path / "validation_results.parquet"
+    path.write_bytes(b"x")
+    atomic_write_json({"fingerprint": "abc"}, sidecar_path(path))
+
+    CascadeAnalysisWorkflow._check_validation_provenance(path, "abc", allow_unrecorded=False)
+    with pytest.raises(ValueError, match="different gold data"):
+        CascadeAnalysisWorkflow._check_validation_provenance(path, "xyz", allow_unrecorded=True)
+
+
+def test_success_inventory_covers_nested_outputs_and_the_provenance_record(tmp_path: Path) -> None:
+    output_dir = tmp_path / "cascade" / "combined"
+    (output_dir / "nested").mkdir(parents=True)
+    outputs = _mandatory_outputs(output_dir)
+    outputs["nested_table"] = output_dir / "nested" / "table.parquet"
+    outputs["cross_scope_comparison"] = tmp_path / "cascade" / "comparison.parquet"
+    outputs["row_count"] = 3
+
+    inventory = CascadeAnalysisWorkflow._success_inventory(outputs, output_dir)
+
+    assert inventory["nested_table"] == output_dir / "nested" / "table.parquet"
+    assert "cross_scope_comparison" not in inventory
+    assert "row_count" not in inventory
+    assert inventory["validation_results_provenance"] == output_dir / "validation_results.provenance.json"
+
+
+def test_success_inventory_refuses_a_run_without_its_mandatory_outputs(tmp_path: Path) -> None:
+    outputs = _mandatory_outputs(tmp_path)
+    del outputs["adjusted_model_shap_domain"]
+
+    with pytest.raises(RuntimeError, match="adjusted_model_shap_domain"):
+        CascadeAnalysisWorkflow._success_inventory(outputs, tmp_path)

@@ -21,6 +21,9 @@ from amr_cascade_platform.core.utils.antibiotic_names import (
         ("Ceftazidime + Clavulanic Acid", "CEFTAZIDIM/CLAVULANIC ACID", "PHENOTYPIC_TEST"),
         ("CEFEPIME/CLAVULANIC ACID", "CEFEPIM/CLAVULANIC ACID", "PHENOTYPIC_TEST"),
         ("Caspofungin acetate", "CASPOFUNGIN", "ANTIFUNGAL"),
+        ("Cephalexin/Cephalothin", "CEPHALEXIN/CEPHALOTHIN", "COMPOSITE_AST"),
+        ("Ethambutol", "ETHAMBUTOL", "ANTIMYCOBACTERIAL"),
+        ("Pyrazinamide", "PYRAZINAMIDE", "ANTIMYCOBACTERIAL"),
     ],
 )
 def test_screening_confirmatory_and_mechanism_assays_keep_their_own_identity(raw, canonical, entity):

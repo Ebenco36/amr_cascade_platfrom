@@ -61,6 +61,9 @@ class CascadeAnalysisRequest:
     site: str | None = None
     organism: str | None = None
     ignore_precomputed_validation: bool = False
+    # Accept a precomputed validation_results.parquet that has no provenance record
+    # (e.g. one written before provenance existed), on the edge-key check alone.
+    allow_unrecorded_validation: bool = False
 
 
 # drug_pair_episodes.parquet is an organism-level fan-out: every row belongs to one of a
@@ -87,6 +90,22 @@ _PAIR_TABLE_CATEGORICAL_COLUMNS = [
 
 class CascadeAnalysisWorkflow:
     """Run primary cascade analyses from gold datasets."""
+
+    # Outputs the DAG's readiness check and later stages read from a cascade
+    # directory: a run that did not write all of them is not complete.
+    _MANDATORY_OUTPUTS = (
+        "escalation_results",
+        "adjusted_results",
+        "retained_edges",
+        "validation_results",
+        "adjusted_model_shap_global",
+        "adjusted_model_shap_values",
+        "adjusted_model_shap_metadata",
+        "adjusted_model_shap_domain",
+        "summary",
+        "edge_report_path",
+        "node_path",
+    )
 
     def __init__(self, settings: Settings, path_manager: PathManager) -> None:
         self._settings = settings
@@ -169,15 +188,9 @@ class CascadeAnalysisWorkflow:
                 "Loading pre-computed validation results from shard merge: %s",
                 precomputed_validation_path,
             )
-            recorded = (read_json(sidecar_path(precomputed_validation_path)) or {}).get("fingerprint")
-            if recorded is not None and recorded != validation_id:
-                raise ValueError(
-                    f"{precomputed_validation_path} was produced from different gold data, configuration or "
-                    f"code (fingerprint {recorded}, expected {validation_id}); rerun the validation shards and "
-                    "merge (they recompute a mismatched shard) or move the directory aside (--fix-stale-cascade)."
-                )
-            if recorded is None:
-                logger.warning("%s has no provenance record; relying on the edge-key check only.", precomputed_validation_path)
+            self._check_validation_provenance(
+                precomputed_validation_path, validation_id, request.allow_unrecorded_validation
+            )
             validation_results = self._dataset_store.read_pandas(precomputed_validation_path)
             self._validate_precomputed_validation_matches_retained_edges(
                 validation_results=validation_results,
@@ -287,10 +300,56 @@ class CascadeAnalysisWorkflow:
         # when this marker exists (a killed job leaves none).
         outputs["success_marker"] = write_success_marker(
             output_dir,
-            {name: Path(path) for name, path in outputs.items() if isinstance(path, (str, Path)) and Path(path).parent == output_dir},
+            self._success_inventory(outputs, output_dir),
             run_provenance(self._paths.project_root, self._settings, {"drug_pair_episodes": pair_path}),
         )
         return outputs
+
+    @staticmethod
+    def _check_validation_provenance(path: Path, expected: str, allow_unrecorded: bool) -> None:
+        """Refuse a precomputed validation file that cannot be traced to the current inputs and code."""
+        recorded = (read_json(sidecar_path(path)) or {}).get("fingerprint")
+        if recorded is not None and recorded != expected:
+            raise ValueError(
+                f"{path} was produced from different gold data, configuration or "
+                f"code (fingerprint {recorded}, expected {expected}); rerun the validation shards and "
+                "merge (they recompute a mismatched shard) or move the directory aside (--fix-stale-cascade)."
+            )
+        if recorded is None:
+            # Every shard merge writes this record, so a file without one did not
+            # come from this pipeline's merge, and the edge-key check cannot tell
+            # whether it matches the current gold data, configuration or code.
+            if not allow_unrecorded:
+                raise ValueError(
+                    f"{path} has no provenance record ({sidecar_path(path).name}), so it cannot be matched "
+                    "to the current gold data, configuration and code. Rerun the validation shards and "
+                    "merge, recompute the validation in this job (--ignore-precomputed-validation), or "
+                    "accept the file on the edge-key check alone (--allow-unrecorded-validation)."
+                )
+            logger.warning(
+                "%s has no provenance record; accepted on the edge-key check only (--allow-unrecorded-validation).",
+                path,
+            )
+
+    @classmethod
+    def _success_inventory(cls, outputs: dict[str, object], output_dir: Path) -> dict[str, Path]:
+        """The files the completion marker certifies: every output under the directory, at any depth.
+
+        An output written outside the directory belongs to no single scope and is
+        left out; the validation provenance record is added. A run that did not
+        write every mandatory output is refused.
+        """
+        root = Path(output_dir).resolve()
+        inventory = {
+            name: Path(path)
+            for name, path in outputs.items()
+            if isinstance(path, (str, Path)) and Path(path).resolve().is_relative_to(root)
+        }
+        absent = sorted(name for name in cls._MANDATORY_OUTPUTS if name not in inventory)
+        if absent:
+            raise RuntimeError(f"Refusing to mark {output_dir} complete: mandatory outputs not written {absent}")
+        inventory["validation_results_provenance"] = sidecar_path(inventory["validation_results"])
+        return inventory
 
     def _resolve_gold_dir(self, request: CascadeAnalysisRequest) -> Path:
         if request.gold_scope not in {"combined", "site"} or (request.gold_scope == "site" and not request.site):

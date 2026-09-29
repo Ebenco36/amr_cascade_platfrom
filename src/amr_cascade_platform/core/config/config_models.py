@@ -24,7 +24,6 @@ class PlatformConfig:
 @dataclass(frozen=True)
 class OrganismConfig:
     priority_organisms: tuple[str, ...]
-    min_episode_threshold: int
 
 
 @dataclass(frozen=True)
@@ -139,9 +138,9 @@ class GoldConfig:
     excluded_assay_labels: tuple[str, ...]
     eligibility: EligibilityConfig
     # AST entity types (core.utils.antibiotic_names.classify_ast_entity) kept in the
-    # observed layer; screening, confirmatory and mechanism tests and non-antibacterial
-    # agents are removed before eligibility and pair construction.
-    primary_ast_entity_types: tuple[str, ...] = ("ANTIBACTERIAL", "COMPOSITE_AST")
+    # observed layer; screening, confirmatory and mechanism tests, composite labels and
+    # non-antibacterial agents are removed before eligibility and pair construction.
+    primary_ast_entity_types: tuple[str, ...] = ("ANTIBACTERIAL",)
 
 
 @dataclass(frozen=True)
@@ -319,6 +318,9 @@ class PrevalenceConfig:
     delta_curve_points: int
     mnar_lambda_grid: tuple[float, ...]
     decision_thresholds: tuple[float, ...]
+    # The deprecated empirical-delta sensitivity (superseded by the MNAR lambda
+    # curves). Off: no legacy delta curves are computed or written.
+    compute_legacy_delta: bool = False
 
 
 @dataclass(frozen=True)

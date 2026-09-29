@@ -14,15 +14,18 @@ from sklearn.preprocessing import MaxAbsScaler
 
 from amr_cascade_platform.cascade.analyzers.cascade_validation_analyzer import CascadeValidationAnalyzer
 from amr_cascade_platform.core.config.config_models import Settings
+from amr_cascade_platform.core.exceptions.custom_exceptions import ModelNotEstimableError
 from amr_cascade_platform.core.utils.antibiotic_names import normalize_antibiotic_label
 from amr_cascade_platform.modeling.estimators.preprocessing import build_tabular_preprocessor
 
 logger = logging.getLogger(__name__)
 
-# Failures of the MNAR resistance model itself (one outcome class, a singular or
-# non-finite design) that make a drug not estimable. Any other exception is a
-# defect and is not caught.
-_EXPECTED_MNAR_FIT_ERRORS = (ValueError, np.linalg.LinAlgError, FloatingPointError)
+# Failures that make the MNAR resistance model not estimable for a drug: data the
+# fit cannot use (ModelNotEstimableError, raised by _fit_mnar_resistance_model's
+# checks) or a numerically singular or non-finite fit. Anything else -- including a
+# ValueError from a malformed or mismatched feature matrix -- is a defect and is
+# not caught.
+_EXPECTED_MNAR_FIT_ERRORS = (ModelNotEstimableError, np.linalg.LinAlgError, FloatingPointError)
 
 
 @dataclass(frozen=True)
@@ -260,7 +263,8 @@ class PrevalenceShiftAnalyzer:
             drug_mnar_rows = self._build_mnar_curve_rows(subset.copy(), summary, covariate_columns)
             self._attach_mnar_reference(summary, drug_mnar_rows)
             pair_rows.append(summary)
-            curve_rows.extend(self._build_delta_curve_rows(summary))
+            if self._settings.prevalence.compute_legacy_delta:
+                curve_rows.extend(self._build_delta_curve_rows(summary))
             mnar_rows.extend(drug_mnar_rows)
 
         pair_results = pd.DataFrame(pair_rows, columns=self._PAIR_RESULT_COLUMNS)
@@ -647,18 +651,24 @@ class PrevalenceShiftAnalyzer:
             rho_independent_vs_cascade = float(independent_prevalence / cascade_prevalence)
 
         delta_max = float(1.0 / naive_prevalence) if naive_prevalence > 0 else math.nan
-        legacy_delta_empirical = self._project_delta_to_admissible(rho_independent_vs_cascade, delta_max)
-        legacy_shifted_prevalence_empirical = self._shifted_prevalence(
-            naive_prevalence=naive_prevalence,
-            unknown_binary_outcome_n=unknown_binary_outcome_n,
-            eligible_n=eligible_n,
-            delta=legacy_delta_empirical,
-        )
-        legacy_delta_prevalence = (
-            float(naive_prevalence - legacy_shifted_prevalence_empirical)
-            if pd.notna(naive_prevalence) and pd.notna(legacy_shifted_prevalence_empirical)
-            else math.nan
-        )
+        # The deprecated empirical-delta method (superseded by the MNAR lambda
+        # curves) runs only when prevalence.compute_legacy_delta is set; its fields
+        # never reach pair_results (_PAIR_RESULT_COLUMNS) and feed only the legacy
+        # delta curves.
+        legacy_delta_empirical = legacy_shifted_prevalence_empirical = legacy_delta_prevalence = math.nan
+        if self._settings.prevalence.compute_legacy_delta:
+            legacy_delta_empirical = self._project_delta_to_admissible(rho_independent_vs_cascade, delta_max)
+            legacy_shifted_prevalence_empirical = self._shifted_prevalence(
+                naive_prevalence=naive_prevalence,
+                unknown_binary_outcome_n=unknown_binary_outcome_n,
+                eligible_n=eligible_n,
+                delta=legacy_delta_empirical,
+            )
+            legacy_delta_prevalence = (
+                float(naive_prevalence - legacy_shifted_prevalence_empirical)
+                if pd.notna(naive_prevalence) and pd.notna(legacy_shifted_prevalence_empirical)
+                else math.nan
+            )
 
         selection_all = self._selection_summary(
             group_a=subset.loc[observed_mask],
@@ -867,10 +877,10 @@ class PrevalenceShiftAnalyzer:
                 index=subset.index,
             ).clip(1e-6, 1.0 - 1e-6)
         except _EXPECTED_MNAR_FIT_ERRORS as error:
-            # Only the estimator's own failure modes (e.g. one outcome class after
-            # filtering, a singular or non-finite design) make a drug not estimable;
-            # anything else is a defect and propagates. The reason is kept with the
-            # rows (mnar_failure_reason) and logged.
+            # Only data the fit cannot use or a numerically failed fit make a drug
+            # not estimable; anything else is a defect and propagates. The reason is
+            # kept with the rows (mnar_failure_reason), logged, and the drug listed in
+            # the prevalence summary (mnar_model_failed_drugs).
             reason = f"{type(error).__name__}: {error}"
             logger.warning("MNAR resistance model not estimable for %s: %s", base.get("drug", "?"), reason)
             return [
@@ -1164,6 +1174,16 @@ class PrevalenceShiftAnalyzer:
         training: pd.DataFrame,
         feature_columns: tuple[str, ...],
     ) -> Pipeline:
+        # Conditions under which the model cannot be estimated from these data. The
+        # caller screens them too; they are checked here so the estimator never sees
+        # them and any ValueError it raises is left to propagate as a defect.
+        if not feature_columns:
+            raise ModelNotEstimableError("no MNAR feature columns")
+        outcome = training["is_resistant"].astype(int)
+        if outcome.nunique() < 2:
+            raise ModelNotEstimableError(
+                f"binary-evaluable rows ({len(training)}) do not contain both resistant and susceptible outcomes"
+            )
         categorical_columns = tuple(
             column for column in feature_columns if not pd.api.types.is_numeric_dtype(training[column])
         )
@@ -1187,7 +1207,7 @@ class PrevalenceShiftAnalyzer:
                 ("model", model),
             ]
         )
-        pipeline.fit(training.loc[:, feature_columns], training["is_resistant"].astype(int))
+        pipeline.fit(training.loc[:, feature_columns], outcome)
         return pipeline
 
     @staticmethod

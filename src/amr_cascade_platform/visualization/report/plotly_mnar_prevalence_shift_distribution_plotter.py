@@ -1,4 +1,4 @@
-"""MNAR prevalence-shift distribution — diverging waterfall and scatter."""
+"""Prevalence shift against the MNAR no-tilt reference model (lambda = 0) — waterfall and scatter."""
 
 from __future__ import annotations
 
@@ -32,15 +32,17 @@ def _empty(template: str, w: int, h: int, msg: str) -> go.Figure:
 
 class PlotlyMNARPrevalenceShiftDistributionPlotter:
     """
-    Two-panel MNAR prevalence-shift figure.
+    Two-panel prevalence-shift figure against the MNAR model's no-tilt reference
+    (lambda = 0): the observed-data resistance model with no MNAR tilt, which is a
+    reference point of the sensitivity analysis, not an identified MNAR prevalence.
 
     Panel A — Diverging waterfall (sorted by absolute shift)
         Each bar = one organism-antibiotic pair.
-        Bar length = naive prevalence minus MNAR lambda-zero prevalence.
+        Bar length = naive prevalence minus reference-model (lambda = 0) prevalence.
         Red = naive rate overstates resistance.
         Blue = naive rate understates resistance.
 
-    Panel B — Naive prevalence vs. MNAR lambda-zero prevalence scatter
+    Panel B — Naive prevalence vs. reference-model (lambda = 0) prevalence scatter
         Each point = one pair.
         Points above the diagonal: naive > shifted (overestimate).
         Points below the diagonal: naive < shifted (underestimate).
@@ -61,7 +63,7 @@ class PlotlyMNARPrevalenceShiftDistributionPlotter:
         required = {"naive_prevalence_pct", "mnar_lambda0_prevalence_pct", "mnar_lambda0_shift_from_naive_pct"}
         if prevalence_shift.empty or not required.issubset(prevalence_shift.columns):
             fig = _empty(self._template, self._width, self._height,
-                         "MNAR prevalence-shift distribution unavailable — required columns are missing")
+                         "Reference-model prevalence-shift distribution unavailable — required columns are missing")
             return self._exporter.write(fig, output_stem, formats)
 
         df = prevalence_shift.copy()
@@ -72,7 +74,7 @@ class PlotlyMNARPrevalenceShiftDistributionPlotter:
         df = df[df["shift_pct"].notna() & df["naive_prevalence_pct"].notna() & df["mnar_lambda0_prevalence_pct"].notna()].copy()
         if df.empty:
             fig = _empty(self._template, self._width, self._height,
-                         "No prevalence shift results with valid MNAR shift values")
+                         "No prevalence shift results with valid reference-model shift values")
             return self._exporter.write(fig, output_stem, formats)
 
         # Pair label
@@ -108,8 +110,8 @@ class PlotlyMNARPrevalenceShiftDistributionPlotter:
         fig = make_subplots(
             rows=1, cols=2,
             subplot_titles=(
-                "<b>A</b>   Naive − MNAR Prevalence Shift per Drug",
-                "<b>B</b>   Naive vs. MNAR Lambda-Zero Prevalence",
+                "<b>A</b>   Naive − Reference-Model Prevalence per Drug",
+                "<b>B</b>   Naive vs. Reference-Model (λ=0) Prevalence",
             ),
             column_widths=[0.55, 0.45],
             horizontal_spacing=0.12,
@@ -129,7 +131,7 @@ class PlotlyMNARPrevalenceShiftDistributionPlotter:
             height=max(self._height, 80 + 22 * len(df)),
             title=dict(
                 text=(
-                    "MNAR Prevalence Shift Under Selective AST Observation"
+                    "Prevalence Shift Against the No-Tilt Reference Model (λ=0)"
                     + (f" ({organism_title})" if organism_title else "")
                 ),
                 x=0.5,
@@ -175,7 +177,7 @@ class PlotlyMNARPrevalenceShiftDistributionPlotter:
                     "<b>%{customdata[0]}</b><br>"
                     "Shift: %{customdata[1]:+.2f} pp<br>"
                     "Naive prevalence: %{customdata[2]:.1f}%<br>"
-                    "MNAR prevalence (lambda=0): %{customdata[3]:.1f}%<extra></extra>"
+                    "Reference-model prevalence (λ=0): %{customdata[3]:.1f}%<extra></extra>"
                 ),
                 showlegend=False,
             ),
@@ -198,7 +200,7 @@ class PlotlyMNARPrevalenceShiftDistributionPlotter:
                              marker_color=_UNDER_COLOR, name="Naive understates resistance",
                              showlegend=True), row=1, col=1)
 
-        fig.update_xaxes(title_text="Naive − MNAR prevalence (percentage points)", zeroline=False, row=1, col=1)
+        fig.update_xaxes(title_text="Naive − reference-model prevalence (percentage points)", zeroline=False, row=1, col=1)
         fig.update_yaxes(title_text="", tickfont=dict(size=10), row=1, col=1)
 
     # ── Panel B ───────────────────────────────────────────────────────────
@@ -210,7 +212,7 @@ class PlotlyMNARPrevalenceShiftDistributionPlotter:
             1.0,
         ) * 1.10
 
-        # Diagonal — naive = MNAR lambda-zero prevalence.
+        # Diagonal — naive = reference-model (lambda = 0) prevalence.
         fig.add_trace(
             go.Scatter(
                 x=[0, ax_max], y=[0, ax_max],
@@ -250,7 +252,7 @@ class PlotlyMNARPrevalenceShiftDistributionPlotter:
                     hovertemplate=(
                         "<b>%{customdata[0]}</b><br>"
                         "Naive: %{customdata[1]:.1f}%<br>"
-                        "MNAR lambda=0: %{customdata[2]:.1f}%<br>"
+                        "Reference model (λ=0): %{customdata[2]:.1f}%<br>"
                         "Shift: %{customdata[3]:+.2f} pp<extra></extra>"
                     ),
                 ),
@@ -263,7 +265,7 @@ class PlotlyMNARPrevalenceShiftDistributionPlotter:
             row=1, col=2,
         )
         fig.update_yaxes(
-            title_text="MNAR prevalence at lambda=0 (%)",
+            title_text="Reference-model prevalence, λ=0 (%)",
             range=[0, ax_max],
             row=1, col=2,
         )
@@ -281,7 +283,7 @@ class PlotlyMNARPrevalenceShiftDistributionPlotter:
             dpi=300,
             gridspec_kw={"width_ratios": [1.15, 0.85], "wspace": 0.34},
         )
-        title = "MNAR Prevalence Shift Under Selective AST Observation"
+        title = "Prevalence Shift Against the No-Tilt Reference Model (λ=0)"
         if organism_title:
             title += f" ({organism_title})"
         fig.suptitle(title, fontsize=15, fontweight="bold", y=0.985)
@@ -292,7 +294,7 @@ class PlotlyMNARPrevalenceShiftDistributionPlotter:
         ax_bar.axvline(0, color="#475467", linewidth=1.2)
         ax_bar.set_yticks(y_pos)
         ax_bar.set_yticklabels(df["pair_label"], fontsize=8)
-        ax_bar.set_xlabel("Naive minus MNAR prevalence (percentage points)")
+        ax_bar.set_xlabel("Naive minus reference-model prevalence (percentage points)")
         ax_bar.set_title("A. Shift per drug", loc="left", fontsize=11, fontweight="bold")
         ax_bar.grid(True, axis="x", color=_GRID, linewidth=0.7)
 
@@ -329,8 +331,8 @@ class PlotlyMNARPrevalenceShiftDistributionPlotter:
         ax_scatter.set_xlim(0, ax_max)
         ax_scatter.set_ylim(0, ax_max)
         ax_scatter.set_xlabel("Naive prevalence (%)")
-        ax_scatter.set_ylabel("MNAR prevalence at lambda=0 (%)")
-        ax_scatter.set_title("B. Naive vs MNAR estimate", loc="left", fontsize=11, fontweight="bold")
+        ax_scatter.set_ylabel("Reference-model prevalence, λ=0 (%)")
+        ax_scatter.set_title("B. Naive vs reference-model estimate", loc="left", fontsize=11, fontweight="bold")
         ax_scatter.grid(True, color=_GRID, linewidth=0.7)
         ax_scatter.legend(frameon=False, fontsize=8, loc="lower right")
 

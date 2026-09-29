@@ -1300,9 +1300,9 @@ class ManuscriptTableBuilder:
             "mean_abs_smd_cascade_vs_untested": "Mean abs SMD (cascade evaluable vs unobserved)",
             "flagged_covariate_n_tested_vs_untested": "Flagged covariates (observed vs unobserved)",
             "denominator_inflation_effect_pct": "Denominator inflation effect",
-            "mnar_lambda0_prevalence_pct": "MNAR prevalence (lambda=0)",
-            "mnar_lambda0_shift_from_naive_pct": "MNAR shift (percentage points)",
-            "mnar_status_lambda0": "MNAR status (lambda=0)",
+            "mnar_lambda0_prevalence_pct": "Reference-model prevalence (lambda=0)",
+            "mnar_lambda0_shift_from_naive_pct": "Reference-model shift (percentage points)",
+            "mnar_status_lambda0": "Reference-model status (lambda=0)",
             "mnar_feature_count": "MNAR feature count",
             "mnar_feature_columns": "MNAR feature columns",
             "rho_independent_vs_cascade": "rho no-trigger/cascade",
@@ -1326,15 +1326,15 @@ class ManuscriptTableBuilder:
             "Mean abs SMD (observed vs unobserved)",
             "Mean abs SMD (no-trigger evaluable vs unobserved)",
             "Mean abs SMD (cascade evaluable vs unobserved)",
-            "MNAR shift (percentage points)",
+            "Reference-model shift (percentage points)",
             "rho no-trigger/cascade",
             "Legacy empirical delta",
             "Legacy delta shift (percentage points)",
         ):
             if column in table.columns:
                 table[column] = table[column].map(lambda value: f"{value:.2f}" if pd.notna(value) else "NA")
-        if "MNAR prevalence (lambda=0)" in table.columns:
-            table["MNAR prevalence (lambda=0)"] = table["MNAR prevalence (lambda=0)"].map(
+        if "Reference-model prevalence (lambda=0)" in table.columns:
+            table["Reference-model prevalence (lambda=0)"] = table["Reference-model prevalence (lambda=0)"].map(
                 lambda value: f"{value:.1f}%" if pd.notna(value) else "NA"
             )
         if "Denominator inflation effect" in table.columns:

@@ -9,6 +9,7 @@ comparison table the original monolithic eskape workflow produced in one run.
 from __future__ import annotations
 
 import argparse
+import glob
 from pathlib import Path
 
 import pandas as pd
@@ -19,13 +20,13 @@ def main() -> None:
     parser.add_argument(
         "--input-glob",
         required=True,
-        help="Glob pattern (relative to the current directory) matching per-target eskape_cascade_comparison.csv files.",
+        help="Glob pattern (absolute, or relative to the current directory) matching per-target eskape_cascade_comparison.csv files.",
     )
     parser.add_argument("--output-csv", required=True)
     parser.add_argument("--output-json", required=True)
     args = parser.parse_args()
 
-    paths = sorted(Path(".").glob(args.input_glob))
+    paths = sorted(Path(path) for path in glob.glob(args.input_glob))
     if not paths:
         raise SystemExit(f"No files matched glob: {args.input_glob}")
 

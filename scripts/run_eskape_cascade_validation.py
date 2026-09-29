@@ -53,13 +53,13 @@ def _build_parser(project_root: Path) -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--armd-output-root",
-        default=str(project_root / "data" / "artifacts" / "eskape_validation" / "armd"),
-        help="Output root for ARMD ESKAPE artifacts.",
+        default=None,
+        help="Output root for ARMD ESKAPE artifacts (default: <env data_root>/artifacts/eskape_validation/armd).",
     )
     parser.add_argument(
         "--summary-dir",
-        default=str(project_root / "outputs" / "tables" / "eskape"),
-        help="Directory for cross-dataset summary tables.",
+        default=None,
+        help="Directory for cross-dataset summary tables (default: <env reporting.tables_dir>/eskape).",
     )
     parser.add_argument(
         "--allow-missing-targets",
@@ -84,8 +84,15 @@ def main() -> None:
         require_path_exists,
     )
     from amr_cascade_platform.core.utils.eskape import resolve_eskape_targets
+    from amr_cascade_platform.core.utils.provenance import run_provenance, write_success_marker
 
     settings, path_manager, _ = build_context(project_root, args.env)
+    # Default folders follow the selected environment, so a test environment's run
+    # never writes into (or is taken for) the production data and tables.
+    if args.armd_output_root is None:
+        args.armd_output_root = str(path_manager.paths.artifacts / "eskape_validation" / "armd")
+    if args.summary_dir is None:
+        args.summary_dir = str(project_root / settings.reporting.tables_dir / "eskape")
     targets = resolve_eskape_targets(args.targets)
 
     summary_rows: list[dict[str, object]] = []
@@ -105,6 +112,7 @@ def main() -> None:
             allow_missing=args.allow_missing_targets,
         )
 
+    target_outputs: list[dict[str, Path]] = []
     if not args.skip_armd:
         armd_runner = ArmdEskapeCascadeRunner(settings, path_manager)
         for target in targets:
@@ -135,6 +143,7 @@ def main() -> None:
                     output_root=args.armd_output_root,
                 )
             )
+            target_outputs.append(outputs)
             summary = pd.read_csv(outputs["existence_summary_csv"])
             summary_rows.extend(summary.to_dict(orient="records"))
 
@@ -172,6 +181,15 @@ def main() -> None:
     json_path = summary_dir / "eskape_cascade_comparison.json"
     comparison.to_csv(csv_path, index=False)
     json_path.write_text(comparison.to_json(orient="records", indent=2), encoding="utf-8")
+
+    # Written last, per target: the DAGs reuse a target's results only when this
+    # marker lists every artifact of the run and the summary built from it
+    # (the runner withdraws it at the start of a run).
+    provenance = run_provenance(project_root, settings, {"harmonized_cohort": armd_cohort_path}) if not args.skip_armd else {}
+    for outputs in target_outputs:
+        files = {name: Path(path) for name, path in outputs.items()}
+        files.update({"summary_csv": csv_path, "summary_json": json_path})
+        write_success_marker(Path(outputs["existence_summary_csv"]).parent, files, provenance)
 
     payload = {
         "env": args.env,

@@ -86,7 +86,6 @@ class ConfigLoader:
                 ),
                 organisms=OrganismConfig(
                     priority_organisms=tuple(raw["organisms"]["priority_organisms"]),
-                    min_episode_threshold=raw["organisms"]["min_episode_threshold"],
                 ),
                 sampling=SamplingConfig(**raw["preprocessing"]["sampling"]),
                 comorbidity=ComorbidityConfig(
@@ -149,7 +148,7 @@ class ConfigLoader:
                     excluded_assay_labels=tuple(raw["gold"]["excluded_assay_labels"]),
                     eligibility=EligibilityConfig(**raw["gold"]["eligibility"]),
                     primary_ast_entity_types=tuple(
-                        raw["gold"].get("primary_ast_entity_types", ("ANTIBACTERIAL", "COMPOSITE_AST"))
+                        raw["gold"].get("primary_ast_entity_types", ("ANTIBACTERIAL",))
                     ),
                 ),
                 cascade=CascadeConfig(
@@ -292,6 +291,7 @@ class ConfigLoader:
                     delta_curve_points=raw["prevalence"]["delta_curve_points"],
                     mnar_lambda_grid=tuple(raw["prevalence"].get("mnar_lambda_grid", [-2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0])),
                     decision_thresholds=tuple(raw["prevalence"].get("decision_thresholds", [0.10, 0.20, 0.30])),
+                    compute_legacy_delta=bool(raw["prevalence"].get("compute_legacy_delta", False)),
                 ),
             )
         except KeyError as exc:

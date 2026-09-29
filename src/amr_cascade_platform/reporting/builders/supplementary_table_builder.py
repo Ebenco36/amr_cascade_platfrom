@@ -1477,8 +1477,9 @@ def opportunity_space_fragment(table: pd.DataFrame) -> str:
 _FLOW_KIND = {
     "raw_rows": "total", "organism_rows": "total", "interpretable_rows": "total", "observed_episode_drugs": "total",
     "culture_episodes": "total", "conflicting_episode_drugs": "subset", "episodes_without_result": "subset",
+    "composite_label_rows": "subset",
 }
-_FLOW_OPTIONAL = {"not_ingested_rows", "not_harmonized_rows"}
+_FLOW_OPTIONAL = {"not_ingested_rows", "not_harmonized_rows", "composite_label_rows"}
 
 
 def exclusion_flow_numbers(flow: pd.DataFrame) -> tuple[dict[str, object], list[str]]:
@@ -1860,7 +1861,7 @@ def _join(parts: list[str]) -> str:
 
 
 def prevalence_summary(prevalence: pd.DataFrame, negligible_pp: float = 0.1) -> dict[str, object]:
-    """Distribution of the naive-minus-MNAR(lambda=0) shift, naive prevalence, and bound width across drugs.
+    """Distribution of the naive-minus-reference-model (lambda=0) shift, naive prevalence, and bound width across drugs.
 
     The shift is naive minus the eligible-denominator MNAR(0) estimate, in
     percentage points: positive when the tested-only figure is the higher one.

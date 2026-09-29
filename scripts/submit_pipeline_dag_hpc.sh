@@ -179,6 +179,10 @@ PYTHON_BIN="${PYTHON_BIN:-}"
 # silently reporting a stage "ready" when it never ran under that env).
 ENV_NAME="hpc"
 DATA_ROOT_DIR="data"
+# The selected environment's reporting.tables_dir / reports_dir under the project
+# root; read from its config after argument parsing (resolve_environment_layout).
+TABLES_ROOT="${PROJECT_ROOT}/outputs/tables"
+REPORTS_ROOT="${PROJECT_ROOT}/outputs/reports"
 FIX_STALE_GOLD=0
 FIX_STALE_CASCADE=0
 # Never inherit VENV_SITE from the caller. A stale path would point at packages
@@ -937,7 +941,7 @@ dataset_summary_ready() {
   local site="${2:-}"
   local organism="${3:-}"
   local dir
-  dir="$(scope_dir_path "${PROJECT_ROOT}/outputs/reports" "${scope}" "${site}" "${organism}")"
+  dir="$(scope_dir_path "${REPORTS_ROOT}" "${scope}" "${site}" "${organism}")"
   [[ -f "${dir}/dataset_summary/dataset_summary_manifest.json" ]]
 }
 
@@ -946,7 +950,7 @@ reporting_ready() {
   local site="${2:-}"
   local organism="${3:-}"
   local dir cascade_dir comparison_dir
-  dir="$(scope_dir_path "${PROJECT_ROOT}/outputs/reports" "${scope}" "${site}" "${organism}")"
+  dir="$(scope_dir_path "${REPORTS_ROOT}" "${scope}" "${site}" "${organism}")"
   cascade_dir="$(scope_dir_path "${PROJECT_ROOT}/${DATA_ROOT_DIR}/artifacts/cascade" "${scope}" "${site}" "${organism}")"
   comparison_dir="$(scope_dir_path "${PROJECT_ROOT}/${DATA_ROOT_DIR}/artifacts/modeling/downstream_testing" "${scope}" "${site}" "${organism}")/threshold_strategy_comparison"
   [[ -f "${dir}/report_manifest.json" &&
@@ -965,7 +969,7 @@ scientific_audit_ready() {
   local site="${2:-}"
   local organism="${3:-}"
   local dir
-  dir="$(scope_dir_path "${PROJECT_ROOT}/outputs/reports" "${scope}" "${site}" "${organism}")"
+  dir="$(scope_dir_path "${REPORTS_ROOT}" "${scope}" "${site}" "${organism}")"
   [[ -f "${dir}/cascade_traceability_audit.csv" &&
      -f "${dir}/pipeline_contract_audit.csv" &&
      -f "${dir}/scientific_qa_summary.json" ]]
@@ -976,7 +980,7 @@ publication_readiness_ready() {
   local site="${2:-}"
   local organism="${3:-}"
   local dir
-  dir="$(scope_dir_path "${PROJECT_ROOT}/outputs/reports" "${scope}" "${site}" "${organism}")"
+  dir="$(scope_dir_path "${REPORTS_ROOT}" "${scope}" "${site}" "${organism}")"
   [[ -f "${dir}/audits/publication_readiness_audit.json" &&
      -f "${dir}/audits/publication_readiness_audit.csv" &&
      -f "${dir}/audits/publication_readiness_audit.md" ]]
@@ -992,9 +996,13 @@ eskape_ready() {
   else
     scope_dir="${site}"
   fi
-  local target_slug
+  local target_slug dir
   target_slug="$(slugify "${target}")"
-  [[ -f "${PROJECT_ROOT}/${DATA_ROOT_DIR}/artifacts/eskape_validation/armd/${scope_dir}/organisms/${target_slug}/eskape_existence_summary.csv" ]]
+  dir="${PROJECT_ROOT}/${DATA_ROOT_DIR}/artifacts/eskape_validation/armd/${scope_dir}/organisms/${target_slug}"
+  # _SUCCESS.json is written last by run_eskape_cascade_validation.py, listing this
+  # target's artifacts and its per-target summary with their provenance, so a killed
+  # or partial run is never reused.
+  [[ -f "${dir}/eskape_existence_summary.csv" && -f "${dir}/_SUCCESS.json" ]]
 }
 
 eskape_merge_ready() {
@@ -1002,9 +1010,9 @@ eskape_merge_ready() {
   local site="${2:-}"
   local dir
   if [[ "${scope}" == "combined" ]]; then
-    dir="${PROJECT_ROOT}/outputs/tables/eskape/combined_armd"
+    dir="${TABLES_ROOT}/eskape/combined_armd"
   else
-    dir="${PROJECT_ROOT}/outputs/tables/eskape/site_${site}"
+    dir="${TABLES_ROOT}/eskape/site_${site}"
   fi
   [[ -f "${dir}/eskape_cascade_comparison.csv" ]]
 }
@@ -1375,6 +1383,39 @@ if [[ "${CODE_IDENTITY}" == *"+dirty."* && "${ALLOW_DIRTY_CHECKOUT}" -eq 0 && "$
   exit 2
 fi
 
+# Where the selected environment writes: its data_root must be the one this script
+# checks (--data-root), and its reporting folders are where the report readiness
+# checks look and where ESKAPE summaries go. Test environments redirect the
+# reporting folders (e.g. test_dataset/outputs/...), so hardcoding outputs/ would
+# send a test run's files into -- or take them for -- the production folders.
+ENV_DATA_ROOT=""
+if [[ -x "${PROJECT_ROOT}/.venv/bin/python" ]]; then
+  env_layout="$(cd "${PROJECT_ROOT}" && PYTHONNOUSERSITE=1 "${PROJECT_ROOT}/.venv/bin/python" -c '
+import sys
+from pathlib import Path
+sys.path.insert(0, "src")
+from amr_cascade_platform.core.config.config_loader import ConfigLoader
+s = ConfigLoader(Path(".").resolve()).load(sys.argv[1])
+print("|".join([s.environment.data_root, s.reporting.tables_dir, s.reporting.reports_dir]))
+' "${ENV_NAME}" 2>/dev/null || true)"
+  if [[ -n "${env_layout}" ]]; then
+    IFS='|' read -r ENV_DATA_ROOT env_tables_dir env_reports_dir <<< "${env_layout}"
+    TABLES_ROOT="${PROJECT_ROOT}/${env_tables_dir%/}"
+    REPORTS_ROOT="${PROJECT_ROOT}/${env_reports_dir%/}"
+  fi
+fi
+if [[ -z "${ENV_DATA_ROOT}" && "${ENV_NAME}" != "hpc" ]]; then
+  echo "ERROR: could not read configs/environments/${ENV_NAME}.yaml with ${PROJECT_ROOT}/.venv/bin/python;" >&2
+  echo "the readiness checks need that environment's data and output folders." >&2
+  exit 2
+fi
+if [[ -n "${ENV_DATA_ROOT}" && "${ENV_DATA_ROOT%/}" != "${DATA_ROOT_DIR%/}" ]]; then
+  echo "ERROR: --env ${ENV_NAME} uses data_root '${ENV_DATA_ROOT}', but --data-root is '${DATA_ROOT_DIR}'." >&2
+  echo "Pass --data-root ${ENV_DATA_ROOT}: every stage reads and writes under the environment's data_root." >&2
+  exit 2
+fi
+echo "Environment ${ENV_NAME}: data ${PROJECT_ROOT}/${DATA_ROOT_DIR}, tables ${TABLES_ROOT}, reports ${REPORTS_ROOT}"
+
 fix_stale_outputs
 
 publication_terminal_jobs=()
@@ -1730,7 +1771,7 @@ if [[ "${RUN_ESKAPE}" -eq 1 ]]; then
   echo "Each (scope, target) pair is an independent job -- no target waits on another."
 
   eskape_root="${PROJECT_ROOT}/${DATA_ROOT_DIR}/artifacts/eskape_validation/armd"
-  eskape_tables_root="${PROJECT_ROOT}/outputs/tables/eskape"
+  eskape_tables_root="${TABLES_ROOT}/eskape"
 
   for raw_site in "${SITES[@]}"; do
     site="$(trim "${raw_site}")"
@@ -1762,7 +1803,7 @@ if [[ "${RUN_ESKAPE}" -eq 1 ]]; then
     if should_submit "${site_merge_deps}" eskape_merge_ready "site" "${site}"; then
       eskape_site_merge_job="$(
         submit_job "amr_eskape_${site_slug}_merge" "00:30:00" "16G" "${site_merge_deps}" \
-          "\"\${AMR_CASCADE_PYTHON}\" scripts/merge_eskape_summaries.py --input-glob 'outputs/tables/eskape/_per_target/site/${site_slug}/*/eskape_cascade_comparison.csv' --output-csv 'outputs/tables/eskape/site_${site}/eskape_cascade_comparison.csv' --output-json 'outputs/tables/eskape/site_${site}/eskape_cascade_comparison.json'"
+          "\"\${AMR_CASCADE_PYTHON}\" scripts/merge_eskape_summaries.py --input-glob '${eskape_tables_root}/_per_target/site/${site_slug}/*/eskape_cascade_comparison.csv' --output-csv '${eskape_tables_root}/site_${site}/eskape_cascade_comparison.csv' --output-json '${eskape_tables_root}/site_${site}/eskape_cascade_comparison.json'"
       )"
       echo "ESKAPE merge ${site}: ${eskape_site_merge_job}"
       submitted_jobs+=("${eskape_site_merge_job}")
@@ -1797,7 +1838,7 @@ if [[ "${RUN_ESKAPE}" -eq 1 ]]; then
   if should_submit "${combined_merge_deps}" eskape_merge_ready "combined"; then
     eskape_combined_merge_job="$(
       submit_job "amr_eskape_combined_merge" "00:30:00" "16G" "${combined_merge_deps}" \
-        "\"\${AMR_CASCADE_PYTHON}\" scripts/merge_eskape_summaries.py --input-glob 'outputs/tables/eskape/_per_target/combined/*/eskape_cascade_comparison.csv' --output-csv 'outputs/tables/eskape/combined_armd/eskape_cascade_comparison.csv' --output-json 'outputs/tables/eskape/combined_armd/eskape_cascade_comparison.json'"
+        "\"\${AMR_CASCADE_PYTHON}\" scripts/merge_eskape_summaries.py --input-glob '${eskape_tables_root}/_per_target/combined/*/eskape_cascade_comparison.csv' --output-csv '${eskape_tables_root}/combined_armd/eskape_cascade_comparison.csv' --output-json '${eskape_tables_root}/combined_armd/eskape_cascade_comparison.json'"
     )"
     echo "ESKAPE merge combined: ${eskape_combined_merge_job}"
     submitted_jobs+=("${eskape_combined_merge_job}")

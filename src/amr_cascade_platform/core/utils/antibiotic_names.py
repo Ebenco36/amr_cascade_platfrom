@@ -305,7 +305,9 @@ AST_ENTITY_TYPE: Final[dict[str, str]] = {
     # Antimycobacterial agents
     # -------------------------------------------------------------------------
     "BEDAQUILINE": "ANTIMYCOBACTERIAL",
+    "ETHAMBUTOL": "ANTIMYCOBACTERIAL",
     "ISONIAZID": "ANTIMYCOBACTERIAL",
+    "PYRAZINAMIDE": "ANTIMYCOBACTERIAL",
 
     # Concentration-specific susceptibility tests should not be silently merged
     # into generic isoniazid.

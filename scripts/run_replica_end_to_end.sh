@@ -216,7 +216,9 @@ validate_scope() {
   local site_args=()
   [[ "${scope}" == "site" ]] && site_args=(--site "${site}")
   local gold_scope_args=(--source-scope "${scope}")
-  run "${label}_gold" "${PY[@]}" scripts/run_gold.py --env "${env}" "${gold_scope_args[@]}" ${site_args[@]+"${site_args[@]}"} --organism "${O}"
+  # Every caller runs this function inside `... || return 1`, where bash suspends
+  # set -e, so each step's exit status is checked explicitly.
+  run "${label}_gold" "${PY[@]}" scripts/run_gold.py --env "${env}" "${gold_scope_args[@]}" ${site_args[@]+"${site_args[@]}"} --organism "${O}" || return 1
   # As on the cluster: describe the dataset as soon as the combined gold layer
   # exists, alongside the validation shards (primary run only).
   local summary_pid=""
@@ -240,10 +242,17 @@ validate_scope() {
     pids+=("$!")
   done
   for pid in "${pids[@]}"; do wait "${pid}" || status=1; done
-  [[ "${status}" -eq 0 ]] || return 1
-  run "${label}_validation_merge" "${PY[@]}" scripts/merge_cascade_validation_shards.py --env "${env}" --gold-scope "${scope}" ${site_args[@]+"${site_args[@]}"} --organism "${O}" --shard-total "${shards}"
-  run "${label}_cascade" "${PY[@]}" scripts/run_cascade_analysis.py --env "${env}" --gold-scope "${scope}" ${site_args[@]+"${site_args[@]}"} --organism "${O}"
-  if [[ -n "${summary_pid}" ]]; then wait "${summary_pid}" || return 1; fi
+  # A failed merge stops the scope: the cascade would otherwise recompute the
+  # validation itself and the run would still end "Finished". Any failure reaches
+  # the caller once the background dataset summary, if any, has finished.
+  if [[ "${status}" -eq 0 ]]; then
+    run "${label}_validation_merge" "${PY[@]}" scripts/merge_cascade_validation_shards.py --env "${env}" --gold-scope "${scope}" ${site_args[@]+"${site_args[@]}"} --organism "${O}" --shard-total "${shards}" || status=1
+  fi
+  if [[ "${status}" -eq 0 ]]; then
+    run "${label}_cascade" "${PY[@]}" scripts/run_cascade_analysis.py --env "${env}" --gold-scope "${scope}" ${site_args[@]+"${site_args[@]}"} --organism "${O}" || status=1
+  fi
+  if [[ -n "${summary_pid}" ]]; then wait "${summary_pid}" || status=1; fi
+  return "${status}"
 }
 
 ingest_site() { run "ingestion_$1" "${PY[@]}" scripts/run_ingestion.py --env "${ENV_NAME}" --site "$1" --source-layer "${SOURCE_LAYER}"; }

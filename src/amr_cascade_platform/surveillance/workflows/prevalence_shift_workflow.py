@@ -131,11 +131,17 @@ class PrevalenceShiftWorkflow:
         results.to_parquet(pair_path, index=False)
         outputs[pair_path.name] = pair_path
 
+        # The deprecated empirical-delta curves exist only when
+        # prevalence.compute_legacy_delta is set; otherwise an earlier run's file is
+        # removed so the artifact directory holds only what this run computed.
         legacy_dir = output_dir / "legacy"
-        legacy_dir.mkdir(parents=True, exist_ok=True)
         curve_path = legacy_dir / "legacy_delta_sensitivity_curves.parquet"
-        bundle.delta_curve_results.to_parquet(curve_path, index=False)
-        outputs[f"legacy/{curve_path.name}"] = curve_path
+        if self._settings.prevalence.compute_legacy_delta:
+            legacy_dir.mkdir(parents=True, exist_ok=True)
+            bundle.delta_curve_results.to_parquet(curve_path, index=False)
+            outputs[f"legacy/{curve_path.name}"] = curve_path
+        else:
+            curve_path.unlink(missing_ok=True)
 
         # Do not leave deprecated delta outputs in the primary manuscript artifact surface.
         for stale_path in (
@@ -192,8 +198,12 @@ class PrevalenceShiftWorkflow:
             "site": request.site,
             "organism": request.organism,
             "row_count": int(len(results)),
+            "compute_legacy_delta": bool(self._settings.prevalence.compute_legacy_delta),
             "legacy_delta_curve_row_count": int(len(bundle.delta_curve_results)),
             "mnar_curve_row_count": int(len(bundle.mnar_curve_results)),
+            # Drugs whose MNAR resistance model could not be estimated (mnar_status
+            # model_failed; the reason is in mnar_failure_reason): no MNAR curve.
+            "mnar_model_failed_drugs": self._model_failed_drugs(bundle.mnar_curve_results),
             "mnar_tipping_point_row_count": int(len(bundle.mnar_tipping_point_results)),
             "edge_enrichment_row_count": int(len(bundle.edge_enrichment_results)),
             "top_n_plotted": int(len(plot_results)),
@@ -236,6 +246,12 @@ class PrevalenceShiftWorkflow:
         return PrevalenceShiftAnalyzer(analysis_settings)
 
     @staticmethod
+    def _model_failed_drugs(curves: pd.DataFrame) -> list[str]:
+        if curves.empty or "mnar_status" not in curves.columns:
+            return []
+        return sorted(curves.loc[curves["mnar_status"].eq("model_failed"), "drug"].astype(str).unique().tolist())
+
+    @staticmethod
     def _format_summary_table(results: pd.DataFrame) -> pd.DataFrame:
         if results.empty:
             return pd.DataFrame(
@@ -243,7 +259,7 @@ class PrevalenceShiftWorkflow:
                     "Organism",
                     "Drug",
                     "Naive prevalence",
-                    "MNAR prevalence (lambda=0)",
+                    "Reference-model prevalence (lambda=0)",
                     "Subgroup-standardised prevalence",
                     "Shift (percentage points)",
                     "Lower bound",
@@ -256,7 +272,7 @@ class PrevalenceShiftWorkflow:
         table["Organism"] = table["organism"]
         table["Drug"] = table["drug"]
         table["Naive prevalence"] = table["naive_prevalence_pct"].map(PrevalenceShiftWorkflow._format_percent)
-        table["MNAR prevalence (lambda=0)"] = table["mnar_lambda0_prevalence_pct"].map(PrevalenceShiftWorkflow._format_percent)
+        table["Reference-model prevalence (lambda=0)"] = table["mnar_lambda0_prevalence_pct"].map(PrevalenceShiftWorkflow._format_percent)
         table["Subgroup-standardised prevalence"] = table["standardised_prevalence_pct"].map(PrevalenceShiftWorkflow._format_percent)
         table["Shift (percentage points)"] = table["mnar_lambda0_shift_from_naive_pct"].map(
             lambda value: f"{value:.1f}" if pd.notna(value) else "NA"
@@ -275,7 +291,7 @@ class PrevalenceShiftWorkflow:
                 "Organism",
                 "Drug",
                 "Naive prevalence",
-                "MNAR prevalence (lambda=0)",
+                "Reference-model prevalence (lambda=0)",
                 "Subgroup-standardised prevalence",
                 "Shift (percentage points)",
                 "Lower bound",
@@ -383,10 +399,10 @@ class PrevalenceShiftWorkflow:
                     "Lower bound",
                     "Upper bound",
                     "Bound width",
-                    "MNAR prevalence (lambda=0)",
-                    "MNAR shift (percentage points)",
+                    "Reference-model prevalence (lambda=0)",
+                    "Reference-model shift (percentage points)",
                     "MNAR feature count",
-                    "MNAR status (lambda=0)",
+                    "Reference-model status (lambda=0)",
                 ]
             )
         table = results.copy()
@@ -396,12 +412,12 @@ class PrevalenceShiftWorkflow:
         table["Lower bound"] = table["prevalence_lower_bound_pct"].map(PrevalenceShiftWorkflow._format_percent)
         table["Upper bound"] = table["prevalence_upper_bound_pct"].map(PrevalenceShiftWorkflow._format_percent)
         table["Bound width"] = table["prevalence_bound_width_pct"].map(PrevalenceShiftWorkflow._format_percent)
-        table["MNAR prevalence (lambda=0)"] = table["mnar_lambda0_prevalence_pct"].map(PrevalenceShiftWorkflow._format_percent)
-        table["MNAR shift (percentage points)"] = table["mnar_lambda0_shift_from_naive_pct"].map(
+        table["Reference-model prevalence (lambda=0)"] = table["mnar_lambda0_prevalence_pct"].map(PrevalenceShiftWorkflow._format_percent)
+        table["Reference-model shift (percentage points)"] = table["mnar_lambda0_shift_from_naive_pct"].map(
             lambda value: f"{value:.1f}" if pd.notna(value) else "NA"
         )
         table["MNAR feature count"] = table["mnar_feature_count"]
-        table["MNAR status (lambda=0)"] = table["mnar_status_lambda0"]
+        table["Reference-model status (lambda=0)"] = table["mnar_status_lambda0"]
         return table.loc[
             :,
             [
@@ -411,10 +427,10 @@ class PrevalenceShiftWorkflow:
                 "Lower bound",
                 "Upper bound",
                 "Bound width",
-                "MNAR prevalence (lambda=0)",
-                "MNAR shift (percentage points)",
+                "Reference-model prevalence (lambda=0)",
+                "Reference-model shift (percentage points)",
                 "MNAR feature count",
-                "MNAR status (lambda=0)",
+                "Reference-model status (lambda=0)",
             ],
         ]
 
@@ -512,7 +528,7 @@ class PrevalenceShiftWorkflow:
                     "Drug",
                     "Decision threshold",
                     "Naive prevalence",
-                    "MNAR prevalence at lambda=0",
+                    "Reference-model prevalence at lambda=0",
                     "Shift at lambda=0",
                     "Tipping lambda",
                     "Crossing status",
@@ -528,7 +544,7 @@ class PrevalenceShiftWorkflow:
         table["Drug"] = table["drug"]
         table["Decision threshold"] = table["decision_threshold_pct"].map(PrevalenceShiftWorkflow._format_percent)
         table["Naive prevalence"] = table["naive_prevalence_pct"].map(PrevalenceShiftWorkflow._format_percent)
-        table["MNAR prevalence at lambda=0"] = table["prevalence_at_lambda0_pct"].map(
+        table["Reference-model prevalence at lambda=0"] = table["prevalence_at_lambda0_pct"].map(
             PrevalenceShiftWorkflow._format_percent
         )
         table["Shift at lambda=0"] = table["shift_at_lambda0_pct"].map(
@@ -554,7 +570,7 @@ class PrevalenceShiftWorkflow:
                 "Drug",
                 "Decision threshold",
                 "Naive prevalence",
-                "MNAR prevalence at lambda=0",
+                "Reference-model prevalence at lambda=0",
                 "Shift at lambda=0",
                 "Tipping lambda",
                 "Crossing status",

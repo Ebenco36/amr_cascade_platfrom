@@ -13,6 +13,9 @@ prevalence:
     - 0.5
     - 1.0
     - 2.0
+  # The deprecated empirical-delta sensitivity, superseded by the MNAR lambda curves above.
+  # Kept only to reproduce earlier runs; when false no legacy delta curves are computed or written.
+  compute_legacy_delta: false
   decision_thresholds:
     - 0.10
     - 0.20

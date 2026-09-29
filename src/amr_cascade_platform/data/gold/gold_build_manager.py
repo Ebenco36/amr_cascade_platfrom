@@ -15,6 +15,10 @@ from amr_cascade_platform.core.exceptions.custom_exceptions import DataDiscovery
 from amr_cascade_platform.core.logging.logger_factory import LoggerFactory
 from amr_cascade_platform.core.paths.path_manager import PathManager
 from amr_cascade_platform.core.utils.antibiotic_names import normalize_antibiotic_label
+from amr_cascade_platform.core.utils.antibiotic_reference import (
+    classification_reference_path,
+    reference_antibiotic_labels,
+)
 from amr_cascade_platform.core.utils.organism_names import matches_requested_organism
 from amr_cascade_platform.core.utils.scopes import scoped_output_dir
 from amr_cascade_platform.core.utils.text import normalize_label, safe_feature_name
@@ -44,7 +48,9 @@ class GoldBuildManager:
         self._dataset_store = DatasetStore(settings)
         self._parquet_store = ParquetStore(settings)
         self._culture_episode_builder = CultureEpisodeBuilder(settings)
-        self._observation_space_builder = ObservationSpaceBuilder(settings)
+        self._observation_space_builder = ObservationSpaceBuilder(
+            settings, reference_labels=self._reference_labels(path_manager.project_root)
+        )
         self._testing_matrix_builder = TestingMatrixBuilder(settings)
         self._pair_generator = PairGenerator(settings)
         self._eligibility_service = EligibilityService(settings, path_manager.paths.reference)
@@ -61,6 +67,13 @@ class GoldBuildManager:
 
         culture_episodes = self._culture_episode_builder.build(cohort, organism_list=organism_list)
         culture_drug_episodes, ledger = self._observation_space_builder.build_with_ledger(cohort, organism_list=organism_list)
+        unrecognised = self._observation_space_builder.unrecognised_labels
+        if unrecognised is not None and not unrecognised.empty:
+            self._logger.warning(
+                "AST labels kept as antibacterials although neither a listed special entity nor in the "
+                "antibiotic classification reference (check they are not assays): %s",
+                "; ".join(f"{row.antibiotic} [{row.source_site}] {int(row.rows):,} rows" for row in unrecognised.itertuples()),
+            )
         # Raw site data records the same antibiotic under different spellings
         # (site-specific order-set abbreviations, alternate salts). Normalizing
         # here, at the single earliest point shared by every downstream gold
@@ -106,6 +119,22 @@ class GoldBuildManager:
             eligible_pairs=eligible_pairs,
         )
         return outputs
+
+    def _reference_labels(self, project_root: Path) -> frozenset[str] | None:
+        path = classification_reference_path(project_root)
+        if not path.is_file():
+            self._logger.warning("Antibiotic classification reference %s not found; unrecognised-label audit skipped.", path)
+            return None
+        return reference_antibiotic_labels(path)
+
+    def _unrecognised_label_records(self) -> list[dict[str, object]] | None:
+        table = self._observation_space_builder.unrecognised_labels
+        if table is None:
+            return None
+        return [
+            {key: (int(value) if key == "rows" else str(value)) for key, value in record.items()}
+            for record in table.to_dict(orient="records")
+        ]
 
     def _observation_ledger(
         self,
@@ -228,6 +257,10 @@ class GoldBuildManager:
                 {key: (int(value) if key == "rows" else str(value)) for key, value in record.items()}
                 for record in self._observation_space_builder.excluded_entities.to_dict(orient="records")
             ],
+            # Kept rows under labels that are antibacterials only by default: neither a
+            # listed special entity nor in the antibiotic classification reference, per
+            # site and label (null when the reference was unavailable).
+            "unrecognised_ast_labels": self._unrecognised_label_records(),
             # Code, configuration, input and package versions behind this build.
             "provenance": run_provenance(self._paths.project_root, self._settings, {"harmonized_cohort": cohort_path}),
             "row_counts": {

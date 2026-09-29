@@ -15,3 +15,7 @@ class DataDiscoveryError(AmrCascadeError):
 
 class ValidationError(AmrCascadeError):
     """Raised when runtime validation fails."""
+
+
+class ModelNotEstimableError(AmrCascadeError):
+    """Raised when a model cannot be estimated from the data it was given (a data condition, not a defect)."""

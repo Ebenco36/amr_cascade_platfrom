@@ -5,4 +5,3 @@ organisms:
     - "PSEUDOMONAS AERUGINOSA"
     - "STAPH AUREUS {MRSA}"
     - "ENTEROCOCCUS FAECALIS"
-  min_episode_threshold: 500

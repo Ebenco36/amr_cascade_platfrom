@@ -192,6 +192,24 @@ def test_exclusion_flow_reconciles_every_row_and_reports_a_gap() -> None:
     assert problems and "episode-antibiotic results" in problems[0]
 
 
+def test_exclusion_flow_reports_composite_labels_within_the_excluded_assays() -> None:
+    from amr_cascade_platform.reporting.builders.supplementary_table_builder import (
+        exclusion_flow_fragment,
+        exclusion_flow_numbers,
+    )
+
+    cleaning = {"armd": {"rows_before": 110, "rows_after": 100, "duplicates_removed": 10}}
+    table, problems = ds.exclusion_flow({"armd": _ledger(composite_label_rows=1)}, {"armd": 110}, cleaning, ("armd",))
+    numbers, flow_problems = exclusion_flow_numbers(table)
+    assert problems == [] and flow_problems == []  # a subset row, outside the reconciliation
+    assert numbers["armd"]["composite_label_rows"] == 1
+    assert numbers[ds.ALL_SITES]["composite_label_rows"] == 1
+    assert "of which composite labels" in exclusion_flow_fragment(table, [ds.ALL_SITES, "armd"])
+    # Gold metadata written before the count existed reads as zero, and the row is left out.
+    older, _ = ds.exclusion_flow({"armd": _ledger()}, {"armd": 110}, cleaning, ("armd",))
+    assert "of which composite labels" not in exclusion_flow_fragment(older, [ds.ALL_SITES, "armd"])
+
+
 def test_observation_ledger_counts_each_rule() -> None:
     settings = ConfigLoader(PROJECT_ROOT).load("mac")
     base = {"anon_id": "1", "pat_enc_csn_id_coded": "2", "order_proc_id_coded": "3", "order_time_jittered": "2024-01-01",

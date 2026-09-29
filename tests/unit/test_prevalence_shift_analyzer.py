@@ -8,7 +8,7 @@ from amr_cascade_platform.core.config.config_loader import ConfigLoader
 from amr_cascade_platform.surveillance.prevalence_shift_analyzer import PrevalenceShiftAnalyzer
 
 
-def _settings():
+def _settings(compute_legacy_delta: bool = False):
     settings = ConfigLoader(Path(__file__).resolve().parents[2]).load("mac")
     return replace(
         settings,
@@ -19,6 +19,7 @@ def _settings():
             min_resistant_support=1,
             delta_curve_points=5,
             mnar_lambda_grid=(-1.0, 0.0, 1.0),
+            compute_legacy_delta=compute_legacy_delta,
         ),
     )
 
@@ -133,7 +134,9 @@ def test_prevalence_shift_analyzer_computes_bounds_and_mnar_shift() -> None:
     assert math.isclose(float(row["w_ind_eligible"]), 0.5, rel_tol=0.0, abs_tol=1e-12)
     assert math.isclose(float(row["standardised_prevalence"]), 0.5, rel_tol=0.0, abs_tol=1e-12)
     assert row["prevalence_lower_bound"] <= row["mnar_lambda0_prevalence"] <= row["prevalence_upper_bound"]
-    assert not bundle.delta_curve_results.empty
+    # The deprecated empirical-delta method is off by default (prevalence.compute_legacy_delta).
+    assert bundle.delta_curve_results.empty
+    assert list(bundle.delta_curve_results.columns) == list(PrevalenceShiftAnalyzer._DELTA_CURVE_COLUMNS)
     assert not bundle.mnar_curve_results.empty
     assert not bundle.mnar_tipping_point_results.empty
     assert {"crosses_threshold", "always_above_threshold", "always_below_threshold", "not_evaluable"}.issuperset(
@@ -144,6 +147,23 @@ def test_prevalence_shift_analyzer_computes_bounds_and_mnar_shift() -> None:
     )
     assert set(bundle.mnar_curve_results["mnar_lambda"]) == {-1.0, 0.0, 1.0}
     assert not bundle.edge_enrichment_results.empty
+
+
+def test_legacy_delta_curves_are_computed_only_when_enabled() -> None:
+    edges = pd.DataFrame(
+        [{"upstream_antibiotic": "CIPROFLOXACIN", "downstream_antibiotic": "MEROPENEM", "escalation_ratio": 2.5,
+          "adjusted_odds_ratio": 1.8, "validation_status": "robust"}]
+    )
+    default = PrevalenceShiftAnalyzer(_settings()).analyze(_eligible_pairs(), _tested_rows(), _covariates(), edges)
+    enabled = PrevalenceShiftAnalyzer(_settings(compute_legacy_delta=True)).analyze(
+        _eligible_pairs(), _tested_rows(), _covariates(), edges
+    )
+    assert default.delta_curve_results.empty
+    assert not enabled.delta_curve_results.empty
+    assert enabled.delta_curve_results["is_empirical_anchor"].any()
+    # Switching the legacy method on changes nothing else.
+    pd.testing.assert_frame_equal(default.pair_results, enabled.pair_results)
+    pd.testing.assert_frame_equal(default.mnar_curve_results, enabled.mnar_curve_results)
 
 
 def test_prevalence_shift_analyzer_projects_empirical_anchor_to_admissible_range() -> None:
@@ -397,7 +417,10 @@ def test_prevalence_shift_only_reports_downstream_drugs_from_validated_escalatio
 
 
 def test_mnar_estimator_failures_are_recorded_and_defects_propagate(monkeypatch) -> None:
+    import numpy as np
     import pytest
+
+    from amr_cascade_platform.core.exceptions.custom_exceptions import ModelNotEstimableError
 
     analyzer = PrevalenceShiftAnalyzer(_settings())
     edges = pd.DataFrame(
@@ -405,17 +428,39 @@ def test_mnar_estimator_failures_are_recorded_and_defects_propagate(monkeypatch)
           "adjusted_odds_ratio": 1.8, "validation_status": "robust"}]
     )
 
-    def not_estimable(*_args, **_kwargs):
-        raise ValueError("This solver needs samples of at least 2 classes")
+    # Data the model cannot use, and a numerically failed fit: the drug is recorded
+    # as not estimable, with the reason, and the run continues.
+    for error in (ModelNotEstimableError("no MNAR feature columns"), np.linalg.LinAlgError("Singular matrix")):
+        def not_estimable(*_args, _error=error, **_kwargs):
+            raise _error
 
-    monkeypatch.setattr(analyzer, "_fit_mnar_resistance_model", not_estimable)
-    curves = analyzer.analyze(_eligible_pairs(), _tested_rows(), _covariates(), edges).mnar_curve_results
-    assert set(curves["mnar_status"]) == {"model_failed"}
-    assert curves["mnar_failure_reason"].str.startswith("ValueError: This solver needs").all()
+        monkeypatch.setattr(analyzer, "_fit_mnar_resistance_model", not_estimable)
+        curves = analyzer.analyze(_eligible_pairs(), _tested_rows(), _covariates(), edges).mnar_curve_results
+        assert set(curves["mnar_status"]) == {"model_failed"}
+        assert curves["mnar_failure_reason"].str.startswith(f"{type(error).__name__}: ").all()
 
-    def defect(*_args, **_kwargs):
-        raise KeyError("cov_not_built")
+    # A ValueError from the estimator (a malformed or mismatched feature matrix, say)
+    # is a defect, as is anything else: it stops the run instead of becoming
+    # innocuous model_failed rows.
+    for defect_error in (ValueError("X has 12 features, but ColumnTransformer is expecting 13"), KeyError("cov_not_built")):
+        def defect(*_args, _error=defect_error, **_kwargs):
+            raise _error
 
-    monkeypatch.setattr(analyzer, "_fit_mnar_resistance_model", defect)
-    with pytest.raises(KeyError):
-        analyzer.analyze(_eligible_pairs(), _tested_rows(), _covariates(), edges)
+        monkeypatch.setattr(analyzer, "_fit_mnar_resistance_model", defect)
+        with pytest.raises(type(defect_error)):
+            analyzer.analyze(_eligible_pairs(), _tested_rows(), _covariates(), edges)
+
+
+def test_mnar_model_fit_rejects_data_it_cannot_estimate_before_the_estimator() -> None:
+    import pytest
+
+    from amr_cascade_platform.core.exceptions.custom_exceptions import ModelNotEstimableError
+
+    analyzer = PrevalenceShiftAnalyzer(_settings())
+    training = pd.DataFrame({"is_resistant": [1, 1, 1], "cov_x": [0.1, 0.2, 0.3]})
+    with pytest.raises(ModelNotEstimableError, match="both resistant and susceptible"):
+        analyzer._fit_mnar_resistance_model(training, ("cov_x",))
+    with pytest.raises(ModelNotEstimableError, match="no MNAR feature columns"):
+        analyzer._fit_mnar_resistance_model(training.assign(is_resistant=[1, 0, 1]), ())
+    fitted = analyzer._fit_mnar_resistance_model(training.assign(is_resistant=[1, 0, 1]), ("cov_x",))
+    assert fitted.predict_proba(training.loc[:, ["cov_x"]]).shape == (3, 2)

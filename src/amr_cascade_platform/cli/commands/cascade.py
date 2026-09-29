@@ -28,6 +28,14 @@ def register_cascade_command(subparsers, project_root: Path, context_builder) ->
         action="store_true",
         help="Recompute validation even if validation_results.parquet already exists.",
     )
+    parser.add_argument(
+        "--allow-unrecorded-validation",
+        action="store_true",
+        help=(
+            "Accept a precomputed validation_results.parquet that has no provenance record, on the "
+            "edge-key check alone (legacy files only; by default such a file is refused)."
+        ),
+    )
     parser.set_defaults(handler=lambda args: _run(args, project_root, context_builder))
 
 
@@ -39,5 +47,6 @@ def _run(args, project_root: Path, context_builder) -> None:
         site=args.site,
         organism=args.organism,
         ignore_precomputed_validation=args.ignore_precomputed_validation,
+        allow_unrecorded_validation=args.allow_unrecorded_validation,
     )
     workflow.run(request)

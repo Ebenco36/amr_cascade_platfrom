@@ -140,11 +140,12 @@ print("|".join([
   str(d / "features"),
   str(d / "artifacts" / s.modeling.output_dir / s.modeling.task_name),
   str(project_root / s.reporting.reports_dir),
+  str(project_root / s.reporting.tables_dir),
 ]))
 ' "${PROJECT_ROOT}" "${ENV_NAME}")"
   IFS='|' read -r \
     DATA_ROOT_ABS CASCADE_ARTIFACT_ROOT CASCADE_SUMMARY_FILENAME \
-    PREVALENCE_ARTIFACT_ROOT FEATURE_ROOT MODELING_TASK_ROOT REPORTS_ROOT \
+    PREVALENCE_ARTIFACT_ROOT FEATURE_ROOT MODELING_TASK_ROOT REPORTS_ROOT TABLES_ROOT \
     <<< "${raw}"
 }
 
@@ -192,7 +193,8 @@ cascade_ready() {
      -f "${dir}/adjusted_model_shap_values.parquet" &&
      -f "${dir}/adjusted_model_shap_metadata.parquet" &&
      -f "${dir}/adjusted_model_shap_domain.parquet" &&
-     -f "${dir}/${CASCADE_SUMMARY_FILENAME}" ]]
+     -f "${dir}/${CASCADE_SUMMARY_FILENAME}" &&
+     -f "${dir}/_SUCCESS.json" ]]
 }
 
 prevalence_ready() {
@@ -240,7 +242,9 @@ eskape_ready() {
   local scope="$1" site="${2:-}" target="$3" scope_dir target_slug
   [[ "${scope}" == "combined" ]] && scope_dir="combined" || scope_dir="${site}"
   target_slug="$(slugify "${target}")"
-  [[ -f "${PROJECT_ROOT}/data/artifacts/eskape_validation/armd/${scope_dir}/organisms/${target_slug}/eskape_existence_summary.csv" ]]
+  local dir="${DATA_ROOT_ABS}/artifacts/eskape_validation/armd/${scope_dir}/organisms/${target_slug}"
+  # _SUCCESS.json is written last by run_eskape_cascade_validation.py (see the HPC DAG).
+  [[ -f "${dir}/eskape_existence_summary.csv" && -f "${dir}/_SUCCESS.json" ]]
 }
 
 should_submit() {
@@ -719,8 +723,8 @@ done
 # ── ESKAPE validation ─────────────────────────────────────────────────────────
 
 if [[ "${RUN_ESKAPE}" -eq 1 ]]; then
-  eskape_root="${PROJECT_ROOT}/data/artifacts/eskape_validation/armd"
-  eskape_tables_root="${PROJECT_ROOT}/outputs/tables/eskape"
+  eskape_root="${DATA_ROOT_ABS}/artifacts/eskape_validation/armd"
+  eskape_tables_root="${TABLES_ROOT}/eskape"
 
   for raw_site in "${SITES[@]}"; do
     site="$(trim "${raw_site}")"
@@ -752,9 +756,9 @@ if [[ "${RUN_ESKAPE}" -eq 1 ]]; then
       merge_deps="$(join_colon "${site_target_names[@]}")"
       spawn_task "${merge_name}" "${merge_deps}" \
         "${PYTHON_BIN}" scripts/merge_eskape_summaries.py \
-          --input-glob "outputs/tables/eskape/_per_target/site/${site_slug}/*/eskape_cascade_comparison.csv" \
-          --output-csv "outputs/tables/eskape/site_${site}/eskape_cascade_comparison.csv" \
-          --output-json "outputs/tables/eskape/site_${site}/eskape_cascade_comparison.json"
+          --input-glob "${eskape_tables_root}/_per_target/site/${site_slug}/*/eskape_cascade_comparison.csv" \
+          --output-csv "${eskape_tables_root}/site_${site}/eskape_cascade_comparison.csv" \
+          --output-json "${eskape_tables_root}/site_${site}/eskape_cascade_comparison.json"
     fi
   done
 
@@ -782,9 +786,9 @@ if [[ "${RUN_ESKAPE}" -eq 1 ]]; then
     merge_deps="$(join_colon "${combined_target_names[@]}")"
     spawn_task "eskape_combined_merge" "${merge_deps}" \
       "${PYTHON_BIN}" scripts/merge_eskape_summaries.py \
-        --input-glob "outputs/tables/eskape/_per_target/combined/*/eskape_cascade_comparison.csv" \
-        --output-csv "outputs/tables/eskape/combined_armd/eskape_cascade_comparison.csv" \
-        --output-json "outputs/tables/eskape/combined_armd/eskape_cascade_comparison.json"
+        --input-glob "${eskape_tables_root}/_per_target/combined/*/eskape_cascade_comparison.csv" \
+        --output-csv "${eskape_tables_root}/combined_armd/eskape_cascade_comparison.csv" \
+        --output-json "${eskape_tables_root}/combined_armd/eskape_cascade_comparison.json"
   fi
 fi
 

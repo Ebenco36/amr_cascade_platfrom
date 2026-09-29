@@ -41,13 +41,14 @@ gold:
     - CEFEPIME/CLAVULANIC ACID
   # AST entity types kept in the observed layer (core.utils.antibiotic_names.classify_ast_entity).
   # Everything else -- SCREEN (e.g. cefoxitin screen), PHENOTYPIC_TEST (inducible clindamycin,
-  # ESBL confirmation), RESISTANCE_MECHANISM_TEST (eCIM/mCIM), ANTIFUNGAL, ANTIMYCOBACTERIAL(_TEST)
-  # -- and rows without an antibiotic label are removed before eligibility and pair construction.
-  # COMPOSITE_AST (e.g. CEPHALEXIN/CEPHALOTHIN, a surrogate susceptibility report for a treatment
-  # class) stays: it is a therapeutic result, only its label covers more than one agent.
+  # ESBL confirmation), RESISTANCE_MECHANISM_TEST (eCIM/mCIM), COMPOSITE_AST, ANTIFUNGAL,
+  # ANTIMYCOBACTERIAL(_TEST) -- and rows without an antibiotic label are removed before eligibility
+  # and pair construction, and counted per site and label in the gold metadata
+  # (excluded_ast_entities). COMPOSITE_AST is a combined laboratory label that cannot be attributed
+  # to one agent (CEPHALEXIN/CEPHALOTHIN, recorded at Stanford), so it is not a drug node in the
+  # primary analysis; adding COMPOSITE_AST here gives the sensitivity analysis that keeps it.
   primary_ast_entity_types:
     - ANTIBACTERIAL
-    - COMPOSITE_AST
   eligibility:
     # Options:
     # - biological: current broad denominator; non-intrinsic organism-drug pairs are eligible.

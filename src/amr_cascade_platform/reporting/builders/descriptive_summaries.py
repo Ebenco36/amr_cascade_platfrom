@@ -698,7 +698,8 @@ EXCLUSION_STAGES = (
     ("AST rows", "organism_rows", "Rows for the analysed organism"),
     ("AST rows", "no_result_rows", "No result recorded"),
     ("AST rows", "other_non_interpretive_rows", "Result other than R, S or I (e.g. INCONCLUSIVE)"),
-    ("AST rows", "excluded_assay_rows", "Screening, confirmatory and mechanism assays; non-antibacterial agents"),
+    ("AST rows", "excluded_assay_rows", "Screening, confirmatory and mechanism assays; composite labels; non-antibacterial agents"),
+    ("AST rows", "composite_label_rows", "of which composite labels not attributable to one agent"),
     ("AST rows", "interpretable_rows", "Interpretable results (R, S or I)"),
     ("Episode–antibiotic results", "repeated_rows", "Repeated rows for the same episode, antibiotic and result"),
     ("Episode–antibiotic results", "conflicting_extra_rows", "Additional rows of conflicting results"),
@@ -744,6 +745,9 @@ def exclusion_flow(
             "no_result_rows": int(entry["no_result_rows"]),
             "other_non_interpretive_rows": int(entry["other_non_interpretive_rows"]),
             "excluded_assay_rows": int(entry["excluded_assay_rows"]),
+            # A subset of excluded_assay_rows (not part of the reconciliation);
+            # absent from gold metadata written before it was recorded.
+            "composite_label_rows": int(entry.get("composite_label_rows", 0)),
             "interpretable_rows": int(entry["interpretable_rows"]),
             "repeated_rows": int(entry["identical_rows_collapsed"]) + int(entry["same_result_duplicate_rows"]),
             "conflicting_extra_rows": int(entry["conflicting_result_rows"]) - int(entry["conflicting_episode_drugs"]),

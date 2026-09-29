@@ -21,6 +21,7 @@ from amr_cascade_platform.cascade.statistics.downstream_testing_regression impor
 from amr_cascade_platform.core.config.config_models import Settings
 from amr_cascade_platform.core.exceptions.custom_exceptions import ValidationError
 from amr_cascade_platform.core.paths.path_manager import PathManager
+from amr_cascade_platform.core.utils.provenance import clear_success_marker
 from amr_cascade_platform.core.utils.antibiotic_names import normalize_antibiotic_label
 from amr_cascade_platform.core.utils.eskape import EskapeTarget
 from amr_cascade_platform.core.utils.organism_names import normalize_organism_label
@@ -70,6 +71,9 @@ class ArmdEskapeCascadeRunner:
         filtered = self._filter_cohort(cohort, request.target)
         output_dir = self._resolve_output_dir(request)
         output_dir.mkdir(parents=True, exist_ok=True)
+        # The completion marker (written by run_eskape_cascade_validation.py once the
+        # summary exists) is withdrawn first, so a run that dies partway is not reused.
+        clear_success_marker(output_dir)
 
         filter_path = output_dir / "filtered_input_cohort.parquet"
         filtered.to_parquet(filter_path, index=False)
