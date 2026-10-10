@@ -440,6 +440,8 @@ follow_up() {
     --kill-on-invalid-dep=yes
   )
   [[ -n "${deps}" ]] && args+=(--dependency="afterok:${deps}")
+  # As in submit_pipeline_dag_hpc.sh: nodes to keep every job off.
+  [[ -n "${AMR_SBATCH_EXCLUDE:-}" ]] && args+=(--exclude="${AMR_SBATCH_EXCLUDE}")
   args+=(--wrap "$(wrap_command "${command}")")
   if [[ "${DRY_RUN}" -eq 1 ]]; then
     printf '  [dry-run] sbatch' >&2

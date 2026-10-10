@@ -103,11 +103,8 @@ def prepare_matplotlib(figure, *, hide_titles: bool) -> None:
 def save_matplotlib(figure, destination, *, hide_titles: bool | None = None, **kwargs) -> None:
     hide = _HIDE_TITLES.get() if hide_titles is None else hide_titles
     prepare_matplotlib(figure, hide_titles=hide)
-    if hide:
-        from matplotlib.transforms import Bbox
-        figure.canvas.draw()
-        canvas = Bbox.from_bounds(0, 0, *figure.get_size_inches())
-        tight = figure.get_tightbbox(figure.canvas.get_renderer())
-        # Tight cropping alone would change output size when a title disappears.
-        kwargs["bbox_inches"] = Bbox.union([canvas, tight]) if tight is not None else canvas
+    # The caller's cropping applies in both modes. Forcing the full canvas here left blank
+    # bands beside the plot (so it printed smaller at a given page width) and no padding
+    # where a label reached past the canvas; the plot has already been stretched into the
+    # heading band above, so a tight crop removes margins only.
     figure.savefig(destination, **kwargs)

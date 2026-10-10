@@ -29,6 +29,27 @@ _PACKAGES = (
     "dask", "plotly", "kaleido", "matplotlib", "networkx", "PyYAML",
 )
 _CODE_PATHS = ("src", "scripts", "configs")
+# What a cascade validation result depends on: the scripts and modules the shard and merge
+# jobs execute, and the configuration. This file is left out (it names results, it does not
+# compute them); reporting, figures, modelling and the submit scripts are outside it.
+_VALIDATION_CODE_PATHS = (
+    "configs",
+    "scripts/run_cascade_validation_shard.py",
+    "scripts/merge_cascade_validation_shards.py",
+    "src/amr_cascade_platform/cascade/analyzers",
+    "src/amr_cascade_platform/cascade/statistics",
+    "src/amr_cascade_platform/cli/main.py",
+    "src/amr_cascade_platform/core",
+    "src/amr_cascade_platform/data",
+    "src/amr_cascade_platform/domain",
+    "src/amr_cascade_platform/features",
+    "src/amr_cascade_platform/infrastructure",
+    ":(exclude)src/amr_cascade_platform/core/utils/provenance.py",
+)
+# Commits whose validation results stay valid for as long as every path above is unchanged
+# since them. Checked with git at run time, never assumed: one differing byte and the
+# current checkout's own identity is used instead, so the results are recomputed.
+_VALIDATION_CODE_ANCHORS = ("4e9a056ecc671ba12f01a5c12f16ad07d6e37082",)
 
 
 def _jsonable(value: object) -> object:
@@ -87,6 +108,34 @@ def git_state(project_root: Path) -> dict[str, object]:
         }
     except (OSError, subprocess.SubprocessError):
         return unavailable
+
+
+def validation_code_state(project_root: Path) -> dict[str, object]:
+    """The code identity of a cascade validation result.
+
+    The whole-checkout identity (git_state) changes with every commit, also one that only
+    touches a figure, which made finished validation unusable. A validation result depends
+    only on _VALIDATION_CODE_PATHS: when git shows those identical to an anchor commit --
+    no difference in tracked files, no new untracked file -- the anchor's identity is
+    returned, so results recorded under it keep matching. Otherwise, or when git or the
+    anchor commit is unavailable, the current checkout's identity is returned unchanged.
+    """
+    current = git_state(project_root)
+
+    def _git(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["git", "-C", str(project_root), *args], capture_output=True, timeout=60)
+
+    for anchor in _VALIDATION_CODE_ANCHORS:
+        try:
+            if _git("cat-file", "-e", f"{anchor}^{{commit}}").returncode != 0:
+                continue
+            same = _git("diff", "--quiet", anchor, "--", *_VALIDATION_CODE_PATHS)
+            untracked = _git("ls-files", "--others", "--exclude-standard", "--", *_VALIDATION_CODE_PATHS)
+            if same.returncode == 0 and untracked.returncode == 0 and not untracked.stdout.strip():
+                return {"commit": anchor, "code_modified": False, "code_diff_sha256": None}
+        except (OSError, subprocess.SubprocessError):
+            continue
+    return current
 
 
 def code_identity(project_root: Path) -> str:
@@ -154,8 +203,18 @@ def stage_fingerprint(project_root: Path, settings: object, inputs: dict[str, Pa
 
 
 def validation_fingerprint(project_root: Path, settings: object, pair_path: Path) -> tuple[str, dict]:
-    """Identity of a cascade validation result: shards, their merge and the cascade job all compare it."""
-    return stage_fingerprint(project_root, settings, {"drug_pair_episodes": pair_path}, stage="cascade_validation")
+    """Identity of a cascade validation result: shards, their merge and the cascade job all compare it.
+
+    Its code component is validation_code_state, not the whole checkout; ``executed_under``
+    records the checkout that actually ran and is not part of the fingerprint.
+    """
+    components = {
+        "git": validation_code_state(project_root),
+        "config_sha256": stable_hash(settings),
+        "inputs": {"drug_pair_episodes": file_fingerprint(pair_path)},
+        "parameters": _jsonable({"stage": "cascade_validation"}),
+    }
+    return fingerprint(components), {**components, "executed_under": git_state(project_root)}
 
 
 def sidecar_path(path: Path) -> Path:
@@ -166,7 +225,7 @@ def sidecar_path(path: Path) -> Path:
 
 def fingerprint(components: dict[str, object]) -> str:
     """A short, stable identity for a set of provenance components (timestamps excluded)."""
-    return stable_hash({key: value for key, value in components.items() if key != "generated_at_utc"})[:32]
+    return stable_hash({key: value for key, value in components.items() if key not in ("generated_at_utc", "executed_under")})[:32]
 
 
 def atomic_write_parquet(frame: pd.DataFrame, path: Path) -> None:

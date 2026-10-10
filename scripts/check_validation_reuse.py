@@ -106,8 +106,9 @@ def main() -> int:
     if errors:
         print("STOP: no files were changed. A provenance mismatch does not by itself prove the statistical results invalid. "
               "Use --explain to distinguish code, configuration and input identity changes. "
-              "Code identity covers all src/, scripts/ and configs/, including reporting changes. "
-              "Reuse requires a compatibility review or the recorded frozen checkout; otherwise plan an explicit rebuild. "
+              "Code identity covers the validation code and configs/ (provenance._VALIDATION_CODE_PATHS), "
+              "not reporting, figures, modelling or the submit scripts. "
+              "A code mismatch means one of those files differs from the recorded commit; otherwise plan an explicit rebuild. "
               "Do not edit provenance sidecars to force reuse.", file=sys.stderr)
         return 1
     print(f"Validation reuse check PASS ({args.env}); absent results still need computing.")

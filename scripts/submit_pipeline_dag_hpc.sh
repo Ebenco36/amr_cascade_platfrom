@@ -149,7 +149,7 @@ finish faster on your data):
   CASCADE_PARTITION   env-var override for the above (same semantics)
   PREVALENCE_MEM      default 256G       PREVALENCE_TIME      default 16:00:00
   FEATURE_MEM         default 512G       FEATURE_TIME         default 12:00:00
-  TRAINING_MEM        default 384G       TRAINING_TIME        default 12:00:00
+  TRAINING_MEM        default 512G       TRAINING_TIME        default 12:00:00
   REPORT_MEM          default 384G       REPORT_TIME          default 08:00:00
   ESKAPE_MEM          default 512G       ESKAPE_TIME          default 48:00:00
                       (per ESKAPE target; each target job filters cohort, builds its
@@ -692,7 +692,8 @@ CASCADE_MERGE_TIME="${CASCADE_MERGE_TIME:-04:00:00}"
 CASCADE_SITE_SHARD_NUM="${CASCADE_SITE_SHARD_NUM:-22}"
 PREVALENCE_MEM="${PREVALENCE_MEM:-256G}"
 FEATURE_MEM="${FEATURE_MEM:-512G}"
-TRAINING_MEM="${TRAINING_MEM:-384G}"
+# 384G was exhausted on 2026-10-03 (training and the threshold comparison, both OOM-killed).
+TRAINING_MEM="${TRAINING_MEM:-512G}"
 REPORT_MEM="${REPORT_MEM:-384G}"
 ESKAPE_MEM="${ESKAPE_MEM:-512G}"
 AUDIT_MEM="${AUDIT_MEM:-64G}"
@@ -1196,6 +1197,8 @@ submit_job() {
   local dep_arg
   dep_arg="$(dependency_arg "${deps[@]}")"
   [[ -n "${dep_arg}" ]] && args+=("${dep_arg}")
+  # Keep every job off nodes named in AMR_SBATCH_EXCLUDE (e.g. "hpc-node11,hpc-node12").
+  [[ -n "${AMR_SBATCH_EXCLUDE:-}" ]] && args+=(--exclude="${AMR_SBATCH_EXCLUDE}")
   # Jobs run the venv Python directly.  The venv is the source of truth for
   # both the interpreter and the packages — no PATH detection needed at runtime.
   # If the venv symlink is broken on a node (meaning the base Python used to

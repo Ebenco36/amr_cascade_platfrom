@@ -42,13 +42,24 @@ def test_plotly_heading_removal_preserves_data_fonts_and_panel_labels():
     assert printed.layout.height - printed.layout.margin.t - printed.layout.margin.b >= 800 - 140 - 100
 
 
-def test_matplotlib_removal_keeps_canvas_axis_labels_and_expands_plot():
+def _titled_line_figure():
     fig, ax = plt.subplots(figsize=(8, 5))
     fig.subplots_adjust(top=0.70, bottom=0.15)
     ax.plot([0, 1], [0, 1], label="Observed")
     ax.set(title="Figure title", xlabel="Threshold", ylabel="Recall")
     fig.text(0.5, 0.92, "Figure subtitle", gid="figure_subtitle")
-    legend = ax.legend(loc="lower right")
+    return fig, ax, ax.legend(loc="lower right")
+
+
+def _blank_margins(image: Image.Image) -> tuple[int, int, int, int]:
+    """Blank pixels left, top, right and below the drawing in a saved image."""
+    drawn = np.asarray(image.convert("L")) < 250
+    rows, columns = np.where(drawn.any(axis=1))[0], np.where(drawn.any(axis=0))[0]
+    return columns[0], rows[0], image.width - 1 - columns[-1], image.height - 1 - rows[-1]
+
+
+def test_matplotlib_removal_keeps_fonts_and_axis_labels_and_expands_plot():
+    fig, ax, legend = _titled_line_figure()
     before = ax.get_position().height
     fontsize = ax.xaxis.label.get_fontsize()
     buffer = io.BytesIO()
@@ -59,8 +70,29 @@ def test_matplotlib_removal_keeps_canvas_axis_labels_and_expands_plot():
     assert ax.get_position().height > before
     assert ax.xaxis.label.get_fontsize() == fontsize
     np.testing.assert_array_equal(fig.get_size_inches(), [8, 5])
-    assert Image.open(buffer).size[0] >= 800 and Image.open(buffer).size[1] >= 500
     plt.close(fig)
+
+
+def test_title_free_matplotlib_export_is_cropped_to_the_plot_like_the_titled_one():
+    """No blank band where the heading was: at a given page width the plot prints no smaller."""
+    titled_fig, _, _ = _titled_line_figure()
+    titled = io.BytesIO()
+    save_matplotlib(titled_fig, titled, hide_titles=False, format="png", dpi=100, bbox_inches="tight")
+    clean_fig, clean_ax, _ = _titled_line_figure()
+    clean = io.BytesIO()
+    save_matplotlib(clean_fig, clean, hide_titles=True, format="png", dpi=100, bbox_inches="tight")
+    titled_image, clean_image = Image.open(titled), Image.open(clean)
+    # bbox_inches="tight" pads the drawing by 0.1 in (10 px here) on every side, in both modes.
+    assert max(_blank_margins(clean_image)) <= 14
+    assert min(_blank_margins(clean_image)) >= 6
+    assert abs(clean_image.width - titled_image.width) <= 2
+    # The plot keeps its width and gains the heading band's height.
+    clean_axes = clean_ax.get_window_extent()
+    titled_axes = titled_fig.axes[0].get_window_extent()
+    assert clean_axes.width == pytest.approx(titled_axes.width)
+    assert clean_axes.height > titled_axes.height
+    plt.close(titled_fig)
+    plt.close(clean_fig)
 
 
 def test_matplotlib_preserves_multiple_panel_titles():
