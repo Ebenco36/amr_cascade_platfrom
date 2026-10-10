@@ -1106,9 +1106,14 @@ skip_ready() {
   printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "${msg}" >> "${LOG_DIR}/submission_decisions.log"
 }
 
+# Empty items are dropped: two empty job lists must give "", not ":", because a
+# non-empty dependency string makes should_submit queue the stage and everything after it.
 join_colon() {
-  local IFS=':'
-  printf '%s' "$*"
+  local joined="" item
+  for item in "$@"; do
+    [[ -n "${item}" ]] && joined="${joined:+${joined}:}${item}"
+  done
+  printf '%s' "${joined}"
 }
 
 dependency_arg() {
