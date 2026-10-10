@@ -29,6 +29,7 @@ Options:
   --sample-fraction FLOAT      Default: 0.001
   --python-bin PATH            Default: .venv/bin/python, python3
   --report-formats F1,F2       Default: html,png
+  --hide-figure-titles         Omit figure-level titles/subtitles, not panel labels.
   --skip-sampling
   --skip-ingestion
   --skip-preprocessing
@@ -69,6 +70,7 @@ ESKAPE_TARGETS=(Enterococcus Staphylococcus Klebsiella Acinetobacter Pseudomonas
 SAMPLE_FRACTION="0.001"
 PYTHON_BIN="${PYTHON_BIN:-}"
 REPORT_FORMATS=(html png)
+HIDE_FIGURE_TITLES=0
 DRY_RUN=0
 WAIT_FOR_TASKS=0
 MONITOR_INTERVAL=10
@@ -227,6 +229,9 @@ reporting_ready() {
   dir="$(scope_dir_path "${REPORTS_ROOT}" "$1" "${2:-}" "${3:-}")"
   cascade_dir="$(scope_dir_path "${CASCADE_ARTIFACT_ROOT}" "$1" "${2:-}" "${3:-}")"
   comparison_dir="$(scope_dir_path "${MODELING_TASK_ROOT}" "$1" "${2:-}" "${3:-}")/threshold_strategy_comparison"
+  local presentation=false
+  [[ "${HIDE_FIGURE_TITLES}" -eq 1 ]] && presentation=true
+  grep -q "\"hide_figure_titles\": ${presentation}" "${dir}/report_manifest.json" 2>/dev/null || return 1
   [[ -f "${dir}/report_manifest.json" &&
      -f "${cascade_dir}/adjusted_model_shap_metadata.parquet" &&
      "${dir}/report_manifest.json" -nt "${cascade_dir}/adjusted_model_shap_metadata.parquet" ]] || return 1
@@ -405,6 +410,7 @@ while [[ $# -gt 0 ]]; do
     --sample-fraction)    SAMPLE_FRACTION="$2";            shift 2 ;;
     --python-bin)         PYTHON_BIN="$2";                 shift 2 ;;
     --report-formats)     split_csv "$2" REPORT_FORMATS;   shift 2 ;;
+    --hide-figure-titles) HIDE_FIGURE_TITLES=1; shift ;;
     --eskape-targets)     split_csv "$2" ESKAPE_TARGETS;   shift 2 ;;
     --skip-sampling)      RUN_SAMPLING=0;        shift ;;
     --skip-ingestion)     RUN_INGESTION=0;       shift ;;
@@ -710,6 +716,7 @@ for raw_organism in "${ORGANISMS[@]}"; do
     if should_submit "${report_deps}" reporting_ready "combined" "" "${organism}"; then
       report_cmd=("${PYTHON_BIN}" scripts/run_reporting.py --env "${ENV_NAME}"
         --scope combined --organism "${organism}")
+      [[ "${HIDE_FIGURE_TITLES}" -eq 1 ]] && report_cmd+=(--hide-figure-titles)
       for fmt in "${REPORT_FORMATS[@]}"; do
         [[ -n "${fmt}" ]] && report_cmd+=(--figure-format "${fmt}")
       done

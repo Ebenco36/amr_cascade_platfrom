@@ -64,6 +64,28 @@ def test_directional_suite_is_empty_safe(figure_manager, tmp_path):
     assert figure_manager.export_directional_suite(empty, tmp_path, ("png",), tier="validated") == {}
 
 
+def test_empty_directional_matrix_has_no_collapsed_axes(figure_manager, monkeypatch):
+    captured = {}
+
+    class CapturingExporter:
+        def write(self, fig, *args, **kwargs):
+            captured["figure"] = fig
+            return {}
+
+    plotter = figure_manager._directional_matrix_plotter
+    monkeypatch.setattr(plotter, "_exporter", CapturingExporter())
+    cells = pd.DataFrame(columns=["validation_status", "col", "row"])
+    plotter.export(cells, "suppression", Path("unused"), ("html",),
+                   order=["CEFTRIAXONE", "MEROPENEM"], tier="validated", n_direction=0)
+    fig = captured["figure"]
+    assert not fig.data
+    assert fig.layout.xaxis.visible is False
+    assert fig.layout.yaxis.visible is False
+    assert not fig.layout.yaxis.title.text
+    assert len(fig.layout.annotations) == 1
+    assert "No robust + supported" in fig.layout.annotations[0].text
+
+
 def test_directional_suite_handles_one_direction_only(figure_manager, tmp_path):
     # Matches the codebase's existing convention (see _empty_figure() in the older
     # pooled plotters): a direction with zero validated edges still gets all five

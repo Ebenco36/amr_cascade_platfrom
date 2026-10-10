@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from amr_cascade_platform.visualization.report.figure_presentation import save_matplotlib
+
 from pathlib import Path
 from typing import Any
 
@@ -243,7 +245,7 @@ class PlotlyConsortPlotter:
         ax.set_xlim(0, 1)
         ax.set_ylim(0, 1)
         ax.axis("off")
-        ax.text(0.5, 0.99, "Study Cohort Data Flow", ha="center", va="top", fontsize=18, fontweight="bold", color=_TEXT_DARK)
+        ax.text(0.5, 0.99, "Study Cohort Data Flow", ha="center", va="top", fontsize=18, fontweight="bold", color=_TEXT_DARK, gid="figure_title")
 
         pad = 0.012
         box_x, box_w, box_h = 0.04, 0.50, 0.095
@@ -291,5 +293,5 @@ class PlotlyConsortPlotter:
         if text["total"]:
             ax.text(centre, bottom(final_y) - 0.012, text["total"], ha="center", va="top", fontsize=10.5, color=_FINAL_LINE, fontweight="bold")
 
-        fig.savefig(path, format=fmt, dpi=300, bbox_inches="tight")
+        save_matplotlib(fig, path, format=fmt, dpi=300, bbox_inches="tight")
         plt.close(fig)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from amr_cascade_platform.visualization.report.figure_presentation import save_matplotlib
+
 import gc
 from pathlib import Path
 import textwrap
@@ -408,6 +410,7 @@ class PlotlyForestPlotter:
         if subtitle:
             fig.add_annotation(
                 text=subtitle,
+                name="figure_subtitle",
                 x=0,
                 y=1.08,
                 xref="paper",
@@ -570,7 +573,7 @@ class PlotlyForestPlotter:
                 fontsize=8,
             )
         fig.tight_layout(rect=(0, 0.10, 1, 1))
-        fig.savefig(path, format=fmt, dpi=300, bbox_inches="tight")
+        save_matplotlib(fig, path, format=fmt, dpi=300, bbox_inches="tight")
         plt.close(fig)
 
     def _write_downstream_static(
@@ -645,7 +648,7 @@ class PlotlyForestPlotter:
             fontsize=10.5,
         )
         fig.subplots_adjust(left=0.32, right=0.97, top=0.89, bottom=0.17)
-        fig.savefig(path, format=fmt, dpi=300, bbox_inches="tight")
+        save_matplotlib(fig, path, format=fmt, dpi=300, bbox_inches="tight")
         plt.close(fig)
 
     @staticmethod
@@ -662,7 +665,7 @@ class PlotlyForestPlotter:
         ax.axis("off")
         ax.text(0.5, 0.5, "No downstream trigger data available", ha="center", va="center")
         fig.tight_layout()
-        fig.savefig(path, format=fmt, dpi=300, bbox_inches="tight")
+        save_matplotlib(fig, path, format=fmt, dpi=300, bbox_inches="tight")
         plt.close(fig)
 
     def summarize_downstream_trigger_availability(self, escalation_results: pd.DataFrame) -> pd.DataFrame:

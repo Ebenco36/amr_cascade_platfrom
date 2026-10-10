@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from amr_cascade_platform.visualization.report.figure_presentation import save_matplotlib
+
 from pathlib import Path
 
 import pandas as pd
@@ -352,5 +354,5 @@ class PlotlyValidationFunnelPlotter:
             pad=12,
         )
         fig.tight_layout()
-        fig.savefig(path, format=fmt, dpi=300, bbox_inches="tight")
+        save_matplotlib(fig, path, format=fmt, dpi=300, bbox_inches="tight")
         plt.close(fig)

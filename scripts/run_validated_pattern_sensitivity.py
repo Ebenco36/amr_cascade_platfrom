@@ -39,6 +39,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--shard-index", type=int, default=0)
     p.add_argument("--shard-total", type=int, default=1)
     p.add_argument("--merge-shards", action="store_true", help="Combine finished shards into the final output.")
+    p.add_argument("--check-ready", action="store_true", help="Read-only completion check; exit 1 if recomputation is needed.")
     return p
 
 
@@ -50,6 +51,8 @@ def main() -> None:
     from amr_cascade_platform.cascade.analyzers.cascade_validation_analyzer import CascadeValidationAnalyzer
     from amr_cascade_platform.cascade.analyzers.cotesting_filter_analyzer import CoTestingFilterAnalyzer
     from amr_cascade_platform.cascade.workflows import validated_pattern_sensitivity as vps
+    from amr_cascade_platform.cascade.workflows.sensitivity_cache import SensitivityCache
+    from amr_cascade_platform.cascade.workflows.cascade_analysis_workflow import _PAIR_TABLE_CATEGORICAL_COLUMNS
     from amr_cascade_platform.cli.main import build_context
     from amr_cascade_platform.core.exceptions.custom_exceptions import DataDiscoveryError
     from amr_cascade_platform.core.logging.logger_factory import LoggerFactory
@@ -87,8 +90,13 @@ def main() -> None:
         )
 
     output_path = cascade_dir / analysis.output_name
-    if output_path.exists():
-        logger.info("%s results already exist: %s", args.analysis, output_path)
+    cache = SensitivityCache(project_root, settings, {
+        "pairs": pair_path, "validation": validation_path,
+    }, analysis=args.analysis)
+    if args.check_ready:
+        raise SystemExit(0 if cache.ready(output_path) else 1)
+    if cache.ready(output_path):
+        logger.info("%s results match current inputs and code: %s", args.analysis, output_path)
         return
     edges = vps.select_edges(dataset_store.read_pandas(validation_path), analysis.statuses)
     logger.info("%s: %d patterns selected from %s", args.analysis, len(edges), validation_path)
@@ -96,19 +104,21 @@ def main() -> None:
     shard_dir = cascade_dir / analysis.shard_dir_name
     if args.merge_shards:
         paths = [vps.shard_path(shard_dir, index, args.shard_total) for index in range(args.shard_total)]
-        missing = [path for path in paths if not path.exists()]
+        missing = [path for index, path in enumerate(paths)
+                   if not cache.ready(path, shard=(index, args.shard_total))]
         if missing:
-            raise DataDiscoveryError(f"{len(missing)} of {args.shard_total} {args.analysis} shard(s) missing, e.g. {missing[0]}")
+            raise DataDiscoveryError(f"{len(missing)} of {args.shard_total} {args.analysis} shard(s) missing or incompatible, e.g. {missing[0]}")
         merged = vps.merge_shard_frames([dataset_store.read_pandas(path) for path in paths], vps.expected_keys(edges))
-        merged.to_parquet(output_path, index=False)
+        cache.save(merged, output_path)
         logger.info("%s shards merged: %s (%d patterns)", args.analysis, output_path, len(merged))
         return
 
     sharded = args.shard_total > 1
     selected = vps.shard_slice(edges, args.shard_index, args.shard_total) if sharded else edges
     target = vps.shard_path(shard_dir, args.shard_index, args.shard_total) if sharded else output_path
-    if target.exists():
-        logger.info("%s shard already exists: %s", args.analysis, target)
+    shard_identity = (args.shard_index, args.shard_total) if sharded else None
+    if cache.ready(target, shard=shard_identity):
+        logger.info("%s shard matches current inputs and code: %s", args.analysis, target)
         return
 
     analyzer = CascadeValidationAnalyzer(settings)
@@ -116,12 +126,12 @@ def main() -> None:
         logger.warning("No patterns in this slice -- writing an empty result.")
         result = analysis.run(analyzer, pd.DataFrame(), selected)
     else:
-        drug_pairs = dataset_store.read_pandas(pair_path)
+        drug_pairs = dataset_store.read_pandas(pair_path, categorical_columns=_PAIR_TABLE_CATEGORICAL_COLUMNS)
         filtered_pairs, _ = CoTestingFilterAnalyzer(settings).filter(drug_pairs)
         del drug_pairs
         result = analysis.run(analyzer, filtered_pairs, selected)
     target.parent.mkdir(parents=True, exist_ok=True)
-    result.to_parquet(target, index=False)
+    cache.save(result, target, shard=shard_identity)
     logger.info("%s results written: %s (%d patterns)", args.analysis, target, len(result))
 
 

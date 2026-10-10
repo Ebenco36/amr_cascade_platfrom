@@ -2165,7 +2165,9 @@ class SupplementaryTableBuilder:
             return json.loads(path.read_text(encoding="utf-8"))
         return pd.read_parquet(path, columns=columns)
 
-    def build(self, organism: str) -> SupplementaryBuildResult:
+    def build(self, organism: str, publication: str = "all") -> SupplementaryBuildResult:
+        if publication not in ("all", "paper1", "manuscripts"):
+            raise ValueError(f"Unknown publication profile: {publication}")
         settings = self._settings
         cascade_dir = self._cascade_dir(organism)
         gold_dir = scoped_output_dir(self._paths.paths.gold, "combined", organism=organism)
@@ -2206,9 +2208,9 @@ class SupplementaryTableBuilder:
         comparison_dir = self._modeling_dir(organism) / "threshold_strategy_comparison"
         threshold_selected = read(comparison_dir / "threshold_strategy_selected.parquet", missing)
         threshold_tested = read(comparison_dir / "threshold_strategy_test_metrics.parquet", missing)
-        prevalence = read(tables_dir / "table_k_prevalence_shift.csv", missing)
+        prevalence = read(tables_dir / "table_k_prevalence_shift.csv", missing) if publication != "paper1" else None
         coverage = read(tables_dir / "table_w_observation_coverage.csv", missing)
-        diagnostics = read(tables_dir / "table_k_prevalence_shift_diagnostics.csv", missing)
+        diagnostics = read(tables_dir / "table_k_prevalence_shift_diagnostics.csv", missing) if publication != "paper1" else None
         cohort_long = read(tables_dir / "table_v_cohort_characteristics_long.csv", missing)
         cohort_display = read(tables_dir / "table_v_cohort_characteristics.csv", missing)
         opportunity = read(tables_dir / "table_b_eligibility.csv", missing)

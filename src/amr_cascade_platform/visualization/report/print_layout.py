@@ -106,7 +106,7 @@ def frame(
                "font": {"size": FONT_TITLE, "color": TEXT}},
         margin=dict(margin),
         hoverlabel={"font": {"family": FONT}},
-        meta={"print_geometry": True},  # laid out for print already: the exporter only scales its text
+        meta={"print_geometry": True, "geometry_scale": g.margin_scale, "heading_band": 36},
     )
 
 

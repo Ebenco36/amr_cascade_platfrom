@@ -1,6 +1,12 @@
 from pathlib import Path
 
 import pandas as pd
+from plotly.subplots import make_subplots
+
+from amr_cascade_platform.visualization.report.figure_presentation import prepare_matplotlib
+from amr_cascade_platform.visualization.report.plotly_mnar_prevalence_shift_distribution_plotter import (
+    PlotlyMNARPrevalenceShiftDistributionPlotter,
+)
 
 from amr_cascade_platform.visualization.report.plotly_exporter import PlotlyFigureExporter
 from amr_cascade_platform.visualization.report.plotly_prevalence_plotter import PlotlyPrevalencePlotter
@@ -95,3 +101,43 @@ def test_prevalence_static_exports_are_real_and_compact(tmp_path: Path) -> None:
     assert "CEFEPIME" in html
     assert "TETRACYCLINE" in html
     assert b"Static export unavailable" not in forest["forest.pdf"].read_bytes()
+
+
+def test_sensitivity_map_long_edge_labels_stay_inside_axis(monkeypatch, tmp_path):
+    data = pd.DataFrame({
+        "drug": ["TRIMETHOPRIM/SULFAMETHOXAZOLE", "AMPICILLIN/SULBACTAM"],
+        "cascade_trigger_fraction": [0.05, 0.90],
+        "_enrichment": [4.0, 12.0], "_bound_width": [10.0, 40.0],
+    })
+    def inspect(fig, *args, **kwargs):
+        prepare_matplotlib(fig, hide_titles=True)
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        ax = fig.axes[0]
+        labels = [text for text in ax.texts if text.get_text() in set(data["drug"])]
+        assert len(labels) == 2
+        for label in labels:
+            box = label.get_window_extent(renderer)
+            assert box.x0 >= ax.bbox.x0 and box.x1 <= ax.bbox.x1
+    monkeypatch.setattr(
+        "amr_cascade_platform.visualization.report.plotly_prevalence_plotter.save_matplotlib", inspect,
+    )
+    _plotter()._write_surveillance_sensitivity_map_static(data, "png", tmp_path / "map.png")
+
+
+def test_reference_shift_labels_do_not_claim_true_prevalence():
+    plotter = PlotlyMNARPrevalenceShiftDistributionPlotter(
+        PlotlyFigureExporter(1200, 800), "plotly_white", 1200, 800,
+    )
+    data = pd.DataFrame({
+        "pair_label": ["A", "B", "C"], "shift_pct": [10.0, -5.0, 0.0],
+        "naive_prevalence_pct": [50.0, 20.0, 30.0],
+        "mnar_lambda0_prevalence_pct": [40.0, 25.0, 30.0],
+    })
+    fig = make_subplots(rows=1, cols=2)
+    plotter._panel_a_waterfall(fig, data)
+    plotter._panel_b_scatter(fig, data)
+    names = {trace.name for trace in fig.data if trace.name}
+    assert names == {"Naive above reference", "Naive below reference", "Equal to reference"}
+    equal_points = [trace for trace in fig.data if trace.name == "Equal to reference" and trace.mode == "markers"]
+    assert len(equal_points) == 1 and list(equal_points[0].x) == [30.0]

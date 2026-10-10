@@ -55,6 +55,15 @@ Options:
                                 other stage here.
   --run-all-figures            Export every registered reporting figure family,
                                including opt-in dataset characterization figures.
+  --publication all|paper1|manuscripts
+                               Default all. manuscripts covers both papers only.
+                               Paper 1 skips prevalence and the broad
+                               dataset-summary job; reports only its cited figures.
+                               Its final artifact audit is queued by submit_everything_hpc.sh.
+  --after-job JOBID[:JOBID]   Wait for these upstream SLURM jobs (variant input barrier).
+  --hide-figure-titles         Remove global figure titles/subtitles, preserving panel labels.
+  --validation-only            Stop combined analysis at validation merging (for
+                               availability sensitivity runs); no final regression/report.
   --include-site-comparison-figures
                                Include site-vs-combined and cross-site concordance
                                figures during reporting using existing site-cascade
@@ -216,6 +225,9 @@ RUN_ALL_FIGURES=0
 RUN_SITE_COMPARISON_FIGURES=0
 RUN_AUDIT=0
 RUN_READINESS_AUDIT=0
+PUBLICATION=all
+HIDE_FIGURE_TITLES=0
+VALIDATION_ONLY=0
 REUSE_EXISTING=1
 
 split_csv() {
@@ -269,6 +281,10 @@ while [[ $# -gt 0 ]]; do
     --skip-cascade) RUN_CASCADE=0; shift ;;
     --skip-prevalence) RUN_PREVALENCE=0; shift ;;
     --skip-reporting) RUN_REPORTING=0; shift ;;
+    --publication) PUBLICATION="$2"; shift 2 ;;
+    --after-job) EXTERNAL_DEPENDENCY="$2"; shift 2 ;;
+    --hide-figure-titles) HIDE_FIGURE_TITLES=1; shift ;;
+    --validation-only) VALIDATION_ONLY=1; shift ;;
     --skip-dataset-summary) RUN_DATASET_SUMMARY=0; shift ;;
     --run-site-cascade) RUN_SITE_CASCADE=1; shift ;;
     --run-features) RUN_FEATURES=1; shift ;;
@@ -335,6 +351,26 @@ if [[ -n "${THRESHOLD_STRATEGY}" && "${THRESHOLD_STRATEGY}" != "validation_holdo
   exit 2
 fi
 
+EXTERNAL_DEPENDENCY="${EXTERNAL_DEPENDENCY:-}"
+[[ -z "${EXTERNAL_DEPENDENCY}" || "${EXTERNAL_DEPENDENCY}" =~ ^[0-9]+(:[0-9]+)*$ || ( "${DRY_RUN}" -eq 1 && "${EXTERNAL_DEPENDENCY}" == DRYRUN_* ) ]] || { echo "--after-job requires SLURM job IDs separated by colons" >&2; exit 2; }
+[[ "${PUBLICATION}" == all || "${PUBLICATION}" == paper1 || "${PUBLICATION}" == manuscripts ]] || { echo "--publication must be all, paper1 or manuscripts" >&2; exit 2; }
+if [[ "${PUBLICATION}" != all ]]; then
+  [[ "${PUBLICATION}" != paper1 ]] || RUN_PREVALENCE=0
+  RUN_DATASET_SUMMARY=0
+  # The wrapper schedules the named-asset audit after supplementary exports.
+  if [[ "${RUN_AUDIT}" -eq 1 || "${RUN_READINESS_AUDIT}" -eq 1 ]]; then
+    echo "Manuscript profiles use their final artifact audit; omit full-platform audit flags." >&2
+    exit 2
+  fi
+fi
+if [[ "${VALIDATION_ONLY}" -eq 1 ]]; then
+  if [[ "${RUN_SITE_CASCADE}" -eq 1 || "${RUN_FEATURES}" -eq 1 || "${RUN_TRAINING}" -eq 1 || "${RUN_THRESHOLD_COMPARISON}" -eq 1 || "${RUN_ESKAPE}" -eq 1 || "${RUN_AUDIT}" -eq 1 || "${RUN_READINESS_AUDIT}" -eq 1 ]]; then
+    echo "--validation-only cannot be combined with downstream analyses or site cascades." >&2
+    exit 2
+  fi
+  RUN_PREVALENCE=0
+  RUN_REPORTING=0
+fi
 if [[ "${RUN_SITE_CASCADE}" -eq 1 && "${RUN_CASCADE}" -eq 0 ]]; then
   echo "ERROR: --run-site-cascade requires cascade analysis, but --skip-cascade was also supplied." >&2
   echo "Remove --skip-cascade to regenerate site-cascade comparison artifacts, or omit --run-site-cascade for a combined-only output refresh." >&2
@@ -680,7 +716,13 @@ AUDIT_TIME="${AUDIT_TIME:-02:00:00}"
 READINESS_AUDIT_TIME="${READINESS_AUDIT_TIME:-01:00:00}"
 
 REPORT_FIGURE_ARGS=""
-if [[ "${RUN_ALL_FIGURES}" -eq 1 ]]; then
+REPORT_PRESENTATION_ARGS=""
+[[ "${HIDE_FIGURE_TITLES}" -eq 1 ]] && REPORT_PRESENTATION_ARGS="--hide-figure-titles"
+CASCADE_EXTRA_ARGS=""
+if [[ "${PUBLICATION}" != all ]]; then
+  REPORT_FIGURE_ARGS="--publication ${PUBLICATION} --fail-on-missing-figures"
+  CASCADE_EXTRA_ARGS="--skip-shap"
+elif [[ "${RUN_ALL_FIGURES}" -eq 1 ]]; then
   REPORT_FIGURE_ARGS="--fail-on-missing-figures --figure cascade_directional --figure cascade_evidence_scatter --figure cascade_consequence_summary --figure operational_availability_suite --figure observation_coverage --figure descriptive_summaries --figure prevalence_shift_forest --figure prevalence_shift_curves --figure mnar_tipping_point --figure upstream_contribution_forest --figure downstream_trigger_forest --figure threshold_sensitivity --figure model_metrics_comparison --figure model_pr_curve --figure model_roc_curve --figure model_calibration --figure model_threshold_analysis --figure adjusted_model_shap --figure validation_diagnostics --figure er_landscape --figure mnar_prevalence_shift_distribution --figure validation_funnel --figure panel_bundling --figure temporal_stability --figure consort_diagram --figure dataset_characterization"
   if [[ "${RUN_SITE_CASCADE}" -eq 1 || "${RUN_SITE_COMPARISON_FIGURES}" -eq 1 ]]; then
     REPORT_FIGURE_ARGS="${REPORT_FIGURE_ARGS} --figure site_vs_combined_summary --figure cross_site_concordance"
@@ -845,6 +887,9 @@ cascade_ready() {
   local organism="${3:-}"
   local dir
   dir="$(scope_dir_path "${PROJECT_ROOT}/${DATA_ROOT_DIR}/artifacts/cascade" "${scope}" "${site}" "${organism}")"
+  if [[ "${PUBLICATION}" == all ]] && grep -q '"explainability_requested": false' "${dir}/_SUCCESS.json" 2>/dev/null; then
+    return 1
+  fi
   # _SUCCESS.json is written last by the cascade job, only after every file is in
   # place, so a directory left by a killed job is never taken as finished.
   [[ -f "${dir}/retained_edges.parquet" &&
@@ -920,6 +965,7 @@ training_ready() {
      -f "${dir}/selected_thresholds.parquet" &&
      -f "${dir}/modeling_summary.json" &&
      -f "${dir}/logistic_regression_predictions.parquet" &&
+     -f "${dir}/site__all_models/full/logistic_regression_coefficients.parquet" &&
      -f "${dir}/random_forest_predictions.parquet" &&
      -f "${dir}/xgboost_predictions.parquet" ]]
 }
@@ -942,6 +988,9 @@ dataset_summary_ready() {
   local organism="${3:-}"
   local dir
   dir="$(scope_dir_path "${REPORTS_ROOT}" "${scope}" "${site}" "${organism}")"
+  local presentation=false
+  [[ "${HIDE_FIGURE_TITLES}" -eq 1 ]] && presentation=true
+  grep -q "\"hide_figure_titles\": ${presentation}" "${dir}/dataset_summary/dataset_summary_manifest.json" 2>/dev/null || return 1
   [[ -f "${dir}/dataset_summary/dataset_summary_manifest.json" ]]
 }
 
@@ -953,6 +1002,22 @@ reporting_ready() {
   dir="$(scope_dir_path "${REPORTS_ROOT}" "${scope}" "${site}" "${organism}")"
   cascade_dir="$(scope_dir_path "${PROJECT_ROOT}/${DATA_ROOT_DIR}/artifacts/cascade" "${scope}" "${site}" "${organism}")"
   comparison_dir="$(scope_dir_path "${PROJECT_ROOT}/${DATA_ROOT_DIR}/artifacts/modeling/downstream_testing" "${scope}" "${site}" "${organism}")/threshold_strategy_comparison"
+  if [[ "${PUBLICATION}" != all ]]; then
+    local prevalence_input=""
+    [[ "${PUBLICATION}" != manuscripts ]] || prevalence_input="$(scope_dir_path "${PROJECT_ROOT}/${DATA_ROOT_DIR}/artifacts/prevalence_shift" "${scope}" "${site}" "${organism}")/prevalence_shift.parquet"
+    "${PYTHON}" - "${PROJECT_ROOT}" "${dir}/report_manifest.json" "${cascade_dir}/edge_report.parquet" "${HIDE_FIGURE_TITLES}" "${PUBLICATION}" "${prevalence_input}" <<'PY'
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]) / "src"))
+from amr_cascade_platform.reporting.paper1_profile import report_ready
+inputs = (Path(sys.argv[6]), Path(sys.argv[6]).with_name("prevalence_mnar_sensitivity_curves.parquet")) if sys.argv[6] else ()
+raise SystemExit(0 if report_ready(Path(sys.argv[2]), Path(sys.argv[3]), hide_titles=sys.argv[4] == "1", publication=sys.argv[5], additional_inputs=inputs, project_root=Path(sys.argv[1])) else 1)
+PY
+    return $?
+  fi
+  local presentation=false
+  [[ "${HIDE_FIGURE_TITLES}" -eq 1 ]] && presentation=true
+  grep -q "\"hide_figure_titles\": ${presentation}" "${dir}/report_manifest.json" 2>/dev/null || return 1
   [[ -f "${dir}/report_manifest.json" &&
      -f "${cascade_dir}/adjusted_model_shap_metadata.parquet" &&
      "${dir}/report_manifest.json" -nt "${cascade_dir}/adjusted_model_shap_metadata.parquet" ]] || return 1
@@ -1424,12 +1489,12 @@ for raw_site in "${SITES[@]}"; do
   site="$(trim "${raw_site}")"
   [[ -n "${site}" ]] || continue
   site_slug="$(slugify "${site}")"
-  deps=""
+  deps="${EXTERNAL_DEPENDENCY}"
 
   if [[ "${RUN_INGESTION}" -eq 1 ]]; then
-    if should_submit "" bronze_ready "${site}"; then
+    if should_submit "${deps}" bronze_ready "${site}"; then
       ingest_job="$(
-        submit_job "amr_${site_slug}_ingest" "${INGEST_TIME}" "${INGEST_MEM}" "" \
+        submit_job "amr_${site_slug}_ingest" "${INGEST_TIME}" "${INGEST_MEM}" "${deps}" \
           "\"\${AMR_CASCADE_PYTHON}\" scripts/run_ingestion.py --env ${ENV_NAME} --site '${site}' --source-layer raw"
       )"
       echo "Ingestion ${site}: ${ingest_job}"
@@ -1473,10 +1538,10 @@ if [[ "${RUN_HARMONIZATION}" -eq 1 ]]; then
     common_dep="${harmonize_job}"
   else
     skip_ready "harmonization"
-    common_dep=""
+    common_dep="${EXTERNAL_DEPENDENCY}"
   fi
 else
-  common_dep="${harmonize_deps}"
+  common_dep="$(join_colon "${harmonize_deps}" "${EXTERNAL_DEPENDENCY}")"
 fi
 
 if [[ "${RUN_COMORBIDITY}" -eq 1 && "${RUN_FEATURES}" -eq 1 ]]; then
@@ -1566,7 +1631,7 @@ for raw_organism in "${ORGANISMS[@]}"; do
           site_cascade_job="$(
             PARTITION="${CASCADE_PARTITION}"
             submit_job "${organism_prefix}_${site_slug}_cascade" "${CASCADE_TIME}" "${CASCADE_MEM}" "${site_dep}" \
-              "\"\${AMR_CASCADE_PYTHON}\" scripts/run_cascade_analysis.py --env ${ENV_NAME} --gold-scope site --site '${site}' --organism '${organism}'"
+              "\"\${AMR_CASCADE_PYTHON}\" scripts/run_cascade_analysis.py --env ${ENV_NAME} --gold-scope site --site '${site}' --organism '${organism}' ${CASCADE_EXTRA_ARGS}"
           )"
           echo "Site cascade ${site} | ${organism}: ${site_cascade_job}"
           submitted_jobs+=("${site_cascade_job}")
@@ -1600,7 +1665,7 @@ for raw_organism in "${ORGANISMS[@]}"; do
     if should_submit "${combined_dep}" dataset_summary_ready "combined" "" "${organism}"; then
       dataset_summary_job="$(
         submit_job "${organism_prefix}_dataset_summary" "${REPORT_TIME}" "${REPORT_MEM}" "${combined_dep}" \
-          "\"\${AMR_CASCADE_PYTHON}\" scripts/run_dataset_summary.py --env ${ENV_NAME} --scope combined --organism '${organism}' --figure-format png --figure-format pdf --figure-format html"
+          "\"\${AMR_CASCADE_PYTHON}\" scripts/run_dataset_summary.py --env ${ENV_NAME} --scope combined --organism '${organism}' --figure-format png --figure-format pdf --figure-format html ${REPORT_PRESENTATION_ARGS}"
       )"
       echo "Dataset summary ${organism}: ${dataset_summary_job}"
       submitted_jobs+=("${dataset_summary_job}")
@@ -1611,7 +1676,9 @@ for raw_organism in "${ORGANISMS[@]}"; do
 
   cascade_dep="${combined_dep}"
   if [[ "${RUN_CASCADE}" -eq 1 ]]; then
-    if should_submit "${cascade_dep}" cascade_ready "combined" "" "${organism}"; then
+    cascade_ready_check=cascade_ready
+    [[ "${VALIDATION_ONLY}" -eq 1 ]] && cascade_ready_check=validation_merge_ready
+    if should_submit "${cascade_dep}" "${cascade_ready_check}" "combined" "" "${organism}"; then
       # The full validation loop at B=1000 requires ~800h sequentially for E. coli
       # (1,637 retained edges).  Split across CASCADE_SHARD_NUM parallel shard jobs,
       # each validating ~40 edges in ~24h.  A merge job then applies global BH-FDR
@@ -1648,14 +1715,16 @@ for raw_organism in "${ORGANISMS[@]}"; do
         skip_ready "cascade validation merge ${organism}"
       fi
 
-      combined_cascade_job="$(
-        PARTITION="${CASCADE_PARTITION}"
-        submit_job "${organism_prefix}_cascade" "${CASCADE_TIME}" "${CASCADE_MEM}" "${cascade_dep}" \
-          "\"\${AMR_CASCADE_PYTHON}\" scripts/run_cascade_analysis.py --env ${ENV_NAME} --gold-scope combined --organism '${organism}'"
-      )"
-      echo "Combined cascade ${organism}: ${combined_cascade_job}"
-      submitted_jobs+=("${combined_cascade_job}")
-      cascade_dep="${combined_cascade_job}"
+      if [[ "${VALIDATION_ONLY}" -eq 0 ]]; then
+        combined_cascade_job="$(
+          PARTITION="${CASCADE_PARTITION}"
+          submit_job "${organism_prefix}_cascade" "${CASCADE_TIME}" "${CASCADE_MEM}" "${cascade_dep}" \
+            "\"\${AMR_CASCADE_PYTHON}\" scripts/run_cascade_analysis.py --env ${ENV_NAME} --gold-scope combined --organism '${organism}' ${CASCADE_EXTRA_ARGS}"
+        )"
+        echo "Combined cascade ${organism}: ${combined_cascade_job}"
+        submitted_jobs+=("${combined_cascade_job}")
+        cascade_dep="${combined_cascade_job}"
+      fi
     else
       skip_ready "combined cascade ${organism}"
     fi
@@ -1729,7 +1798,9 @@ for raw_organism in "${ORGANISMS[@]}"; do
   fi
 
   if [[ "${RUN_REPORTING}" -eq 1 ]]; then
-    report_inputs=("${prevalence_dep}")
+    renderer_check=""
+    [[ "${PUBLICATION}" != all ]] && renderer_check="\"\${AMR_CASCADE_PYTHON}\" scripts/check_publication_renderer.py && "
+    report_inputs=("${prevalence_dep}" "${site_cascade_jobs[@]}")
     [[ -n "${training_dep}" ]] && report_inputs+=("${training_dep}")
     [[ -n "${threshold_comparison_dep}" ]] && report_inputs+=("${threshold_comparison_dep}")
     report_deps="$(join_colon "${report_inputs[@]}")"
@@ -1737,7 +1808,7 @@ for raw_organism in "${ORGANISMS[@]}"; do
     if should_submit "${report_deps}" reporting_ready "combined" "" "${organism}"; then
       report_job="$(
         submit_job "${organism_prefix}_report" "${REPORT_TIME}" "${REPORT_MEM}" "${report_deps}" \
-          "\"\${AMR_CASCADE_PYTHON}\" scripts/run_reporting.py --env ${ENV_NAME} --scope combined --organism '${organism}' --figure-format html --figure-format png --figure-format svg --figure-format pdf ${REPORT_FIGURE_ARGS}"
+          "${renderer_check}\"\${AMR_CASCADE_PYTHON}\" scripts/run_reporting.py --env ${ENV_NAME} --scope combined --organism '${organism}' --figure-format html --figure-format png --figure-format svg --figure-format pdf ${REPORT_FIGURE_ARGS} ${REPORT_PRESENTATION_ARGS}"
       )"
       echo "Report ${organism}: ${report_job}"
       submitted_jobs+=("${report_job}")

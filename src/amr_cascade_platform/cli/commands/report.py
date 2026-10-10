@@ -60,6 +60,8 @@ def register_reporting_command(subparsers, project_root: Path, context_builder) 
     )
     parser.add_argument("--site", default=None, help="Site name when using --scope site.")
     parser.add_argument("--organism", default=None, help="Optional organism filter for organism-stratified reporting outputs.")
+    parser.add_argument("--publication", choices=("all", "paper1", "manuscripts"), default="all")
+    parser.add_argument("--hide-figure-titles", action="store_true", help="Omit figure titles/subtitles; keep axis, legend and panel labels without shrinking the canvas.")
     parser.add_argument(
         "--figure-format",
         action="append",
@@ -91,5 +93,7 @@ def _run(args, project_root: Path, context_builder) -> None:
             figure_formats=tuple(args.figure_format) if args.figure_format else None,
             figures=tuple(args.figure) if args.figure else None,
             fail_on_missing_figures=args.fail_on_missing_figures,
+            publication=args.publication,
+            hide_figure_titles=args.hide_figure_titles,
         )
     )

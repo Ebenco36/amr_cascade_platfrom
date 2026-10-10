@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from amr_cascade_platform.visualization.report.figure_presentation import save_matplotlib
+
 from pathlib import Path
 
 import numpy as np
@@ -279,6 +281,39 @@ class PlotlyModelEvaluationPlotter:
         order = [selection_metric] + [m for m in ("balanced_accuracy", "mcc", "f1", "precision", "recall") if m != selection_metric]
         return [(metric, cls._METRIC_LABELS.get(metric, metric)) for metric in order]
 
+    @classmethod
+    def style_threshold_axes(cls, fig: go.Figure, metric_specs: list[tuple[str, str]], *, cols: int) -> None:
+        """Use a complete probability scale and one shared label in every export."""
+        ticks = np.linspace(0.0, 1.0, 6).tolist()
+        for index, (metric, _) in enumerate(metric_specs):
+            row, col = index // cols + 1, index % cols + 1
+            fig.update_xaxes(
+                title_text="", range=[0, 1], tickmode="array", tickvals=ticks,
+                tickformat=".1f", tickfont={"size": 11}, ticks="outside", ticklen=4,
+                showline=True, linecolor="#CBD5E1", linewidth=1,
+                showgrid=True, gridcolor="#EEF2F6", zeroline=False,
+                row=row, col=col,
+            )
+            fig.update_yaxes(
+                title_text="", range=[-1.02, 1.02] if metric == "mcc" else [-0.02, 1.02],
+                tickmode="array", tickvals=[-1, -0.5, 0, 0.5, 1] if metric == "mcc" else ticks,
+                tickformat=".1f", tickfont={"size": 11},
+                showgrid=True, gridcolor="#EEF2F6", zeroline=False,
+                row=row, col=col,
+            )
+        fig.add_annotation(
+            text="Probability threshold for predicting downstream AST observation",
+            name="shared_axis_label", x=0.5, y=0, xref="paper", yref="paper",
+            yshift=-40, xanchor="center", yanchor="top", showarrow=False,
+            font={"size": 12},
+        )
+
+    @classmethod
+    def threshold_selection_note(cls, data: pd.DataFrame) -> str:
+        metric = cls._selection_metric(data)
+        label = cls._METRIC_LABELS.get(metric, metric).lower()
+        return f"Diamonds mark saved thresholds selected using {label} {cls._selection_source_phrase(data)}."
+
     def export_threshold_analysis(
         self,
         threshold_metrics: pd.DataFrame,
@@ -353,26 +388,22 @@ class PlotlyModelEvaluationPlotter:
                 # it: under grouped_oof they come from training OOF predictions, not from
                 # the validation curves drawn here.
                 title=(
-                    f"Threshold selection by model ({split} split)"
+                    f"Threshold performance by model ({split} split)"
                     f"<br><sup>Diamonds: each model's threshold maximising "
                     f"{self._METRIC_LABELS.get(selection_metric, selection_metric).lower()} "
                     f"{self._selection_source_phrase(plot_data)}</sup>"
                 ),
                 width=max(1450, 560 * cols),
                 height=max(self._height, 520 * rows + 200),
-                margin={"l": 70, "r": 40, "t": 110, "b": 170},
+                margin={"l": 70, "r": 40, "t": 110, "b": 280},
+                legend_y=-0.22,
             )
-            for idx, (_, label) in enumerate(metric_specs, start=1):
-                row = (idx - 1) // cols + 1
-                col = (idx - 1) % cols + 1
-                fig.update_xaxes(
-                    title={"text": "Threshold", "font": {"size": 11}}, tickfont={"size": 10},
-                    row=row, col=col, range=[0.02, 0.98], dtick=0.2,
-                )
-                fig.update_yaxes(
-                    title={"text": label, "font": {"size": 11}}, tickfont={"size": 10},
-                    row=row, col=col, tickformat=".3g",
-                )
+            self.style_threshold_axes(fig, metric_specs, cols=cols)
+            fig.add_annotation(
+                text=self.threshold_selection_note(plot_data), name="selection_note",
+                x=0.5, y=0, xref="paper", yref="paper", yshift=-70,
+                xanchor="center", yanchor="top", showarrow=False, font={"size": 10, "color": "#475467"},
+            )
         return self._exporter.write(
             fig,
             output_stem,
@@ -470,7 +501,7 @@ class PlotlyModelEvaluationPlotter:
             ax.axis("off")
         fig.suptitle("Model Performance Comparison", fontsize=20, y=0.98)
         fig.tight_layout(rect=(0, 0, 1, 0.96))
-        fig.savefig(path, format=fmt, dpi=300, bbox_inches="tight")
+        save_matplotlib(fig, path, format=fmt, dpi=300, bbox_inches="tight")
         plt.close(fig)
 
     def _write_curve_static(self, plot_data: pd.DataFrame, fmt: str, path: Path, curve_type: str) -> None:
@@ -496,7 +527,7 @@ class PlotlyModelEvaluationPlotter:
         ax.spines[["top", "right"]].set_visible(False)
         ax.legend(frameon=False, loc="lower center", bbox_to_anchor=(0.5, -0.18), ncol=2, fontsize=12)
         fig.tight_layout()
-        fig.savefig(path, format=fmt, dpi=300, bbox_inches="tight")
+        save_matplotlib(fig, path, format=fmt, dpi=300, bbox_inches="tight")
         plt.close(fig)
 
     def _write_calibration_static(self, plot_data: pd.DataFrame, fmt: str, path: Path) -> None:
@@ -517,7 +548,7 @@ class PlotlyModelEvaluationPlotter:
         ax.spines[["top", "right"]].set_visible(False)
         ax.legend(frameon=False, loc="lower center", bbox_to_anchor=(0.5, -0.18), ncol=2, fontsize=12)
         fig.tight_layout(rect=(0, 0.05, 1, 1))
-        fig.savefig(path, format=fmt, dpi=300, bbox_inches="tight")
+        save_matplotlib(fig, path, format=fmt, dpi=300, bbox_inches="tight")
         plt.close(fig)
 
     def _write_threshold_static(
@@ -526,11 +557,12 @@ class PlotlyModelEvaluationPlotter:
         fmt: str,
         path: Path,
         split: str,
+        metric_specs: list[tuple[str, str]] | None = None,
+        cols: int = 3,
     ) -> None:
-        metrics = self._threshold_metric_specs(self._selection_metric(plot_data))
-        cols = 3
+        metrics = metric_specs or self._threshold_metric_specs(self._selection_metric(plot_data))
         rows = (len(metrics) + cols - 1) // cols
-        fig, axes = plt.subplots(rows, cols, figsize=(18, 5.6 * rows), sharex=True)
+        fig, axes = plt.subplots(rows, cols, figsize=(6 * cols, 5.6 * rows), sharex=True)
         axes_array = np.atleast_1d(axes).ravel()
         for ax, (metric, label) in zip(axes_array, metrics):
             for model_name, subset in plot_data.groupby("model_name", sort=False):
@@ -557,11 +589,17 @@ class PlotlyModelEvaluationPlotter:
                         zorder=4,
                     )
             ax.set_title(label)
-            ax.set_xlabel("Threshold")
-            ax.set_ylabel(label)
+            ax.set_xlabel("")
+            ax.set_ylabel("")
             ax.grid(color="#E8EEF5", linewidth=0.8)
             ax.spines[["top", "right"]].set_visible(False)
-            ax.set_xlim(0.02, 0.98)
+            ax.set_xlim(0, 1)
+            ticks = np.linspace(0, 1, 6)
+            ax.set_xticks(ticks, [f"{value:.1f}" for value in ticks])
+            ax.tick_params(axis="x", labelbottom=True)
+            ax.set_ylim((-1.02, 1.02) if metric == "mcc" else (-0.02, 1.02))
+            yticks = np.linspace(-1, 1, 5) if metric == "mcc" else ticks
+            ax.set_yticks(yticks, [f"{value:.1f}" for value in yticks])
         for ax in axes_array[len(metrics):]:
             ax.axis("off")
         handles, labels = axes_array[0].get_legend_handles_labels()
@@ -574,6 +612,8 @@ class PlotlyModelEvaluationPlotter:
             ncol=4,
             fontsize=13,
         )
+        fig.text(0.5, 0.15, "Probability threshold for predicting downstream AST observation", ha="center", fontsize=13)
+        fig.text(0.5, 0.10, self.threshold_selection_note(plot_data), ha="center", fontsize=10, wrap=True, color="#475467")
         fig.suptitle(
             f"Threshold selection by model ({split} split)\n"
             f"Diamonds: each model's threshold maximising "
@@ -583,5 +623,5 @@ class PlotlyModelEvaluationPlotter:
             y=0.98,
         )
         fig.subplots_adjust(left=0.07, right=0.985, top=0.82, bottom=0.22, wspace=0.22)
-        fig.savefig(path, format=fmt, dpi=300, bbox_inches="tight")
+        save_matplotlib(fig, path, format=fmt, dpi=300, bbox_inches="tight")
         plt.close(fig)

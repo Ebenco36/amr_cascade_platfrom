@@ -113,9 +113,13 @@ def plan_package(
     figures_dir: Path,
     tables_dir: Path,
     run_started: float,
+    *,
+    papers: tuple[str, ...] = PAPERS,
 ) -> dict[str, Plan]:
+    if not papers or not set(papers).issubset(PAPERS):
+        raise ValueError(f"Select at least one known manuscript: {PAPERS}")
     plans: dict[str, Plan] = {}
-    for paper in PAPERS:
+    for paper in papers:
         paper_dir = project_root / paper
         submission_dir = project_root / "submission_figures" / paper
         citations = scan_citations(paper_dir)

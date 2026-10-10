@@ -32,6 +32,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--site", default=None)
     p.add_argument("--organism", default=None)
     p.add_argument("--penalties", default="1,10,100", help="Comma-separated ridge penalties.")
+    p.add_argument("--check-ready", action="store_true", help="Read-only completion check; exit 1 if recomputation is needed.")
     return p
 
 
@@ -45,6 +46,7 @@ def main() -> None:
     from amr_cascade_platform.cascade.analyzers.escalation_ratio_analyzer import EscalationRatioAnalyzer
     from amr_cascade_platform.cascade.statistics.cascade_covariate_builder import CascadeCovariateBuilder
     from amr_cascade_platform.cascade.statistics.downstream_testing_regression import DownstreamTestingRegression
+    from amr_cascade_platform.cascade.workflows.sensitivity_cache import SensitivityCache
     from amr_cascade_platform.cascade.workflows.cascade_analysis_workflow import (
         _PAIR_TABLE_CATEGORICAL_COLUMNS,
         CascadeAnalysisWorkflow,
@@ -83,8 +85,15 @@ def main() -> None:
     if not validation_path.exists():
         raise DataDiscoveryError(f"validation_results.parquet not found at {validation_path}; run the validation merge first.")
     output_path = cascade_dir / "ridge_penalty_sensitivity.parquet"
-    if output_path.exists():
-        logger.info("Ridge-penalty sensitivity results already exist: %s", output_path)
+    inputs = {"pairs": pair_path, "episodes": culture_episode_path, "validation": validation_path}
+    # The covariate builder reads harmonized clinical tables, not just gold episodes.
+    inputs.update({f"harmonized:{path.relative_to(path_manager.paths.harmonized)}": path
+                   for path in path_manager.paths.harmonized.rglob("*.parquet")})
+    cache = SensitivityCache(project_root, settings, inputs, analysis="ridge", penalties=penalties)
+    if args.check_ready:
+        raise SystemExit(0 if cache.ready(output_path) else 1)
+    if cache.ready(output_path):
+        logger.info("Ridge-penalty results match current inputs and code: %s", output_path)
         return
 
     drug_pairs = dataset_store.read_pandas(pair_path, categorical_columns=_PAIR_TABLE_CATEGORICAL_COLUMNS)
@@ -117,7 +126,7 @@ def main() -> None:
             "modeled_n",
         ],
     ]
-    output.to_parquet(output_path, index=False)
+    cache.save(output, output_path)
     logger.info("Ridge-penalty sensitivity written: %s", output_path)
 
 

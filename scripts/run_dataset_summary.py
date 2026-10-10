@@ -33,6 +33,7 @@ def main() -> None:
     parser.add_argument("--scope", choices=("combined", "site"), default="combined")
     parser.add_argument("--site", default=None)
     parser.add_argument("--organism", default=None)
+    parser.add_argument("--hide-figure-titles", action="store_true", help="Omit global titles/subtitles while retaining axis and panel labels.")
     parser.add_argument("--figure-format", action="append", choices=("html", "png", "svg", "pdf"), dest="formats")
     args = parser.parse_args()
 
@@ -41,7 +42,7 @@ def main() -> None:
     project_root = Path(__file__).resolve().parents[1]
     settings, path_manager, _ = build_context(project_root, args.env)
     formats = tuple(args.formats or ("png", "pdf", "html"))
-    outputs = DatasetSummaryWorkflow(settings, path_manager).run(args.scope, args.site, args.organism, formats)
+    outputs = DatasetSummaryWorkflow(settings, path_manager).run(args.scope, args.site, args.organism, formats, hide_figure_titles=args.hide_figure_titles)
     digest = next((path for name, path in outputs.items() if name == "dataset_summary.md"), None)
     logger.info("Dataset summary written: %d files; digest %s", len(outputs), digest)
     if digest is not None:

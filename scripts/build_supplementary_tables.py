@@ -32,12 +32,13 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Build the generated supplementary tables.")
     parser.add_argument("--env", default=None, help="Runtime environment (e.g. mac, hpc).")
     parser.add_argument("--organism", default="ESCHERICHIA COLI")
+    parser.add_argument("--publication", choices=("all", "paper1", "manuscripts"), default="all")
     parser.add_argument("--allow-missing", action="store_true", help="Write what can be built and exit 0 even if inputs are missing.")
     args = parser.parse_args()
 
     project_root = Path(__file__).resolve().parents[1]
     settings, path_manager, _ = build_context(project_root, args.env)
-    result = SupplementaryTableBuilder(settings, path_manager).build(args.organism)
+    result = SupplementaryTableBuilder(settings, path_manager).build(args.organism, publication=args.publication)
 
     for name in sorted(result.written):
         print(f"wrote {result.written[name]}")

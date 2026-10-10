@@ -1,7 +1,7 @@
 """
 Supplementary predictive-modelling comparison — publication figures and tables.
 
-Loads saved prediction artefacts (no retraining except LR for coefficients),
+Loads saved prediction artefacts and fitted LR coefficients (no retraining),
 then writes six publication-quality figures (each as .html, .png, and .pdf,
 matching the house style in
 src/amr_cascade_platform/visualization/report/plotly_model_plotters.py) and
@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import argparse
 import sys
-import time
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,23 +36,15 @@ from typing import Callable
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-import pyarrow as pa
-import pyarrow.dataset as ds
-import pyarrow.parquet as pq
 from matplotlib import pyplot as plt
 from plotly.subplots import make_subplots
 from sklearn.calibration import calibration_curve
-from sklearn.compose import ColumnTransformer
-from sklearn.impute import SimpleImputer
-from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     average_precision_score,
     precision_recall_curve,
     roc_auc_score,
     roc_curve,
 )
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -67,7 +58,7 @@ FIG_HEIGHT = 900
 GRID_X = "#E8EEF5"
 GRID_Y = "#F2F4F7"
 REFERENCE_COLOR = "#7F8C8D"
-EXPORT_FORMATS = ("html", "png", "pdf")
+EXPORT_FORMATS = ("html", "png", "svg", "pdf")
 
 # ── Model display properties ─────────────────────────────────────────────────
 MODEL_ORDER = ["logistic_regression", "random_forest", "xgboost"]
@@ -86,6 +77,8 @@ SPLIT_LABEL = {"train": "Train (armd)", "validation": "Validation (armd_ecuh)", 
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
+from amr_cascade_platform.visualization.report.figure_presentation import figure_titles_hidden, save_matplotlib, title_policy
 
 
 @dataclass(frozen=True)
@@ -224,7 +217,7 @@ def _write_all_formats(
 
     width = int(fig.layout.width or FIG_WIDTH)
     height = int(fig.layout.height or FIG_HEIGHT)
-    PlotlyFigureExporter(width=width, height=height).write(
+    PlotlyFigureExporter(width=width, height=height, allow_generic_fallback=False, hide_titles=figure_titles_hidden()).write(
         fig,
         out_stem,
         EXPORT_FORMATS,
@@ -271,7 +264,7 @@ def _write_cross_split_static(metrics: pd.DataFrame, fmt: str, path: Path) -> No
     ax.spines[["top", "right"]].set_visible(False)
     ax.legend(frameon=False, loc="lower center", bbox_to_anchor=(0.5, -0.20), ncol=4)
     fig.tight_layout(rect=(0, 0.08, 1, 1))
-    fig.savefig(path, format=fmt, dpi=300, bbox_inches="tight", facecolor="white")
+    save_matplotlib(fig, path, format=fmt, dpi=300, bbox_inches="tight", facecolor="white")
     plt.close(fig)
 
 
@@ -285,7 +278,7 @@ def _write_coefficients_static(plot_df: pd.DataFrame, fmt: str, path: Path) -> N
     fig, ax = plt.subplots(figsize=(13.5, height))
     bars = ax.barh(labels, values, color=colors, edgecolor="white", linewidth=0.5)
     ax.axvline(0, color="#444444", linewidth=1)
-    ax.set_xlabel("Logistic-regression coefficient (log-OR)")
+    ax.set_xlabel("Coefficient per unit of MaxAbs-scaled predictor (log-OR)")
     ax.set_title(
         "Largest Positive and Negative Logistic-Regression Coefficients\n"
         "Stanford training site; full feature set",
@@ -303,7 +296,7 @@ def _write_coefficients_static(plot_df: pd.DataFrame, fmt: str, path: Path) -> N
     x_limit = max(abs(float(values.min())), abs(float(values.max())), 0.01)
     ax.set_xlim(-1.30 * x_limit, 1.30 * x_limit)
     fig.tight_layout()
-    fig.savefig(path, format=fmt, dpi=300, bbox_inches="tight", facecolor="white")
+    save_matplotlib(fig, path, format=fmt, dpi=300, bbox_inches="tight", facecolor="white")
     plt.close(fig)
 
 
@@ -316,8 +309,7 @@ def load_predictions(organism: str) -> pd.DataFrame:
     for model in MODEL_ORDER:
         path = art / f"{model}_predictions.parquet"
         if not path.exists():
-            print(f"  [warn] missing {path.name} — skipping {model}")
-            continue
+            raise FileNotFoundError(f"The three-model comparison requires {path}")
         df = pd.read_parquet(path, columns=["target", "split", "predicted_probability"])
         df["model_name"] = model
         dfs.append(df)
@@ -339,14 +331,6 @@ def load_threshold_metrics(organism: str) -> pd.DataFrame:
 
 
 # ── LR coefficient extraction ─────────────────────────────────────────────────
-
-_ID_COLS = {
-    "anon_id", "pat_enc_csn_id_coded", "order_proc_id_coded", "order_time_jittered",
-    "organism", "source_site", "ordering_mode", "culture_description",
-    "upstream_antibiotic", "downstream_antibiotic", "pair_direction",
-    "target", "downstream_tested", "downstream_eligible", "downstream_intrinsic_resistance",
-    "was_positive", "was_positive_numeric",
-}
 
 _FEATURE_RENAME = {
     "upstream_susceptibility_RESISTANT": "Upstream result: Resistant",
@@ -395,147 +379,20 @@ def _axis_label(name: str, limit: int = 58) -> str:
     return name if len(name) <= limit else name[: limit - 1].rstrip() + "…"
 
 
-def fit_lr_for_coefficients(organism: str) -> pd.DataFrame:
-    """
-    Re-fit LR on the training split to extract feature coefficients.
-    Returns a DataFrame with columns [feature, coefficient, odds_ratio].
-    """
-    feat_path = _feat_path(organism)
-    if not feat_path.exists():
-        print(f"  [warn] feature matrix not found at {feat_path} — skipping LR coefficients")
-        return pd.DataFrame(columns=["feature", "coefficient", "odds_ratio"])
-
-    # Read only the schema first (metadata only, no data) to build a column
-    # allowlist, then use it together with row-group predicate pushdown on
-    # source_site. This file can be very large (hundreds of millions of rows
-    # across all three sites); a bare pd.read_parquet(feat_path) loads every
-    # column for every site into memory before any filtering happens, which
-    # is both far more I/O and far more memory than the training-split fit
-    # actually needs.
-    parquet_file = pq.ParquetFile(feat_path)
-    schema_cols = parquet_file.schema.names
-    needed_cols = [c for c in schema_cols if c in ("source_site", "target") or c not in _ID_COLS]
-    total_rows = parquet_file.metadata.num_rows
-    file_size_gb = feat_path.stat().st_size / 1e9
-
-    print(
-        f"  Feature matrix on disk: {total_rows:,} rows (all sites), "
-        f"{len(schema_cols)} columns, {file_size_gb:.1f} GB compressed"
-    )
-    # This file is highly compressed on disk (hundreds of mostly-zero
-    # comorbidity flags), but pandas decompresses to a DENSE in-memory table:
-    # even after column pruning and the source_site filter, materializing
-    # hundreds of columns across tens of millions of rows can expand far past
-    # the on-disk size and exhaust the job's memory. This table is only used
-    # to illustrate LR coefficients, not the primary result, so a large random
-    # sample gives statistically stable coefficients at a small, predictable
-    # memory footprint — stream row-group batches and keep each row with a
-    # fixed probability, rather than materializing the full training split
-    # before sampling.
-    dataset = ds.dataset(feat_path, format="parquet")
-    site_filter = ds.field("source_site") == "armd"
-    armd_row_count = dataset.count_rows(filter=site_filter)
-
-    target_sample_rows = 1_000_000
-    keep_prob = min(1.0, target_sample_rows / armd_row_count) if armd_row_count else 1.0
-
-    print(
-        f"  Loading feature matrix for LR coefficient extraction "
-        f"({len(needed_cols)}/{len(schema_cols)} columns; {armd_row_count:,} armd rows on disk, "
-        f"sampling ~{keep_prob:.2%} ≈ {min(armd_row_count, target_sample_rows):,} rows) …"
-    )
-
-    rng = np.random.default_rng(42)
-    sampled_batches = []
-    for batch in dataset.to_batches(columns=needed_cols, filter=site_filter):
-        if keep_prob >= 1.0:
-            sampled_batches.append(batch)
-            continue
-        keep_mask = pa.array(rng.random(batch.num_rows) < keep_prob)
-        kept = batch.filter(keep_mask)
-        if kept.num_rows:
-            sampled_batches.append(kept)
-
-    # Each batch already carries the needed_cols schema from to_batches()
-    # above, so from_batches() can infer it without an explicit schema= arg.
-    train = pa.Table.from_batches(sampled_batches).to_pandas()
-    # Probabilistic thinning gives an approximate, not exact, sample size;
-    # hard-cap in case it overshoots.
-    if len(train) > target_sample_rows:
-        train = train.sample(n=target_sample_rows, random_state=42).reset_index(drop=True)
-    print(f"  Sampled {len(train):,} training rows for coefficient extraction.")
-
-    feature_cols = [c for c in train.columns if c not in _ID_COLS]
-    # drop columns constant in the training split (uninformative)
-    non_const = [c for c in feature_cols if train[c].nunique() > 1]
-
-    cat_cols = [c for c in non_const if str(train[c].dtype) in ("category", "object", "string[python]", "string")]
-    num_cols = [c for c in non_const if c not in cat_cols]
-
-    X_train = train[non_const]
-    y_train = train["target"].astype(int)
-
-    # Sparse output (matching the production preprocessor in
-    # src/amr_cascade_platform/modeling/estimators/preprocessing.py) rather than
-    # dense: at this row count, a dense one-hot matrix risks tens of GB of memory
-    # for no benefit — lbfgs accepts sparse X natively.
-    preprocessor = ColumnTransformer(
-        transformers=[
-            (
-                "cat",
-                Pipeline([
-                    ("impute", SimpleImputer(strategy="constant", fill_value="UNKNOWN")),
-                    ("ohe", OneHotEncoder(handle_unknown="ignore", sparse_output=True)),
-                ]),
-                cat_cols,
-            ),
-            (
-                "num",
-                SimpleImputer(strategy="constant", fill_value=0.0),
-                num_cols,
-            ),
-        ],
-        remainder="drop",
-        sparse_threshold=1.0,
-    )
-
-    # Hyperparameters match configs/base/modeling.yaml's modeling.logistic_regression
-    # block exactly, so this refit is comparable to the LR row in Table S8/S9 (both
-    # trace to the same estimator configuration, differing only in that this refit
-    # additionally exposes coef_ for interpretability).
-    model = LogisticRegression(
-        max_iter=5000,
-        solver="lbfgs",
-        class_weight="balanced",
-        random_state=42,
-    )
-    pipe = Pipeline([("pre", preprocessor), ("lr", model)])
-
-    print(f"  Training rows: {len(X_train):,}  |  raw columns before encoding: {len(non_const)}")
-    t0 = time.perf_counter()
-    pipe.fit(X_train, y_train)
-    elapsed = time.perf_counter() - t0
-    fitted_shape = preprocessor.transform(X_train.iloc[:1]).shape[1]
-    print(f"  Fit complete in {elapsed:.1f}s  |  encoded design matrix columns: {fitted_shape}")
-
-    # Extract feature names. If cat_cols is empty (no categorical column
-    # survived the non-constant filter), the ColumnTransformer never fits the
-    # "cat" branch's OneHotEncoder, and get_feature_names_out() would raise
-    # NotFittedError on it.
-    if cat_cols:
-        ohe = preprocessor.named_transformers_["cat"].named_steps["ohe"]
-        cat_names = list(ohe.get_feature_names_out(cat_cols))
-    else:
-        cat_names = []
-    all_names = cat_names + num_cols
-
-    coefs = pipe.named_steps["lr"].coef_[0]
-    df = pd.DataFrame({"feature_raw": all_names, "coefficient": coefs})
-    df["odds_ratio"] = np.exp(df["coefficient"])
-    df["feature"] = df["feature_raw"].map(_clean_feature_name)
-    df = df.sort_values("coefficient", ascending=False).reset_index(drop=True)
-    return df[["feature", "coefficient", "odds_ratio"]]
-
+def load_lr_coefficients(organism: str) -> pd.DataFrame:
+    """Read coefficients of the model that generated the saved predictions."""
+    path = _artifact_dir(organism) / "logistic_regression_coefficients.parquet"
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Missing fitted-model coefficients: {path}. Run the updated training "
+            "workflow; refusing to substitute a sampled, differently specified refit."
+        )
+    frame = pd.read_parquet(path)
+    required = {"feature_raw", "coefficient", "odds_ratio", "coefficient_scale"}
+    if frame.empty or not required.issubset(frame.columns):
+        raise ValueError(f"Incomplete fitted-model coefficient artifact: {path}")
+    frame["feature"] = frame["feature_raw"].map(_clean_feature_name)
+    return frame.sort_values("coefficient", ascending=False).reset_index(drop=True)
 
 # ── Figure 1 — ROC curves (test split) ───────────────────────────────────────
 
@@ -769,14 +626,6 @@ def fig_cross_split(metrics: pd.DataFrame, fig_dir: Path) -> dict[str, Path]:
 
 # ── Figure 5 — Threshold selection (development-validation split) ──────────
 
-def _selection_metric_label(frame: pd.DataFrame) -> str:
-    """The metric the decision thresholds were selected on, as recorded by training."""
-    labels = {"balanced_accuracy": "balanced-accuracy", "f1": "F1", "mcc": "MCC"}
-    column = frame.get("threshold_selection_metric")
-    metric = str(column.dropna().iloc[0]) if column is not None and column.notna().any() else "f1"
-    return labels.get(metric, metric)
-
-
 def fig_threshold(thresh_metrics: pd.DataFrame, fig_dir: Path) -> dict[str, Path]:
     validation = thresh_metrics[thresh_metrics["split"] == "validation"].copy()
     models = [m for m in MODEL_ORDER if m in validation["model_name"].values]
@@ -792,8 +641,10 @@ def fig_threshold(thresh_metrics: pd.DataFrame, fig_dir: Path) -> dict[str, Path
     # (at print scale they ran into the neighbouring panel).
     fig = make_subplots(
         rows=2, cols=2, subplot_titles=[label for _, label in metric_specs],
-        horizontal_spacing=0.09, vertical_spacing=0.2,
+        horizontal_spacing=0.12, vertical_spacing=0.18,
     )
+    for annotation in fig.layout.annotations:
+        annotation.font = {"size": 13}
 
     for i, (metric, label) in enumerate(metric_specs):
         row, col = i // 2 + 1, i % 2 + 1
@@ -829,44 +680,43 @@ def fig_threshold(thresh_metrics: pd.DataFrame, fig_dir: Path) -> dict[str, Path
                     ),
                     row=row, col=col,
                 )
-        fig.update_xaxes(
-            title_text="Decision threshold" if row == 2 else None,
-            range=[0.02, 0.98], dtick=0.2, row=row, col=col,
-        )
 
     # One legend entry explains the diamonds (previously a wrapped subtitle).
     fig.add_trace(go.Scatter(
         x=[None], y=[None], mode="markers",
         marker={"size": 12, "symbol": "diamond", "color": "#667085", "line": {"width": 2, "color": "white"}},
-        name=f"Selected ({_selection_metric_label(validation)}-optimal)",
+        name="Saved decision threshold",
     ))
 
     fig.update_layout(
         template=PLOTLY_TEMPLATE,
         width=FIG_WIDTH,
-        height=FIG_HEIGHT,
+        height=max(FIG_HEIGHT, 1150),
         title={
-            "text": "Threshold selection, validation site (armd_ecuh)",
+            "text": "Threshold performance, validation site (armd_ecuh)",
             "x": 0.5, "xanchor": "center", "font": {"size": 20},
         },
         legend={
             "title": {"text": ""}, "orientation": "h", "yanchor": "top",
-            "y": -0.1, "xanchor": "center", "x": 0.5, "font": {"size": 13},
+            "y": -0.22, "xanchor": "center", "x": 0.5, "font": {"size": 13},
         },
         plot_bgcolor="white",
         paper_bgcolor="white",
-        font={"size": 16, "family": "Arial"},
-        margin={"l": 70, "r": 30, "t": 110, "b": 90},
+        font={"size": 13, "family": "Arial"},
+        margin={"l": 70, "r": 30, "t": 100, "b": 260},
     )
-    fig.update_xaxes(showgrid=True, gridcolor=GRID_X, zeroline=False)
-    fig.update_yaxes(showgrid=True, gridcolor=GRID_Y, zeroline=False)
-
     static_plotter = _model_static_plotter()
+    static_plotter.style_threshold_axes(fig, metric_specs, cols=2)
+    fig.add_annotation(
+        text=static_plotter.threshold_selection_note(validation), name="selection_note",
+        x=0.5, y=0, xref="paper", yref="paper", yshift=-70,
+        xanchor="center", yanchor="top", showarrow=False, font={"size": 10, "color": "#475467"},
+    )
     return _write_all_formats(
         fig,
         fig_dir / "supp_pred_fig5_threshold_analysis",
         static_fallback=lambda fmt, path: static_plotter._write_threshold_static(
-            validation, fmt, path, split="development-validation"
+            validation, fmt, path, split="development-validation", metric_specs=metric_specs, cols=2
         ),
     )
 
@@ -913,7 +763,7 @@ def fig_lr_coefficients(coef_df: pd.DataFrame, fig_dir: Path) -> dict[str, Path]
     _apply_standard_layout(
         fig,
         title="Top 10 positive and negative LR coefficients",
-        xaxis_title="Coefficient (log-OR)",
+        xaxis_title="Coefficient per unit of MaxAbs-scaled predictor (log-OR)",
         margin={"l": 260, "r": 60, "t": 90, "b": 90},
         legend_title="",
     )
@@ -1031,7 +881,12 @@ def _describe(paths: dict[str, Path] | None) -> str:
     return paths["html"].stem + " [" + ", ".join(sorted(paths)) + "]"
 
 
-def main(organism: str = "ESCHERICHIA COLI") -> None:
+def main(organism: str = "ESCHERICHIA COLI", *, hide_figure_titles: bool = False) -> None:
+    with title_policy(hide_figure_titles):
+        _main(organism)
+
+
+def _main(organism: str) -> None:
     print(f"\n=== Supplementary prediction module: {organism} ===\n")
 
     fig_dir = _fig_dir(organism)
@@ -1048,15 +903,15 @@ def main(organism: str = "ESCHERICHIA COLI") -> None:
     print("Loading threshold metrics …")
     thresh_metrics = load_threshold_metrics(organism)
 
-    # ── LR coefficients (requires refit on training split) ────────────────────
+    # Coefficients must describe the same fitted model as the predictions.
     print("Extracting LR feature coefficients …")
-    coef_df = fit_lr_for_coefficients(organism)
+    coef_df = load_lr_coefficients(organism)
     if not coef_df.empty:
         print(f"  Top 3 positive: {coef_df['feature'].head(3).tolist()}")
         print(f"  Top 3 negative: {coef_df['feature'].tail(3).tolist()}")
 
     # ── Figures ───────────────────────────────────────────────────────────────
-    print("\nGenerating figures (.html, .png, .pdf each) …")
+    print("\nGenerating figures (.html, .png, .svg, .pdf each) …")
 
     out = fig_roc_curves(preds, fig_dir)
     print(f"  Figure 1 (ROC curves):          {_describe(out)}")
@@ -1093,6 +948,7 @@ def main(organism: str = "ESCHERICHIA COLI") -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate supplementary prediction outputs")
+    parser.add_argument("--hide-figure-titles", action="store_true", help="Remove global titles/subtitles while preserving panel labels and figure size.")
     parser.add_argument(
         "--env",
         default="hpc",
@@ -1105,4 +961,4 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     _configure_layout(args.env)
-    main(args.organism)
+    main(args.organism, hide_figure_titles=args.hide_figure_titles)

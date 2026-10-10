@@ -107,14 +107,15 @@ class CascadeAnalysisWorkflow:
         "node_path",
     )
 
-    def __init__(self, settings: Settings, path_manager: PathManager) -> None:
+    def __init__(self, settings: Settings, path_manager: PathManager, *, explain: bool = True) -> None:
+        self._explain = explain
         self._settings = settings
         self._paths = path_manager
         self._dataset_store = DatasetStore(settings)
         self._cotesting_filter = CoTestingFilterAnalyzer(settings)
         self._conditional_analyzer = ConditionalProbabilityAnalyzer(settings)
         self._escalation_analyzer = EscalationRatioAnalyzer(settings)
-        self._regression_analyzer = DownstreamTestingRegression(settings, path_manager)
+        self._regression_analyzer = DownstreamTestingRegression(settings, path_manager, explain=explain)
         self._retained_edge_analyzer = RetainedEdgeAnalyzer(settings)
         self._guideline_concordance_analyzer = GuidelineConcordanceAnalyzer(settings, path_manager)
         self._validation_analyzer = CascadeValidationAnalyzer(settings)
@@ -301,7 +302,8 @@ class CascadeAnalysisWorkflow:
         outputs["success_marker"] = write_success_marker(
             output_dir,
             self._success_inventory(outputs, output_dir),
-            run_provenance(self._paths.project_root, self._settings, {"drug_pair_episodes": pair_path}),
+            {**run_provenance(self._paths.project_root, self._settings, {"drug_pair_episodes": pair_path}),
+             "explainability_requested": self._explain},
         )
         return outputs
 

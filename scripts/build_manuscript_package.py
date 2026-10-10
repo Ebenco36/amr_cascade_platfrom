@@ -26,11 +26,12 @@ def main() -> int:
     from amr_cascade_platform.cli.main import build_context
     from amr_cascade_platform.core.paths.path_manager import PathManager
     from amr_cascade_platform.core.utils.scopes import scoped_output_dir
-    from amr_cascade_platform.reporting.builders.manuscript_package import execute, plan_package
+    from amr_cascade_platform.reporting.builders.manuscript_package import PAPERS, execute, plan_package
 
     parser = argparse.ArgumentParser(description="Package the manuscripts' cited figures and tables from this run.")
     parser.add_argument("--env", default=None)
     parser.add_argument("--organism", default="ESCHERICHIA COLI")
+    parser.add_argument("--publication", choices=("all", "paper1", "manuscripts"), default="all")
     parser.add_argument("--run-root", type=Path, default=None, help="Directory holding the run's data/ and outputs/ (default: this project).")
     parser.add_argument("--dry-run", action="store_true", help="Report what would be copied and moved without changing files.")
     parser.add_argument("--keep-uncited", action="store_true", help="Leave uncited files in submission_figures instead of moving them aside.")
@@ -47,7 +48,8 @@ def main() -> int:
         return 1
     run_started = gold.stat().st_mtime
 
-    plans = plan_package(project_root, figures_dir, tables_dir, run_started)
+    papers = ("paper1_detection_validation",) if args.publication == "paper1" else PAPERS
+    plans = plan_package(project_root, figures_dir, tables_dir, run_started, papers=papers)
     errors = [error for plan in plans.values() for error in plan.errors]
     if errors:
         print("Package not built; fix these first:", file=sys.stderr)

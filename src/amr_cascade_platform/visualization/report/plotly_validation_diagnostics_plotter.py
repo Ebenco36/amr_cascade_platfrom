@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from amr_cascade_platform.visualization.report.figure_presentation import save_matplotlib
+
 import math
 from pathlib import Path
 
@@ -320,7 +322,7 @@ class PlotlyValidationDiagnosticsPlotter:
             ax_perm.axis("off")
             ax_boot.axis("off")
             ax_perm.text(0.5, 0.5, "Validation diagnostics unavailable.", ha="center", va="center")
-            fig.savefig(path, format=fmt, dpi=300, bbox_inches="tight")
+            save_matplotlib(fig, path, format=fmt, dpi=300, bbox_inches="tight")
             plt.close(fig)
             return
 
@@ -402,7 +404,7 @@ class PlotlyValidationDiagnosticsPlotter:
             color="#344054",
         )
         fig.tight_layout(rect=[0, 0.08, 1, 0.94])
-        fig.savefig(path, format=fmt, dpi=300, bbox_inches="tight")
+        save_matplotlib(fig, path, format=fmt, dpi=300, bbox_inches="tight")
         plt.close(fig)
 
 

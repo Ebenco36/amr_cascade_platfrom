@@ -21,6 +21,10 @@ from amr_cascade_platform.core.config.config_models import Settings
 from amr_cascade_platform.core.paths.path_manager import PathManager
 from amr_cascade_platform.core.utils.scopes import scoped_output_dir
 from amr_cascade_platform.reporting.builders.manuscript_table_builder import ManuscriptTableBuilder
+from amr_cascade_platform.reporting.paper1_profile import PAPER1_FIGURE_GROUPS
+from amr_cascade_platform.reporting.manuscript_profile import (
+    MANUSCRIPT_FIGURE_GROUPS, PUBLICATION_PROFILES, required_exports,
+)
 from amr_cascade_platform.surveillance.workflows.prevalence_shift_workflow import PrevalenceShiftWorkflow
 from amr_cascade_platform.visualization.report.antibiotic_classification import AntibioticClassificationResolver
 from amr_cascade_platform.visualization.report.figure_manager import FigureManager
@@ -28,7 +32,6 @@ from amr_cascade_platform.visualization.report.plotly_shap_plotter import Plotly
 from amr_cascade_platform.infrastructure.storage.dataset_store import DatasetStore
 
 logger = logging.getLogger(__name__)
-
 
 @dataclass(frozen=True)
 class ReportExportRequest:
@@ -38,6 +41,8 @@ class ReportExportRequest:
     figure_formats: tuple[str, ...] | None = None
     figures: tuple[str, ...] | None = None
     fail_on_missing_figures: bool = False
+    publication: str = "all"
+    hide_figure_titles: bool = False
 
 
 class ReportExportWorkflow:
@@ -58,7 +63,18 @@ class ReportExportWorkflow:
             organism=request.organism,
         )
         figure_formats = request.figure_formats or self._settings.reporting.default_figure_formats
-        selected_figures = request.figures or self._settings.reporting.default_figures
+        paper1 = request.publication == "paper1"
+        scoped_publication = request.publication in ("paper1", "manuscripts")
+        if request.publication not in PUBLICATION_PROFILES:
+            raise ValueError(f"Unknown publication profile: {request.publication}")
+        self._figure_manager = FigureManager(
+            self._settings, self._paths, allow_generic_static_fallback=not scoped_publication,
+            hide_titles=request.hide_figure_titles,
+        )
+        contract = PAPER1_FIGURE_GROUPS if paper1 else MANUSCRIPT_FIGURE_GROUPS
+        if scoped_publication and request.figures and set(request.figures) != set(contract):
+            raise ValueError("Manuscript profiles use an explicit figure contract; omit --figure.")
+        selected_figures = contract if scoped_publication else (request.figures or self._settings.reporting.default_figures)
         tables_dir = self._paths.project_root / self._settings.reporting.tables_dir / scope_dir
         figures_dir = self._paths.project_root / self._settings.reporting.figures_dir / scope_dir
         reports_dir = self._paths.project_root / self._settings.reporting.reports_dir / scope_dir
@@ -86,19 +102,19 @@ class ReportExportWorkflow:
         cascade_existence = self._table_builder.build_cascade_existence_summary(request.scope, request.site, request.organism)
         downstream_trigger_availability = self._table_builder.build_downstream_trigger_availability_table(
             request.scope, request.site, request.organism
-        )
+        ) if not scoped_publication else pd.DataFrame()
         upstream_selection_balance = self._table_builder.build_upstream_selection_balance_table(
             request.scope, request.site, request.organism
-        )
+        ) if not scoped_publication else pd.DataFrame()
         covariate_correlation = self._table_builder.build_covariate_correlation_table(
             request.scope, request.site, request.organism
-        )
+        ) if not scoped_publication else pd.DataFrame()
         prevalence_shift_table = self._table_builder.build_prevalence_shift_table(
             request.scope, request.site, request.organism
-        )
+        ) if not paper1 else pd.DataFrame()
         prevalence_shift_diagnostics = self._table_builder.build_prevalence_shift_diagnostics_table(
             request.scope, request.site, request.organism
-        )
+        ) if not paper1 else pd.DataFrame()
         correction_sensitivity = self._table_builder.build_correction_sensitivity_table(
             request.scope, request.site, request.organism
         )
@@ -219,27 +235,30 @@ class ReportExportWorkflow:
         validation_results = self._dataset_store.read_pandas(scope_artifact_dir / "validation_results.parquet")
         adjusted_model_shap_global = self._read_if_exists(
             scope_artifact_dir / "adjusted_model_shap_global.parquet"
-        )
+        ) if not scoped_publication else pd.DataFrame()
         # The sampled SHAP values (one row per explained row and feature: tens of
         # millions on the full cohort) are read only for the pairs drawn, below.
         adjusted_model_shap_values_path = scope_artifact_dir / "adjusted_model_shap_values.parquet"
         adjusted_model_shap_metadata = self._read_if_exists(
             scope_artifact_dir / "adjusted_model_shap_metadata.parquet"
-        )
+        ) if not scoped_publication else pd.DataFrame()
         adjusted_model_shap_domain = self._read_if_exists(
             scope_artifact_dir / "adjusted_model_shap_domain.parquet"
-        )
+        ) if not scoped_publication else pd.DataFrame()
         network_nodes = self._dataset_store.read_pandas(scope_artifact_dir / "network_nodes.parquet")
         network_edges = self._dataset_store.read_pandas(scope_artifact_dir / "network_edges.parquet")
         validated_edge_report = self._validated_edge_report(edge_report)
-        prevalence_shift = self._dataset_store.read_pandas(prevalence_artifact_dir / "prevalence_shift.parquet")
+        prevalence_shift = (
+            self._dataset_store.read_pandas(prevalence_artifact_dir / "prevalence_shift.parquet")
+            if not paper1 else pd.DataFrame()
+        )
         mnar_curve_path = prevalence_artifact_dir / "prevalence_mnar_sensitivity_curves.parquet"
         prevalence_mnar_curves = (
-            self._dataset_store.read_pandas(mnar_curve_path) if mnar_curve_path.exists() else pd.DataFrame()
+            self._dataset_store.read_pandas(mnar_curve_path) if not paper1 and mnar_curve_path.exists() else pd.DataFrame()
         )
         tipping_point_path = prevalence_artifact_dir / "prevalence_mnar_tipping_points.parquet"
         prevalence_mnar_tipping_points = (
-            self._dataset_store.read_pandas(tipping_point_path) if tipping_point_path.exists() else pd.DataFrame()
+            self._dataset_store.read_pandas(tipping_point_path) if not paper1 and tipping_point_path.exists() else pd.DataFrame()
         )
         if not prevalence_mnar_curves.empty:
             path = tables_dir / "table_k_mnar_sensitivity_curve_points.csv"
@@ -297,7 +316,7 @@ class ReportExportWorkflow:
         threshold_strategy_curves = pd.DataFrame()
         threshold_strategy_selected = pd.DataFrame()
         threshold_strategy_test_metrics = pd.DataFrame()
-        if modeling_dir.exists():
+        if modeling_dir.exists() and not scoped_publication:
             metrics_path = modeling_dir / "metrics.parquet"
             threshold_path = modeling_dir / "threshold_metrics.parquet"
             if metrics_path.exists():
@@ -532,7 +551,7 @@ class ReportExportWorkflow:
             # reporting.builders.directional_views for why pooling them is wrong.
             # Produced alongside (not instead of) the pooled figures above, which
             # remain for backward compatibility with anything already referencing them.
-            for tier in ("robust", "validated"):
+            for tier in (("validated",) if scoped_publication else ("robust", "validated")):
                 figure_exports.update(
                     self._figure_manager.export_directional_suite(
                         edge_report=edge_report,
@@ -545,7 +564,7 @@ class ReportExportWorkflow:
             # DAS-vs-PBI (anti-artefact) and raw-ER-vs-adjusted-OR (adjustment
             # concordance): pair-level diagnostics where both directions
             # legitimately share one plot -- see export_evidence_scatter_suite.
-            for tier in ("robust", "validated"):
+            for tier in (("validated",) if scoped_publication else ("robust", "validated")):
                 figure_exports.update(
                     self._figure_manager.export_evidence_scatter_suite(
                         edge_report=edge_report,
@@ -562,13 +581,14 @@ class ReportExportWorkflow:
                     formats=figure_formats,
                 )
             )
-            figure_exports.update(
-                self._figure_manager.export_observation_coverage_by_site(
-                    coverage=observation_coverage,
-                    output_stem=figures_dir / "figure_observation_coverage_by_site",
-                    formats=figure_formats,
+            if not paper1:
+                figure_exports.update(
+                    self._figure_manager.export_observation_coverage_by_site(
+                        coverage=observation_coverage,
+                        output_stem=figures_dir / "figure_observation_coverage_by_site",
+                        formats=figure_formats,
+                    )
                 )
-            )
         if "descriptive_summaries" in selected_figures:
             if not table_b.empty:
                 figure_exports.update(
@@ -593,7 +613,7 @@ class ReportExportWorkflow:
                         formats=figure_formats,
                     )
                 )
-            if not antibiogram.empty:
+            if not paper1 and not antibiogram.empty:
                 figure_exports.update(
                     self._figure_manager.export_antibiogram(
                         antibiogram=antibiogram, output_stem=figures_dir / "figure_antibiogram", formats=figure_formats
@@ -784,6 +804,12 @@ class ReportExportWorkflow:
             )
         outputs.update(figure_exports)
         missing_figure_groups = self._missing_requested_figure_groups(selected_figures, figure_exports)
+        if scoped_publication:
+            exported = {Path(path).name for path in figure_exports.values()}
+            missing_figure_groups = {
+                name: name for name in required_exports(request.publication, figure_formats)
+                if name not in exported
+            }
 
         table_outputs = {
             name: str(path)
@@ -801,6 +827,8 @@ class ReportExportWorkflow:
             "scope": request.scope,
             "site": request.site,
             "organism": request.organism,
+            "publication": request.publication,
+            "hide_figure_titles": request.hide_figure_titles,
             "figure_formats": list(figure_formats),
             "figures": list(selected_figures),
             "tables": table_outputs,
@@ -815,6 +843,10 @@ class ReportExportWorkflow:
                     "eligible_pairs": scoped_output_dir(self._paths.paths.gold, request.scope, site=request.site, organism=request.organism) / "eligible_pairs.parquet",
                     "edge_report": scope_artifact_dir / "edge_report.parquet",
                     "validation_results": scope_artifact_dir / "validation_results.parquet",
+                    **({
+                        "prevalence_shift": prevalence_artifact_dir / "prevalence_shift.parquet",
+                        "prevalence_mnar_sensitivity_curves": mnar_curve_path,
+                    } if not paper1 else {}),
                 },
             ),
             "outputs": {name: str(path) for name, path in outputs.items()},

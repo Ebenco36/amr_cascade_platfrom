@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from amr_cascade_platform.visualization.report.figure_presentation import save_matplotlib
+
 import math
 from pathlib import Path
+from textwrap import fill
 
 import pandas as pd
 from matplotlib import pyplot as plt
@@ -16,22 +19,24 @@ class PrevalenceDeltaCurvePlotter:
     """Export multi-panel prevalence sensitivity curves."""
 
     _DPI = 300
+
+    def __init__(self, *, hide_titles: bool = False) -> None:
+        self._hide_titles = hide_titles
     _FONT = "DejaVu Sans"
     _COLS = 4
     # (tier key, panel label, lower bound inclusive, upper bound exclusive) in
     # percentage points of prevalence swing across the full lambda grid. Drugs whose
     # MNAR estimate barely moves land in "stable" regardless of their absolute
     # prevalence level; drugs where the lambda assumption changes the clinical
-    # picture land in "sensitive". Boundaries are a round-number tertile split of
-    # the observed swing distribution, not a discovered natural break.
+    # picture land in "sensitive". These are fixed descriptive thresholds,
+    # not inferred natural breaks or guarantees of accuracy.
     _SENSITIVITY_TIERS = [
         ("stable", "Stable (Δ<2pp)", 0.0, 2.0),
         ("moderate", "Moderate (Δ 2–10pp)", 2.0, 10.0),
         ("sensitive", "Sensitive (Δ≥10pp)", 10.0, math.inf),
     ]
-    # Traffic-light semantics: green/amber/red map directly onto the tier's own
-    # meaning (safe to trust the naive estimate -> worth a second look), so the
-    # color is informative rather than an arbitrary per-series label.
+    # Colour encodes sensitivity over the chosen grid, not the accuracy of the
+    # naive estimate or identification of eligible-population prevalence.
     _TIER_COLORS = {
         "stable": "#2E7D32",
         "moderate": "#B8860B",
@@ -63,7 +68,7 @@ class PrevalenceDeltaCurvePlotter:
             for fmt in static_formats:
                 path = stem.with_suffix(f".{fmt}")
                 dpi = self._DPI if fmt in {"png", "tiff"} else 220
-                fig.savefig(path, format=fmt, dpi=dpi, bbox_inches="tight")
+                save_matplotlib(fig, path, hide_titles=self._hide_titles, format=fmt, dpi=dpi, bbox_inches="tight")
                 outputs[path.name] = path
             plt.close(fig)
         return outputs
@@ -140,6 +145,7 @@ class PrevalenceDeltaCurvePlotter:
 
             ax.set_title(drug, fontsize=13, fontfamily=self._FONT, fontweight="bold",
                           pad=6, wrap=True)
+            ax._amr_panel_label = True
             ax.set_xlabel("δ", fontsize=11, fontfamily=self._FONT)
             ax.set_ylabel("Prevalence (%)", fontsize=11, fontfamily=self._FONT)
             ax.tick_params(labelsize=10)
@@ -245,12 +251,29 @@ class PrevalenceDeltaCurvePlotter:
     ) -> plt.Figure:
         cols = min(self._COLS, len(drugs))
         rows = math.ceil(len(drugs) / cols)
-        fig, axes = plt.subplots(rows, cols, figsize=(cols * 4.4, rows * 3.5 + 1.3),
+        fig_w = cols * 4.4
+        plural = "s" if len(drugs) != 1 else ""
+        title = f"Cascade-Aware MNAR Prevalence Sensitivity Curves — {tier_label} ({len(drugs)} drug{plural})"
+        if organism:
+            title += f" — {format_organism_label(organism)}"
+        title = fill(title, width=int(fig_w * 8))
+        if tier_key == "not_evaluable":
+            caption = "No MNAR model could be fit for these drugs at any λ; drugs are listed alphabetically."
+        else:
+            caption = "Δ = the percentage-point range each drug's MNAR estimate spans across the λ grid; drugs are sorted by descending Δ."
+        caption = fill(caption, width=int(fig_w * 12))
+        legend_cols = min(cols, 3)
+        title_h = 0.0 if self._hide_titles else 0.27 * (title.count("\n") + 1) + 0.16
+        legend_h = 0.0 if tier_key == "not_evaluable" else 0.27 * math.ceil(3 / legend_cols) + 0.22
+        header_h = title_h + legend_h + 0.12
+        footer_h = 0.19 * (caption.count("\n") + 1) + 0.16
+        fig_h = rows * 3.5 + header_h + footer_h
+        fig, axes = plt.subplots(rows, cols, figsize=(fig_w, fig_h),
                                   squeeze=False, constrained_layout=True)
-        # Reserve explicit headroom above the top row for the title and legend so
-        # neither crowds the panels' own colored top spine; constrained_layout does
-        # not know to leave room for fig.suptitle()/fig.legend() on its own.
-        fig.get_layout_engine().set(rect=(0.0, 0.0, 1.0, 0.90))
+        # Legend and caption bands are authored in inches, including single-drug
+        # panels. Generic heading removal must not stretch axes into those bands.
+        fig._amr_preserve_layout = True
+        fig.get_layout_engine().set(rect=(0.0, footer_h / fig_h, 1.0, rows * 3.5 / fig_h))
 
         for idx, drug in enumerate(drugs):
             ax = axes[idx // cols][idx % cols]
@@ -266,7 +289,8 @@ class PrevalenceDeltaCurvePlotter:
             if naive is not None:
                 ax.axhline(naive, color="#344054", linewidth=1.1, linestyle="--", alpha=0.8)
             ax.axvline(0.0, color="#C0392B", linewidth=1.0, linestyle=":", alpha=0.7)
-            ax.set_title(f"{drug} (Δ{span_by_drug[drug]:.1f}pp)", fontsize=11,
+            ax._amr_panel_label = True
+            ax.set_title(fill(f"{drug} (Δ{span_by_drug[drug]:.1f}pp)", width=32), fontsize=11,
                          fontfamily=self._FONT, fontweight="bold", pad=5, wrap=True)
             ax.set_xlabel("λ", fontsize=9.5, fontfamily=self._FONT)
             if idx % cols == 0:
@@ -282,25 +306,20 @@ class PrevalenceDeltaCurvePlotter:
         for idx in range(len(drugs), rows * cols):
             axes[idx // cols][idx % cols].set_visible(False)
 
-        plural = "s" if len(drugs) != 1 else ""
-        title = f"Cascade-Aware MNAR Prevalence Sensitivity Curves — {tier_label} ({len(drugs)} drug{plural})"
-        if organism:
-            title += f" — {format_organism_label(organism)}"
-        fig.suptitle(title, fontsize=15, fontfamily=self._FONT, fontweight="bold", color=color, y=0.99)
-        if tier_key == "not_evaluable":
-            caption = "No MNAR model could be fit for these drugs at any λ; drugs are listed alphabetically."
-        else:
+        heading = fig.suptitle(title, fontsize=15, fontfamily=self._FONT, fontweight="bold", color=color, y=1 - 0.08 / fig_h)
+        heading.set_visible(not self._hide_titles)
+        heading.set_in_layout(False)
+        if tier_key != "not_evaluable":
             legend_handles = [
                 Line2D([0], [0], color="#1F77B4", linewidth=2.0, marker="o", markersize=4, label="MNAR estimate"),
                 Line2D([0], [0], color="#344054", linewidth=1.3, linestyle="--", label="Naive prevalence"),
                 Line2D([0], [0], color="#C0392B", linewidth=1.2, linestyle=":", label="λ=0 (no-tilt reference)"),
             ]
-            fig.legend(handles=legend_handles, loc="upper center", bbox_to_anchor=(0.5, 0.945),
-                       ncol=3, fontsize=10, frameon=False)
-            caption = "Δ = the percentage-point range each drug's MNAR estimate spans across the λ grid; drugs are sorted by descending Δ."
+            fig.legend(handles=legend_handles, loc="upper center", bbox_to_anchor=(0.5, 1 - (title_h + 0.08) / fig_h),
+                       ncol=legend_cols, fontsize=10, frameon=False)
         fig.text(
-            0.0, -0.01,
+            0.03, 0.08 / fig_h,
             caption,
-            fontsize=10, color="#475467", fontfamily=self._FONT,
+            fontsize=10, color="#475467", fontfamily=self._FONT, va="bottom",
         )
         return fig

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from amr_cascade_platform.visualization.report.figure_presentation import save_matplotlib
+
 import base64
 import io
 import os
@@ -62,11 +64,13 @@ class PublicationForestPlotter:
         height: int,
         top_n: int,
         classification_resolver: AntibioticClassificationResolver,
+        hide_titles: bool = False,
     ) -> None:
         self._width = width
         self._height = height
         self._top_n = top_n
         self._classification = classification_resolver
+        self._hide_titles = hide_titles
 
     # ── public API (identical signatures to old implementation) ────────────
 
@@ -261,8 +265,8 @@ class PublicationForestPlotter:
             if validated
             else f"{ci_note}  ·  Colour = downstream AWaRe tier"
         )
-        fig.text(0.5, 0.978, title, ha="center", va="top", fontsize=16, fontweight="bold", color=_BODY_TEXT, fontfamily=_FONT)
-        fig.text(0.5, 0.955, subtitle, ha="center", va="top", fontsize=11, color=_MUTED_TEXT, fontfamily=_FONT)
+        fig.text(0.5, 0.978, title, ha="center", va="top", fontsize=16, fontweight="bold", color=_BODY_TEXT, fontfamily=_FONT, gid="figure_title")
+        fig.text(0.5, 0.955, subtitle, ha="center", va="top", fontsize=11, color=_MUTED_TEXT, fontfamily=_FONT, gid="figure_subtitle")
 
         gs = GridSpec(
             1, 3,
@@ -528,7 +532,7 @@ class PublicationForestPlotter:
                 title = output_stem.name.replace("_", " ").title()
                 self._write_html(path, png_bytes, title=title)
             else:
-                figure.savefig(path, format=fmt, **_SAVEFIG)
+                save_matplotlib(figure, path, hide_titles=self._hide_titles, format=fmt, **_SAVEFIG)
             outputs[path.name] = path
         plt.close(figure)
         return outputs
@@ -551,10 +555,9 @@ class PublicationForestPlotter:
 
         return f"{_wrap(upstream)} →\n  {_wrap(downstream)}"
 
-    @staticmethod
-    def _figure_png_bytes(figure: plt.Figure) -> bytes:
+    def _figure_png_bytes(self, figure: plt.Figure) -> bytes:
         buf = io.BytesIO()
-        figure.savefig(buf, format="png", **_SAVEFIG)
+        save_matplotlib(figure, buf, hide_titles=self._hide_titles, format="png", **_SAVEFIG)
         return buf.getvalue()
 
     @staticmethod

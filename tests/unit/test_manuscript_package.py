@@ -102,3 +102,14 @@ def test_dry_run_changes_nothing(tmp_path):
     mp.execute(plans, root, prune=True, dry_run=True, context={})
     after = {p: p.read_bytes() for p in root.rglob("*") if p.is_file()}
     assert before == after
+
+
+def test_paper1_package_does_not_require_paper2_outputs(tmp_path):
+    root = _project(tmp_path)
+    (root / "outputs/tables/supplementary/table_s3_smd_balance_summary.csv").unlink()
+    plans = mp.plan_package(
+        root, root / "outputs/figures", root / "outputs/tables",
+        run_started=time.time() - 60, papers=(PAPER1,),
+    )
+    assert list(plans) == [PAPER1]
+    assert not plans[PAPER1].errors

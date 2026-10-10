@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from amr_cascade_platform.visualization.report.figure_presentation import save_matplotlib
+
 import math
 from pathlib import Path
 
@@ -239,5 +241,5 @@ class PlotlyPanelBundlingPlotter:
                  ha="left", va="bottom", fontsize=8, color="#344054")
         fig.suptitle("Panel Bundling Index and the Co-Testing Screen", fontsize=15, fontweight="bold", y=0.98)
         fig.tight_layout(rect=[0, 0.08, 1, 0.94])
-        fig.savefig(path, format=fmt, dpi=300, bbox_inches="tight")
+        save_matplotlib(fig, path, format=fmt, dpi=300, bbox_inches="tight")
         plt.close(fig)

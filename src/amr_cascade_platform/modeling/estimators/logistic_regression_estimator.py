@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pandas as pd
+import numpy as np
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import MaxAbsScaler
@@ -40,6 +41,34 @@ class LogisticRegressionEstimator:
     def predict_proba(self, features: pd.DataFrame) -> pd.Series:
         probabilities = self._pipeline.predict_proba(features)[:, 1]
         return pd.Series(probabilities, index=features.index, name="predicted_probability")
+
+    def coefficients(self) -> pd.DataFrame:
+        """Export the fitted model, not a second fit with a different design matrix.
+
+        Coefficients refer to the MaxAbs-scaled design used for prediction.
+        The raw-unit coefficient is also retained to make the scale explicit.
+        """
+        preprocessor = self._pipeline.named_steps["preprocess"]
+        names = []
+        if self._categorical_columns:
+            categorical = preprocessor.named_transformers_["categorical"]
+            retained_names = categorical.named_steps["impute"].get_feature_names_out(self._categorical_columns)
+            names.extend(categorical.named_steps["encode"].get_feature_names_out(retained_names))
+        if self._numeric_columns:
+            imputer = preprocessor.named_transformers_["numeric"].named_steps["impute"]
+            names.extend(imputer.get_feature_names_out(self._numeric_columns))
+        model = self._pipeline.named_steps["model"]
+        coefficients = model.coef_[0]
+        scales = self._pipeline.named_steps["scale"].scale_
+        return pd.DataFrame({
+            "feature_raw": names,
+            "coefficient": coefficients,
+            "odds_ratio": np.exp(coefficients),
+            "feature_scale": scales,
+            "raw_unit_coefficient": coefficients / scales,
+            "intercept": float(model.intercept_[0]),
+            "coefficient_scale": "MaxAbs-scaled fitted design",
+        })
 
     def _build_pipeline(self) -> Pipeline:
         preprocess = build_tabular_preprocessor(

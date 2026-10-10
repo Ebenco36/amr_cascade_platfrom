@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from amr_cascade_platform.visualization.report.figure_presentation import save_matplotlib
+
 from pathlib import Path
 
 import networkx as nx
@@ -187,7 +189,7 @@ class PlotlyThresholdSensitivityPlotter:
                 ax.set_ylabel("Retained Edge Count")
                 ax.set_title("Cascade Threshold Sensitivity")
         fig.tight_layout()
-        fig.savefig(path, format=fmt, dpi=300, bbox_inches="tight")
+        save_matplotlib(fig, path, format=fmt, dpi=300, bbox_inches="tight")
         plt.close(fig)
 
 
@@ -250,7 +252,7 @@ class PlotlySiteComparisonPlotter:
             ax.set_title("Site vs Combined Retained Edge Comparison")
             ax.legend(frameon=False)
         fig.tight_layout()
-        fig.savefig(path, format=fmt, dpi=300, bbox_inches="tight")
+        save_matplotlib(fig, path, format=fmt, dpi=300, bbox_inches="tight")
         plt.close(fig)
 
 
@@ -468,7 +470,7 @@ class PlotlySankeyPlotter:
                 )
             ax.axis("off")
         fig.tight_layout()
-        fig.savefig(path, format=fmt, dpi=300, bbox_inches="tight")
+        save_matplotlib(fig, path, format=fmt, dpi=300, bbox_inches="tight")
         plt.close(fig)
 
 
@@ -750,7 +752,7 @@ class PlotlyNetworkPlotter:
             ax.set_title(f"Top {len(top_edges)} {title_prefix}Cascade Observation Edges (of {total_edge_n} {edge_scope})")
             ax.axis("off")
         fig.tight_layout()
-        fig.savefig(path, format=fmt, dpi=300, bbox_inches="tight")
+        save_matplotlib(fig, path, format=fmt, dpi=300, bbox_inches="tight")
         plt.close(fig)
 
 

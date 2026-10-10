@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from amr_cascade_platform.visualization.report.figure_presentation import save_matplotlib
+
 from pathlib import Path
 
 import numpy as np
@@ -198,7 +200,7 @@ class PlotlyShapPlotter:
             ha="center", fontsize=9,
         )
         fig.tight_layout(rect=(0, 0.05, 1, 1))
-        fig.savefig(path, format=fmt, dpi=300, bbox_inches="tight")
+        save_matplotlib(fig, path, format=fmt, dpi=300, bbox_inches="tight")
         plt.close(fig)
 
     def export_pair_suite(
@@ -345,7 +347,7 @@ class PlotlyShapPlotter:
             fontsize=9,
         )
         fig.tight_layout(rect=(0, 0.045, 1, 1))
-        fig.savefig(path, format=fmt, dpi=300, bbox_inches="tight")
+        save_matplotlib(fig, path, format=fmt, dpi=300, bbox_inches="tight")
         plt.close(fig)
 
     def _beeswarm_figure(
@@ -488,7 +490,7 @@ class PlotlyShapPlotter:
             fontsize=9,
         )
         fig.tight_layout(rect=(0, 0.045, 1, 1))
-        fig.savefig(path, format=fmt, dpi=300, bbox_inches="tight")
+        save_matplotlib(fig, path, format=fmt, dpi=300, bbox_inches="tight")
         plt.close(fig)
 
     @staticmethod

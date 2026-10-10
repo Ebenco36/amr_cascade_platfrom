@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from amr_cascade_platform.visualization.report.figure_presentation import save_matplotlib
+
 from pathlib import Path
 
 import numpy as np
@@ -366,12 +368,12 @@ class PlotlyThresholdStrategyComparisonPlotter:
         # The header is three stacked figure-text lines above the panels' rect. A
         # suptitle would make tight_layout reserve room below it on top of the rect,
         # leaving a wide gap, and a fixed-position note collided with its second line.
-        fig.text(0.5, 0.985, self.TITLE, ha="center", va="top", fontsize=17, fontweight="bold")
-        fig.text(0.5, 0.940, self.SUBTITLE, ha="center", va="top", fontsize=12, color="#243B5A")
-        fig.text(0.5, 0.905, self._selection_note(selected), ha="center", va="top", fontsize=10.5, color="#475467")
+        fig.text(0.5, 0.985, self.TITLE, ha="center", va="top", fontsize=17, fontweight="bold", gid="figure_title")
+        fig.text(0.5, 0.940, self.SUBTITLE, ha="center", va="top", fontsize=12, color="#243B5A", gid="figure_subtitle")
+        fig.text(0.5, 0.905, self._selection_note(selected), ha="center", va="top", fontsize=10.5, color="#475467", gid="figure_subtitle")
         fig.text(0.5, 0.015, self._caption(metric_label), ha="center", fontsize=9, color="#475467")
         fig.tight_layout(rect=(0.02, 0.10, 0.98, 0.865))
-        fig.savefig(path, format=fmt, dpi=300, bbox_inches="tight", facecolor="white")
+        save_matplotlib(fig, path, format=fmt, dpi=300, bbox_inches="tight", facecolor="white")
         plt.close(fig)
 
     @classmethod

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from amr_cascade_platform.visualization.report.figure_presentation import save_matplotlib
+
 import json
 import math
 from pathlib import Path
@@ -16,6 +18,9 @@ class PlotlyMNARTippingPointPlotter:
     """Export decision-threshold sensitivity figures for MNAR prevalence curves."""
 
     _DPI = 300
+
+    def __init__(self, *, hide_titles: bool = False) -> None:
+        self._hide_titles = hide_titles
     _FONT = "DejaVu Sans"
 
     def export(
@@ -115,6 +120,7 @@ class PlotlyMNARTippingPointPlotter:
   <title>{title}</title>
   <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
   <style>
+    {"h2 { display: none; }" if self._hide_titles else ""}
     body {{ font-family: Arial, sans-serif; margin: 24px; color: #101828; }}
     .controls {{ display: flex; flex-wrap: wrap; gap: 16px; align-items: end; margin-bottom: 12px; }}
     label {{ display: flex; flex-direction: column; font-size: 13px; font-weight: 700; color: #344054; gap: 4px; }}
@@ -336,7 +342,7 @@ class PlotlyMNARTippingPointPlotter:
 
       Plotly.react("simChart", traces, {{
         template: "plotly_white",
-        title: "Live what-if calculator: changing the denominator changes the tipping point",
+        title: {json.dumps("" if self._hide_titles else "Live what-if calculator: changing the denominator changes the tipping point")},
         xaxis: {{ title: "λ: residual log-odds tilt for unknown eligible episodes", range: [-3, 3] }},
         yaxis: {{ title: "Eligible-denominator resistance prevalence (%)", rangemode: "tozero" }},
         shapes: [
@@ -449,7 +455,7 @@ class PlotlyMNARTippingPointPlotter:
 
       Plotly.react("chart", traces, {{
         template: "plotly_white",
-        title: `${{drug}}: MNAR tipping-point sensitivity`,
+        title: {"true" if self._hide_titles else "false"} ? "" : `${{drug}}: MNAR tipping-point sensitivity`,
         xaxis: {{ title: "λ: residual log-odds tilt for unobserved eligible episodes", zeroline: false }},
         yaxis: {{ title: "Eligible-denominator resistance prevalence (%)", rangemode: "tozero" }},
         shapes,
@@ -501,7 +507,7 @@ class PlotlyMNARTippingPointPlotter:
                 fontsize=13,
                 fontfamily=self._FONT,
             )
-            fig.savefig(path, format=fmt, dpi=self._DPI, bbox_inches="tight")
+            save_matplotlib(fig, path, hide_titles=self._hide_titles, format=fmt, dpi=self._DPI, bbox_inches="tight")
             plt.close(fig)
             return
 
@@ -545,6 +551,7 @@ class PlotlyMNARTippingPointPlotter:
             if pd.notna(summary.get("naive_prevalence_pct")):
                 ax.axhline(summary["naive_prevalence_pct"], color="#344054", linestyle="--", linewidth=1.0, alpha=0.75)
             ax.set_title(drug, fontsize=11, fontweight="bold", fontfamily=self._FONT)
+            ax._amr_panel_label = True
             ax.set_xlabel("λ", fontsize=9, fontfamily=self._FONT)
             ax.set_ylabel("Prevalence (%)", fontsize=9, fontfamily=self._FONT)
             ax.grid(axis="y", color="#E8EEF5", linewidth=0.7)
@@ -567,7 +574,7 @@ class PlotlyMNARTippingPointPlotter:
             color="#475467",
             fontfamily=self._FONT,
         )
-        fig.savefig(path, format=fmt, dpi=self._DPI, bbox_inches="tight")
+        save_matplotlib(fig, path, hide_titles=self._hide_titles, format=fmt, dpi=self._DPI, bbox_inches="tight")
         plt.close(fig)
 
     @staticmethod
@@ -596,13 +603,12 @@ class PlotlyMNARTippingPointPlotter:
             records.append(row)
         return records
 
-    @staticmethod
-    def _empty_html(title: str, message: str) -> str:
+    def _empty_html(self, title: str, message: str) -> str:
         return f"""<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><title>{title}</title></head>
 <body style="font-family: Arial, sans-serif; margin: 32px;">
-  <h2>{title}</h2>
+  {"" if self._hide_titles else f"<h2>{title}</h2>"}
   <p>{message}</p>
 </body>
 </html>

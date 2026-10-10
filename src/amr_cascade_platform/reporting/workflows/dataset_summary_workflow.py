@@ -35,7 +35,8 @@ class DatasetSummaryWorkflow:
         self._figures = FigureManager(settings, path_manager)
         self._store = DatasetStore(settings)
 
-    def run(self, scope: str, site: str | None, organism: str | None, formats: tuple[str, ...]) -> dict[str, Path]:
+    def run(self, scope: str, site: str | None, organism: str | None, formats: tuple[str, ...], *, hide_figure_titles: bool = False) -> dict[str, Path]:
+        self._figures = FigureManager(self._settings, self._paths, hide_titles=hide_figure_titles)
         scope_dir = scoped_output_dir(root=Path("."), scope=scope, site=site, organism=organism)
         root = self._paths.project_root
         tables_dir = root / self._settings.reporting.reports_dir / scope_dir / "dataset_summary"
@@ -124,6 +125,7 @@ class DatasetSummaryWorkflow:
                     "scope": scope,
                     "site": site,
                     "organism": organism,
+                    "hide_figure_titles": hide_figure_titles,
                     "outputs": {name: str(path) for name, path in outputs.items()},
                     "exclusion_flow_reconciliation": reconciliation,
                     "provenance": run_provenance(root, self._settings, {"eligible_pairs": gold_dir / "eligible_pairs.parquet"}),

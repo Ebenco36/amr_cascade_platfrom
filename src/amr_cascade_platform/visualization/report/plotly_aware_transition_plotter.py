@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from amr_cascade_platform.visualization.report.figure_presentation import save_matplotlib
+
 from pathlib import Path
 
 import numpy as np
@@ -278,5 +280,5 @@ class PlotlyAwareTransitionPlotter:
                 color="#475467",
             )
         fig.tight_layout(rect=(0.0, 0.07, 1.0, 1.0))
-        fig.savefig(path, format=fmt, dpi=300, bbox_inches="tight")
+        save_matplotlib(fig, path, format=fmt, dpi=300, bbox_inches="tight")
         plt.close(fig)

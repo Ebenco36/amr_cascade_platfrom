@@ -4,7 +4,7 @@
 # Every follow-up is held on the job that produces its input via SLURM's
 # --dependency=afterok, not a wall-clock wait, so this script finishes as soon
 # as everything is queued (seconds) rather than blocking until the jobs run.
-# Run with no options for the default full wave.
+# Run with no options for the two-manuscript wave, not all exploratory outputs.
 set -Eeuo pipefail
 
 usage() {
@@ -12,13 +12,30 @@ usage() {
 Usage:
   bash scripts/submit_everything_hpc.sh [options]
 
+Publication scope:
+  --publication manuscripts  DEFAULT: support both current E. coli manuscripts and
+                             supplements, sharing the primary cascade run. Includes
+                             Paper 2 bounds, trigger/SMD diagnostics, MNAR and antibiograms.
+                             Omits SHAP, ESKAPE and uncited exploratory figure suites.
+  --publication all          Opt into every platform analysis/figure group.
+  --publication paper1       Keep the analyses cited by paper1_detection_validation;
+                             omit Paper 2 prevalence/MNAR and unrelated figure groups.
+                             Availability variants stop at validation merge. Default
+                             reuse is checked against saved provenance before queuing.
+                             A final named-asset audit follows supplementary export.
+  --hide-figure-titles       Remove figure-level headings in report and prediction exports.
+  --fresh                   With a manuscript profile, explicitly move old gold/cascade outputs
+                             aside and rebuild them. NOT recommended for recovery.
+  --skip-ingestion --skip-preprocessing --skip-harmonization --skip-comorbidity
+  --skip-gold               Primary-run-only skips for already completed input layers.
+
 With no options, first installs Python packages, then submits:
   0. Python packages: creates .venv if missing and installs every package in
      requirements-hpc.txt (which includes requirements.txt) whenever the
      requirement files changed since the last install; otherwise nothing to do.
      Runs once, on this login node, before anything is queued.
-  1. Primary run (--fix-stale; site cascade with site-comparison figures,
-     features, training, all figures, audits; ESKAPE only with --with-eskape)
+  1. Shared primary run (site/combined cascade, features, training, threshold
+     comparison, Paper 2 prevalence and only the figures cited by both papers)
   2. Availability sensitivity: support >= 5
   3. Availability sensitivity: 1-year era
   4. Availability sensitivity: joint (both at once)
@@ -31,8 +48,9 @@ With no options, first installs Python packages, then submits:
      - supplementary tables and quoted numbers        (after the report job, the site
                                                        cascades, all follow-ups above, and
                                                        the three sensitivity runs' validation)
-  Every run above uses --fix-stale, so gold and cascade output from an
-  earlier code version is moved aside and rebuilt rather than reused.
+  Manuscript profiles do not move completed data aside by default. Incompatible
+  validation provenance stops submission; inspect it before choosing --fresh.
+  --publication all preserves the historical --fix-stale behaviour.
 
 Cohort/hardware pass-through (forwarded to every real submission below):
   --sites SITE1,SITE2          Same as submit_pipeline_dag_hpc.sh's own flag.
@@ -142,12 +160,21 @@ TABLES_MEM="64G"
 TABLES_TIME="02:00:00"
 DRY_RUN=0
 ALLOW_DIRTY_CHECKOUT=0
+PUBLICATION=manuscripts
+HIDE_FIGURE_TITLES=0
+FRESH=0
+PRIMARY_SKIP_ARGS=()
 
 need_value() { [[ $# -ge 2 ]] || { echo "$1 requires a value" >&2; exit 2; }; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --sites) need_value "$@"; SITES="$2"; shift 2 ;;
+    --publication) need_value "$@"; PUBLICATION="$2"; shift 2 ;;
+    --hide-figure-titles) HIDE_FIGURE_TITLES=1; shift ;;
+    --fresh) FRESH=1; shift ;;
+    --skip-ingestion|--skip-preprocessing|--skip-harmonization|--skip-comorbidity|--skip-gold)
+      PRIMARY_SKIP_ARGS+=("$1"); shift ;;
     --organisms) need_value "$@"; ORGANISMS="$2"; shift 2 ;;
     --partition) need_value "$@"; PARTITION="$2"; shift 2 ;;
     --cascade-partition) need_value "$@"; CASCADE_PARTITION="$2"; shift 2 ;;
@@ -193,11 +220,30 @@ done
 for shards in "${ERA_STRATIFIED_SHARDS}" "${PATIENT_CLUSTER_SHARDS}"; do
   [[ "${shards}" =~ ^[1-9][0-9]*$ ]] || { echo "Shard counts must be positive integers" >&2; exit 2; }
 done
+[[ "${PUBLICATION}" == all || "${PUBLICATION}" == paper1 || "${PUBLICATION}" == manuscripts ]] || { echo "--publication must be all, paper1 or manuscripts" >&2; exit 2; }
+if [[ "${PUBLICATION}" != all && "${WITH_ESKAPE}" -eq 1 ]]; then
+  echo "ESKAPE is outside both current manuscripts; use --publication all for that extension." >&2
+  exit 2
+fi
+if [[ "${PUBLICATION}" != all && -n "${ORGANISMS}" && "${ORGANISMS}" != "ESCHERICHIA COLI" ]]; then
+  echo "The current manuscripts cover ESCHERICHIA COLI only; use --publication all for extensions." >&2
+  exit 2
+fi
+if [[ "${PUBLICATION}" != all && -n "${SITES}" ]]; then
+  site_set="$(printf '%s' "${SITES}" | tr ',' '\n' | sort | paste -sd, -)"
+  [[ "${site_set}" == armd,armd_ecuh,armd_utsw ]] || { echo "Both manuscripts require armd,armd_ecuh,armd_utsw." >&2; exit 2; }
+fi
 
 # Shared pass-through flags, built once and forwarded identically to every
 # real submit_pipeline_dag_hpc.sh call below (sensitivity runs included --
 # they should target the same cohort/hardware as the primary run).
 common_args=()
+common_args+=(--publication "${PUBLICATION}")
+presentation_args=""
+if [[ "${HIDE_FIGURE_TITLES}" -eq 1 ]]; then
+  common_args+=(--hide-figure-titles)
+  presentation_args="--hide-figure-titles"
+fi
 [[ -n "${SITES}" ]] && common_args+=(--sites "${SITES}")
 [[ -n "${ORGANISMS}" ]] && common_args+=(--organisms "${ORGANISMS}")
 [[ -n "${PARTITION}" ]] && common_args+=(--partition "${PARTITION}")
@@ -209,6 +255,7 @@ common_args=()
 [[ "${SKIP_INSTALL}" -eq 1 ]] && common_args+=(--skip-install)
 
 main_args=(${common_args[@]+"${common_args[@]}"})
+main_args+=(${PRIMARY_SKIP_ARGS[@]+"${PRIMARY_SKIP_ARGS[@]}"})
 if [[ -n "${ESKAPE_TARGETS}" && "${WITH_ESKAPE}" -eq 0 ]]; then
   echo "--eskape-targets has no effect without --with-eskape" >&2
   exit 2
@@ -219,6 +266,13 @@ fi
 # in step: the threshold-strategy comparison (validation holdout vs patient-grouped OOF)
 # is reported in the Supplement, so it is part of every full run.
 package_args=(--run-site-cascade --include-site-comparison-figures --run-features --run-training --run-threshold-comparison --run-all-figures --run-audit --run-readiness-audit)
+stale_args=(--fix-stale)
+if [[ "${PUBLICATION}" != all ]]; then
+  package_args=(--run-site-cascade --run-features --run-training --run-threshold-comparison --run-all-figures)
+  # Recovery must not silently move completed gold/validation artifacts aside.
+  stale_args=()
+  [[ "${FRESH}" -eq 1 ]] && stale_args=(--fix-stale)
+fi
 [[ "${WITH_ESKAPE}" -eq 1 ]] && package_args+=(--run-eskape)
 
 # Job IDs printed by submit_pipeline_dag_hpc.sh, e.g. "Report ESCHERICHIA COLI: 123".
@@ -238,11 +292,29 @@ echo "=== [0/4] Python packages: requirements-hpc.txt -> .venv ==="
 bash scripts/submit_pipeline_dag_hpc.sh "${setup_args[@]}"
 echo ""
 
+# Check all saved results before submitting any part of the wave, not after
+# hundreds of jobs have already been queued. A fresh run rebuilds these layers.
+if [[ "${PUBLICATION}" != all && "${FRESH}" -eq 0 ]]; then
+  reuse_args=(--sites "${SITES:-armd,armd_ecuh,armd_utsw}" --organisms "${ORGANISMS:-ESCHERICHIA COLI}")
+  check_reuse() {
+    if [[ "${DRY_RUN}" -eq 1 ]]; then
+      printf '[dry-run] .venv/bin/python scripts/check_validation_reuse.py'; printf ' %q' "$@" "${reuse_args[@]}"; printf '\n'
+    else
+      "${PROJECT_ROOT}/.venv/bin/python" scripts/check_validation_reuse.py "$@" "${reuse_args[@]}"
+    fi
+  }
+  check_reuse --env hpc --include-sites
+  [[ "${SKIP_SUPPORT_SENSITIVITY}" -eq 1 ]] || check_reuse --env hpc_availability_sensitivity
+  [[ "${SKIP_ANNUAL_SENSITIVITY}" -eq 1 ]] || check_reuse --env hpc_availability_annual_sensitivity
+  [[ "${SKIP_JOINT_SENSITIVITY}" -eq 1 ]] || check_reuse --env hpc_availability_joint_sensitivity
+fi
+
 site_cascade_jobs=""
 combined_cascade_job=""
+harmonization_job=""
 if [[ "${SKIP_MAIN}" -eq 0 ]]; then
-  echo "=== [1/4] Primary run: --fix-stale ${package_args[*]} ==="
-  main_output="$(bash scripts/submit_pipeline_dag_hpc.sh --fix-stale "${package_args[@]}" ${main_args[@]+"${main_args[@]}"})"
+  echo "=== [1/4] Primary run: ${PUBLICATION} ${package_args[*]} ==="
+  main_output="$(bash scripts/submit_pipeline_dag_hpc.sh ${stale_args[@]+"${stale_args[@]}"} "${package_args[@]}" ${main_args[@]+"${main_args[@]}"})"
   printf '%s\n' "${main_output}"
   # merge_cascade_validation_shards.py writes validation_results.parquet, the
   # input of the three validated-pattern follow-ups.
@@ -251,6 +323,7 @@ if [[ "${SKIP_MAIN}" -eq 0 ]]; then
   REPORT_JOB="$(job_id_after "${main_output}" "Report ")"
   READINESS_JOB="$(job_id_after "${main_output}" "Publication readiness audit ")"
   combined_cascade_job="$(job_id_after "${main_output}" "Combined cascade ")"
+  harmonization_job="$(job_id_after "${main_output}" "Harmonization:")"
   site_cascade_jobs="$(printf '%s\n' "${main_output}" | grep -E "^Site cascade [^|]+\| " | grep -v "^Site cascade validation merge" | awk -F': ' '{print $2}' | paste -sd: - || true)"
 else
   echo "=== [1/4] Primary run: skipped (--skip-main) ==="
@@ -277,11 +350,16 @@ setup_sensitivity_symlinks() {
 sensitivity_jobs=()
 submit_sensitivity() {
   local data_root="$1" environment="$2" output
-  setup_sensitivity_symlinks "${data_root}"
+  [[ "${DRY_RUN}" -eq 1 ]] || setup_sensitivity_symlinks "${data_root}"
+  local sensitivity_args=()
+  [[ "${PUBLICATION}" == all ]] || sensitivity_args+=(--validation-only)
+  # Variants read the primary harmonized tables through symlinks. Do not race
+  # those writes during a raw-to-publication run.
+  [[ -z "${harmonization_job}" ]] || sensitivity_args+=(--after-job "${harmonization_job}")
   output="$(bash scripts/submit_pipeline_dag_hpc.sh \
     --env "${environment}" --data-root "${data_root}" \
     --skip-ingestion --skip-preprocessing --skip-harmonization --skip-comorbidity \
-    --skip-prevalence --skip-reporting --fix-stale ${common_args[@]+"${common_args[@]}"})"
+    --skip-prevalence --skip-reporting ${stale_args[@]+"${stale_args[@]}"} ${sensitivity_args[@]+"${sensitivity_args[@]}"} ${common_args[@]+"${common_args[@]}"})"
   printf '%s\n' "${output}"
   sensitivity_jobs+=("$(job_id_after "${output}" "Cascade validation merge ")")
 }
@@ -380,6 +458,11 @@ join_ids() { local IFS=:; echo "$*" | sed -E 's/:+/:/g; s/^://; s/:$//'; }
 sharded_follow_up() {
   local label="$1" analysis="$2" shards="$3" mem="$4" time_limit="$5"
   local base="\"\${AMR_CASCADE_PYTHON}\" scripts/run_validated_pattern_sensitivity.py --analysis ${analysis} --env hpc --gold-scope combined --organism '${organism}' --shard-total ${shards}"
+  if [[ "${DRY_RUN}" -eq 0 && -z "${VALIDATION_MERGE_JOB}" && "${FORCE_RERUN_EXISTING}" -eq 0 ]] &&
+    "${python_bin}" scripts/run_validated_pattern_sensitivity.py --analysis "${analysis}" --env hpc --gold-scope combined --organism "${organism}" --check-ready; then
+    echo "  ${label}: reusing provenance-matched completed result; no shards queued." >&2
+    return 0
+  fi
   local ids=()
   for ((i = 0; i < shards; i++)); do
     ids+=("$(follow_up "amr_${label}_s${i}" "${cascade_partition}" "${mem}" "${time_limit}" "${VALIDATION_MERGE_JOB}" "${base} --shard-index ${i}")")
@@ -411,10 +494,15 @@ if [[ "${SKIP_PATIENT_CLUSTER}" -eq 0 ]]; then
   finished_jobs+=("${patient_job}")
 fi
 if [[ "${SKIP_RIDGE}" -eq 0 ]]; then
-  ridge_job="$(follow_up amr_ridge_penalty_sensitivity "${cascade_partition}" "${RIDGE_MEM}" "${RIDGE_TIME}" "${VALIDATION_MERGE_JOB}" \
-    "\"\${AMR_CASCADE_PYTHON}\" scripts/run_ridge_penalty_sensitivity.py --env hpc --gold-scope combined --organism '${organism}' --penalties 1,10,100")"
-  echo "Ridge-penalty refit (validated patterns): ${ridge_job}"
-  finished_jobs+=("${ridge_job}")
+  if [[ "${DRY_RUN}" -eq 0 && -z "${VALIDATION_MERGE_JOB}" && "${FORCE_RERUN_EXISTING}" -eq 0 ]] &&
+    "${python_bin}" scripts/run_ridge_penalty_sensitivity.py --env hpc --gold-scope combined --organism "${organism}" --penalties 1,10,100 --check-ready; then
+    echo "Ridge sensitivity: reusing provenance-matched completed result; no refit queued."
+  else
+    ridge_job="$(follow_up amr_ridge_penalty_sensitivity "${cascade_partition}" "${RIDGE_MEM}" "${RIDGE_TIME}" "${VALIDATION_MERGE_JOB}" \
+      "\"\${AMR_CASCADE_PYTHON}\" scripts/run_ridge_penalty_sensitivity.py --env hpc --gold-scope combined --organism '${organism}' --penalties 1,10,100")"
+    echo "Ridge-penalty refit (validated patterns): ${ridge_job}"
+    finished_jobs+=("${ridge_job}")
+  fi
 fi
 if [[ "${SKIP_PREDICTION}" -eq 0 ]]; then
   # After the report and its readiness audit, as in the local runner: the prediction
@@ -423,7 +511,7 @@ if [[ "${SKIP_PREDICTION}" -eq 0 ]]; then
   # Held on training alone, a prediction that finished first lost its figures.
   prediction_deps="$(join_ids "${TRAINING_JOB}" "${REPORT_JOB}" "${READINESS_JOB}")"
   prediction_job="$(follow_up amr_supplementary_prediction "${main_partition}" "${PREDICTION_MEM}" "${PREDICTION_TIME}" "${prediction_deps}" \
-    "\"\${AMR_CASCADE_PYTHON}\" scripts/run_supplementary_prediction.py --env hpc --organism '${organism}'")"
+    "\"\${AMR_CASCADE_PYTHON}\" scripts/run_supplementary_prediction.py --env hpc --organism '${organism}' ${presentation_args}")"
   echo "Supplementary prediction tables and figures: ${prediction_job}"
   finished_jobs+=("${prediction_job}")
 fi
@@ -431,11 +519,20 @@ if [[ "${SKIP_SUPPLEMENTARY_TABLES}" -eq 0 ]]; then
   # Also held on the three sensitivity runs' validation merges: the Supplement's availability-sensitivity table compares them with the primary run.
   table_deps="$(join_ids "${REPORT_JOB}" "${combined_cascade_job}" "${site_cascade_jobs}" ${finished_jobs[@]+"${finished_jobs[@]}"} ${sensitivity_jobs[@]+"${sensitivity_jobs[@]}"})"
   tables_job="$(follow_up amr_supplementary_tables "${main_partition}" "${TABLES_MEM}" "${TABLES_TIME}" "${table_deps}" \
-    "\"\${AMR_CASCADE_PYTHON}\" scripts/build_supplementary_tables.py --env hpc --organism '${organism}'")"
+    "\"\${AMR_CASCADE_PYTHON}\" scripts/build_supplementary_tables.py --env hpc --organism '${organism}' --publication '${PUBLICATION}'")"
   echo "Supplementary tables and quoted numbers: ${tables_job}${table_deps:+ (after ${table_deps})}"
+  if [[ "${PUBLICATION}" != all ]]; then
+    audit_job="$(follow_up "amr_${PUBLICATION}_artifact_audit" "${main_partition}" "8G" "00:30:00" "${tables_job}" \
+      "\"\${AMR_CASCADE_PYTHON}\" scripts/audit_paper1_outputs.py --env hpc --organism '${organism}' --publication '${PUBLICATION}'")"
+    echo "Manuscript artifact audit (${PUBLICATION}): ${audit_job}"
+  fi
 fi
 
 echo ""
-echo "All submissions queued. Check status with: squeue -u \$USER"
+if [[ "${DRY_RUN}" -eq 1 ]]; then
+  echo "Dry run complete; no HPC jobs were submitted."
+else
+  echo "All submissions queued. Check status with: squeue -u \$USER"
+fi
 echo "When everything has finished, export the outputs and run"
 echo "scripts/build_manuscript_package.py where the paper folders are."

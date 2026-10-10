@@ -18,14 +18,17 @@ from matplotlib import pyplot as plt
 
 # PRINT_FONT_SCALE is re-exported: print-geometry plotters size their marks with it.
 from amr_cascade_platform.visualization.report.plotly_print import PRINT_FONT_SCALE, prepare_for_print  # noqa: F401
+from amr_cascade_platform.visualization.report.figure_presentation import save_matplotlib, title_policy, without_plotly_headings
 
 
 class PlotlyFigureExporter:
     """Write Plotly figures in multiple formats with publication-safe static fallbacks."""
 
-    def __init__(self, width: int, height: int) -> None:
+    def __init__(self, width: int, height: int, *, allow_generic_fallback: bool = True, hide_titles: bool = False) -> None:
         self._width = width
         self._height = height
+        self._allow_generic_fallback = allow_generic_fallback
+        self.hide_titles = hide_titles
 
     @staticmethod
     def _print_scaled(figure: go.Figure, width: int, height: int) -> go.Figure:
@@ -36,6 +39,24 @@ class PlotlyFigureExporter:
         """
         return go.Figure(prepare_for_print(figure.to_plotly_json(), width, height))
 
+    @staticmethod
+    def _write_native(figure: go.Figure, path: Path, fmt: str) -> None:
+        # Kaleido 0.2 can capture MathJax's loading badge even without formulas.
+        # Preserve the configured renderer for figures that contain TeX delimiters.
+        scope = pio.kaleido.scope
+        disable_mathjax = scope is not None and "$" not in figure.to_json()
+        original_mathjax = scope.mathjax if disable_mathjax else None
+        if disable_mathjax:
+            scope.mathjax = None
+        try:
+            figure.write_image(
+                path, format=fmt, width=int(figure.layout.width),
+                height=int(figure.layout.height), scale=2,
+            )
+        finally:
+            if disable_mathjax:
+                scope.mathjax = original_mathjax
+
     def write(
         self,
         figure: go.Figure,
@@ -44,10 +65,16 @@ class PlotlyFigureExporter:
         static_fallback: Callable[[str, Path], None] | None = None,
         prefer_static_fallback: bool = False,
     ) -> dict[str, Path]:
+        with title_policy(self.hide_titles):
+            return self._write(figure, output_stem, formats, static_fallback, prefer_static_fallback)
+
+    def _write(self, figure, output_stem, formats, static_fallback, prefer_static_fallback):
         output_stem.parent.mkdir(parents=True, exist_ok=True)
         outputs: dict[str, Path] = {}
         width = int(figure.layout.width or self._width)
         height = int(figure.layout.height or self._height)
+        if self.hide_titles:
+            figure = without_plotly_headings(figure, width=width, height=height)
         print_figure: go.Figure | None = None
         for fmt in formats:
             path = output_stem.with_suffix(f".{fmt}")
@@ -59,11 +86,15 @@ class PlotlyFigureExporter:
                 try:
                     if print_figure is None:
                         print_figure = self._print_scaled(figure, width, height)
-                    print_figure.write_image(
-                        path, format=fmt, width=int(print_figure.layout.width), height=int(print_figure.layout.height), scale=2
-                    )
+                    self._write_native(print_figure, path, fmt)
                 except Exception as exc:
                     if static_fallback is None:
+                        if not self._allow_generic_fallback:
+                            raise RuntimeError(
+                                f"Native static export failed for {path}: {exc!r}. "
+                                "Generic approximation is disabled for this publication profile. "
+                                "Run scripts/check_publication_renderer.py on the rendering node."
+                            ) from exc
                         self.write_matplotlib_static_fallback(figure, path, fmt, width=width, height=height)
                     else:
                         try:
@@ -137,7 +168,7 @@ class PlotlyFigureExporter:
                 )
 
         fig.tight_layout()
-        fig.savefig(path, format=fmt, dpi=300, bbox_inches="tight")
+        save_matplotlib(fig, path, format=fmt, dpi=300, bbox_inches="tight")
         plt.close(fig)
 
     @staticmethod

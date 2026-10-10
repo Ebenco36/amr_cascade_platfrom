@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pandas as pd
 import pyarrow as pa
+import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 
 from amr_cascade_platform.core.config.config_models import Settings
@@ -198,13 +201,8 @@ class ModelingWorkflow:
             )
             feature_dir = artifact_dir / feature_set.name
             feature_dir.mkdir(parents=True, exist_ok=True)
-            feature_dataset = self._materialize_feature_set_dataset(
-                selection=selection,
-                dataset=dataset,
-                feature_set=feature_set,
-            )
             feature_dataset_path = feature_dir / "feature_dataset.parquet"
-            self._parquet_store.write_pandas(feature_dataset, feature_dataset_path)
+            self._export_feature_set_dataset(selection, dataset, feature_set, feature_dataset_path)
             outputs[f"{feature_set.name}__feature_dataset"] = feature_dataset_path
             for estimator in estimators:
                 self._logger.info("Training %s on feature set %s", estimator.name, feature_set.name)
@@ -329,6 +327,10 @@ class ModelingWorkflow:
                             len(split.validation),
                         )
                     raw_predictions = self._predict_all_splits(estimator.name, estimator, split, dataset, feature_set)
+                if isinstance(estimator, LogisticRegressionEstimator):
+                    coefficient_path = feature_dir / "logistic_regression_coefficients.parquet"
+                    self._parquet_store.write_pandas(estimator.coefficients(), coefficient_path)
+                    outputs[f"{feature_set.name}__logistic_regression_coefficients"] = coefficient_path
                 if threshold_result is None:
                     threshold_result = threshold_selector.select(
                         predictions=raw_predictions,
@@ -627,14 +629,33 @@ class ModelingWorkflow:
             ("validation", self._settings.modeling.validation_sites),
             ("test", self._settings.modeling.test_sites),
         ):
-            frame = self._dataset_store.read_pandas(
-                source_path,
-                columns=[split_column],
-                filters=[(split_column, "in", list(sites))],
+            counts[label] = ds.dataset(source_path, format="parquet").count_rows(
+                filter=ds.field(split_column).isin(list(sites))
             )
-            counts[label] = len(frame)
-            counts["all"] += len(frame)
+            counts["all"] += counts[label]
         return counts
+
+    def _export_feature_set_dataset(self, selection, dataset, feature_set, destination: Path) -> None:
+        """Persist the exact selected columns without materialising all sites in RAM."""
+        if not selection.persisted:
+            self._parquet_store.write_pandas(
+                self._materialize_feature_set_dataset(selection, dataset, feature_set), destination
+            )
+            return
+        columns = self._required_columns_for_feature_set(dataset, feature_set)
+        scanner = ds.dataset(selection.source_path, format="parquet").scanner(
+            columns=columns, batch_size=65536, batch_readahead=1, fragment_readahead=1,
+            use_threads=False,
+        )
+        fd, temporary = tempfile.mkstemp(dir=destination.parent, suffix=".parquet.tmp")
+        os.close(fd)
+        try:
+            with pq.ParquetWriter(temporary, scanner.projected_schema) as writer:
+                for batch in scanner.to_batches():
+                    writer.write_batch(batch)
+            os.replace(temporary, destination)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
 
     def _required_columns_for_feature_set(
         self,

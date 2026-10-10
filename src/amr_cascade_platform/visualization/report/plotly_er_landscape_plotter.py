@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from amr_cascade_platform.visualization.report.figure_presentation import save_matplotlib
+
 import math
 from pathlib import Path
 
@@ -282,7 +284,7 @@ class PlotlyERLandscapePlotter:
             fig, ax = plt.subplots(figsize=(12, 5))
             ax.axis("off")
             ax.text(0.5, 0.5, "No support-passing pairs with finite ER.", ha="center", va="center")
-            fig.savefig(path, format=fmt, dpi=300, bbox_inches="tight")
+            save_matplotlib(fig, path, format=fmt, dpi=300, bbox_inches="tight")
             plt.close(fig)
             return
 
@@ -378,7 +380,7 @@ class PlotlyERLandscapePlotter:
             color="#344054",
         )
         fig.tight_layout(rect=[0, 0.08, 1, 0.94])
-        fig.savefig(path, format=fmt, dpi=300, bbox_inches="tight")
+        save_matplotlib(fig, path, format=fmt, dpi=300, bbox_inches="tight")
         plt.close(fig)
 
 

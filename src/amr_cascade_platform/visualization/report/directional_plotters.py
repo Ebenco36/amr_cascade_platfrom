@@ -9,6 +9,8 @@ Every quantity drawn is taken verbatim from `reporting.builders.directional_view
 
 from __future__ import annotations
 
+from amr_cascade_platform.visualization.report.figure_presentation import save_matplotlib
+
 import base64
 import io
 import math
@@ -71,6 +73,7 @@ class DirectionalSankeyPlotter:
         coverage: dict[str, float],
         n_eligible: int,
         min_fold: float,
+        n_direction: int | None = None,
     ) -> dict[str, Path]:
         style = DIRECTION_STYLE[direction]
         if links.empty:
@@ -131,9 +134,9 @@ class DirectionalSankeyPlotter:
             title={
                 "text": (
                     f"<b style='color:{style['hue']}'>{style['title']} patterns ({style['rule']})</b> — {TIER_TITLE[tier]}, upstream → downstream"
-                    f"<br><sub>{selection_note(direction, coverage['n_shown'], n_eligible, coverage['n_total'], min_fold)}; "
-                    f"together {coverage['support_fraction']:.0%} of this direction's pair-support. "
-                    f"Link width = that pair's own eligible episode–pair rows (never summed across pairs).</sub>"
+                    f"<br><sub>{selection_note(direction, coverage['n_shown'], n_eligible, n_direction if n_direction is not None else coverage['n_total'], min_fold)}; "
+                    f"{coverage['support_fraction']:.0%} of display-eligible pair-support. "
+                    f"Width = eligible rows per pair; episodes can appear in multiple links.</sub>"
                 ),
                 "x": 0.5, "xanchor": "center", "font": {"size": 13},
             },
@@ -144,7 +147,7 @@ class DirectionalSankeyPlotter:
         )
         # Column headers sit just above the diagram (a pixel offset, clear of the
         # top node's label), not at a fraction of its height above it.
-        for text, x, anchor in (("<b>Upstream drug (resistant result)</b>", 0.0, "left"), ("<b>Downstream drug (observed?)</b>", 1.0, "right")):
+        for text, x, anchor in (("<b>Upstream drug (R vs S)</b>", 0.0, "left"), ("<b>Downstream drug (observed?)</b>", 1.0, "right")):
             fig.add_annotation(text=text, x=x, y=1.0, xref="paper", yref="paper", showarrow=False, xanchor=anchor, yanchor="bottom",
                                yshift=12, font={"size": 12, "color": "#475467"})
         return self._exporter.write(fig, output_stem, formats)
@@ -228,10 +231,24 @@ class DirectionalMatrixPlotter:
                 "x": 0.5, "xanchor": "center", "font": {"size": 13}, "y": 0.99,
             },
             xaxis={"tickangle": 90, "tickfont": {"size": 12}, "side": "bottom", "constrain": "domain", "title": {"text": "Downstream drug"}},
-            yaxis={"tickfont": {"size": 12}, "autorange": "reversed", "scaleanchor": "x", "title": {"text": "Upstream drug (resistant result)"}},
+            yaxis={"tickfont": {"size": 12}, "autorange": "reversed", "scaleanchor": "x", "title": {"text": "Upstream drug (R vs S)"}},
             legend={"orientation": "h", "x": 0.5, "xanchor": "center", "y": -0.1},
             margin={"l": 110, "r": 90, "t": 160, "b": 140}, plot_bgcolor="white", paper_bgcolor="white", font={"family": "Arial"},
         )
+        if cells.empty:
+            # An all-NaN heatmap has no categorical domain in static Plotly
+            # exports; its axis title can collapse onto the empty-state message.
+            fig.data = []
+            fig.layout.annotations = ()
+            fig.layout.shapes = ()
+            fig.update_xaxes(visible=False, title_text="", scaleanchor=None)
+            fig.update_yaxes(visible=False, title_text="", scaleanchor=None)
+            fig.update_layout(showlegend=False)
+            fig.add_annotation(
+                text=f"No {TIER_TITLE[tier]}<br>{direction} patterns to draw",
+                x=0.5, y=0.5, xref="paper", yref="paper", showarrow=False,
+                font={"size": 14, "color": "#475467"}, bgcolor="white",
+            )
         return self._exporter.write(fig, output_stem, formats)
 
 
@@ -240,7 +257,8 @@ class DirectionalNetworkPlotter:
 
     _DPI = 300
 
-    def __init__(self, classification: AntibioticClassificationResolver, size_inches: float = 9.0) -> None:
+    def __init__(self, classification: AntibioticClassificationResolver, size_inches: float = 9.0, *, hide_titles: bool = False) -> None:
+        self._hide_titles = hide_titles
         self._classification = classification
         self._size = size_inches
 
@@ -302,8 +320,11 @@ class DirectionalNetworkPlotter:
                 ha="right" if left_side else "left", va="center", rotation=angle + 180 if left_side else angle, rotation_mode="anchor", zorder=5,
             )
 
-        ax.text(0, 0.06, f"{style['title']}", ha="center", va="center", fontsize=26, fontweight="bold", color=style["hue"], alpha=0.16, zorder=0)
-        ax.text(0, -0.08, style["rule"], ha="center", va="center", fontsize=16, color=style["hue"], alpha=0.16, zorder=0)
+        ax.text(0, 0.06, f"{style['title']}", ha="center", va="center", fontsize=26, fontweight="bold", color=style["hue"], alpha=0.16, zorder=0, gid="figure_title")
+        ax.text(0, -0.08, style["rule"], ha="center", va="center", fontsize=16, color=style["hue"], alpha=0.16, zorder=0, gid="figure_subtitle")
+        if edges.empty:
+            ax.text(0, -0.40, f"No {TIER_TITLE[tier]}\n{direction} patterns to draw",
+                    ha="center", va="center", fontsize=12, color="#475467", zorder=6)
         title = f"{style['title']} network ({style['rule']}) — {TIER_TITLE[tier]}"
         subtitle = (
             f"{selection_note(direction, len(edges), n_eligible, n_direction, min_fold)}. Arrow: upstream resistant result → downstream drug observed "
@@ -311,7 +332,7 @@ class DirectionalNetworkPlotter:
             f"Node size = weighted degree within this direction; grey = no pattern in this direction. Node positions identical in both directions."
         )
         fig.suptitle(title, fontsize=17, fontweight="bold", y=0.985, color="#0F172A")
-        fig.text(0.5, 0.955, subtitle, ha="center", va="top", fontsize=9.6, color="#475467", wrap=True)
+        fig.text(0.5, 0.955, subtitle, ha="center", va="top", fontsize=9.6, color="#475467", wrap=True, gid="figure_subtitle")
         handles = [Line2D([0], [0], marker="o", color="w", markerfacecolor=self._classification.CATEGORY_COLORS[t], markeredgecolor="#17324d", markersize=10, label=f"{t} (AWaRe)") for t in ("Access", "Watch", "Reserve")]
         handles += [Line2D([0], [0], color=style["hue"], lw=3, alpha=0.78, label="robust"), Line2D([0], [0], color=style["hue"], lw=3, alpha=0.34, label="supported")]
         fig.legend(handles=handles, loc="lower center", ncol=5, frameon=False, fontsize=10.5, bbox_to_anchor=(0.5, 0.01))
@@ -329,7 +350,7 @@ class DirectionalNetworkPlotter:
             if fmt == "html":
                 if png_bytes is None:
                     buffer = io.BytesIO()
-                    fig.savefig(buffer, format="png", dpi=150, facecolor="white", bbox_inches="tight")
+                    save_matplotlib(fig, buffer, hide_titles=self._hide_titles, format="png", dpi=150, facecolor="white", bbox_inches="tight")
                     png_bytes = buffer.getvalue()
                 encoded = base64.b64encode(png_bytes).decode("ascii")
                 path.write_text(
@@ -339,7 +360,7 @@ class DirectionalNetworkPlotter:
                     encoding="utf-8",
                 )
             else:
-                fig.savefig(path, format=fmt, dpi=self._DPI, facecolor="white", bbox_inches="tight")
+                save_matplotlib(fig, path, hide_titles=self._hide_titles, format=fmt, dpi=self._DPI, facecolor="white", bbox_inches="tight")
             outputs[path.name] = path
         plt.close(fig)
         return outputs
@@ -385,7 +406,7 @@ class DirectionalForestPlotter:
         n = len(data)
         if n == 0:
             fig = go.Figure()
-            fig.add_annotation(text=f"No {TIER_TITLE[tier]} {direction} patterns to draw", x=0.5, y=0.5, xref="paper", yref="paper", showarrow=False, font={"color": "#475467"})
+            fig.add_annotation(text=f"No {TIER_TITLE[tier]}<br>{direction} patterns to draw", x=0.5, y=0.5, xref="paper", yref="paper", showarrow=False, font={"color": "#475467", "size": 16})
             # 400 px, as the other empty-state figure: 300 exported below the 628 px
             # minimum PNG height the publication-readiness audit enforces.
             fig.update_layout(template=self._template, width=900, height=400, xaxis={"visible": False}, yaxis={"visible": False}, plot_bgcolor="white", paper_bgcolor="white")
@@ -567,7 +588,8 @@ class DirectionalAwarePlotter:
     those figures answer, even though both are split by direction here too.
     """
 
-    def __init__(self, classification: AntibioticClassificationResolver) -> None:
+    def __init__(self, classification: AntibioticClassificationResolver, *, hide_titles: bool = False) -> None:
+        self._hide_titles = hide_titles
         self._classification = classification
 
     def export(
@@ -610,6 +632,10 @@ class DirectionalAwarePlotter:
                 ax.text(j + 0.5, i + 0.72, f"{int(robust[i, j])} robust", ha="center", va="center", fontsize=8.5, color="white" if dark else "#475467")
         for spine in ax.spines.values():
             spine.set_visible(False)
+        if not counts.any():
+            ax.text(0.5, 0.5, f"No {TIER_TITLE[tier]}\n{direction} patterns to draw",
+                    transform=ax.transAxes, ha="center", va="center", fontsize=12,
+                    color="#475467", bbox={"facecolor": "white", "edgecolor": "none", "pad": 10})
         ax.tick_params(length=0)
         bar = fig.colorbar(mesh, ax=ax, fraction=0.04, pad=0.03)
         bar.set_label("Validated patterns")
@@ -622,7 +648,7 @@ class DirectionalAwarePlotter:
             0.5, 0.925,
             f"{n_direction} validated {direction} patterns. AWaRe upward {ups}, lateral {lats}, downward {downs} "
             "(stewardship-tier movement, a different axis from the escalation/suppression direction this figure is already split on).",
-            ha="center", fontsize=9.2, color="#475467",
+            ha="center", fontsize=9.2, color="#475467", gid="figure_subtitle",
         )
         fig.tight_layout(rect=(0, 0, 1, 0.91))
         output_stem.parent.mkdir(parents=True, exist_ok=True)
@@ -633,7 +659,7 @@ class DirectionalAwarePlotter:
             if fmt == "html":
                 if png_bytes is None:
                     buffer = io.BytesIO()
-                    fig.savefig(buffer, format="png", dpi=150, facecolor="white", bbox_inches="tight")
+                    save_matplotlib(fig, buffer, hide_titles=self._hide_titles, format="png", dpi=150, facecolor="white", bbox_inches="tight")
                     png_bytes = buffer.getvalue()
                 encoded = base64.b64encode(png_bytes).decode("ascii")
                 path.write_text(
@@ -643,7 +669,7 @@ class DirectionalAwarePlotter:
                     encoding="utf-8",
                 )
             else:
-                fig.savefig(path, format=fmt, dpi=300, facecolor="white", bbox_inches="tight")
+                save_matplotlib(fig, path, hide_titles=self._hide_titles, format=fmt, dpi=300, facecolor="white", bbox_inches="tight")
             outputs[path.name] = path
         plt.close(fig)
         return outputs
@@ -786,14 +812,20 @@ class AdjustmentConcordancePlotter:
             ))
         fig.add_hline(y=0, line={"color": "#94A3B8", "width": 1})
         fig.add_vline(x=0, line={"color": "#94A3B8", "width": 1})
-        fig.add_shape(type="line", x0=-8, y0=-8, x1=8, y1=8, line={"color": "#CBD5E1", "width": 1, "dash": "dot"}, layer="below")
+        # Numerical equality is a reference only: ER and OR are different scales.
+        finite = estimable[["log_er", "log_or"]].replace([np.inf, -np.inf], np.nan).dropna()
+        if not finite.empty:
+            lower = min(0.0, float(finite.log_er.min()))
+            upper = max(0.0, float(finite.log_er.max()))
+            fig.add_shape(type="line", x0=lower, y0=lower, x1=upper, y1=upper,
+                          line={"color": "#CBD5E1", "width": 1, "dash": "dot"}, layer="below")
         fig.update_layout(
             template=self._template, width=self._width, height=self._height,
             title={
                 "text": (
                     "<b>Raw escalation ratio vs. adjusted odds ratio</b> — "
                     f"{TIER_TITLE[tier]}: {n_estimable} of {n_total} validated patterns estimable"
-                    "<br><sup>Dotted diagonal = raw and adjusted agree. Same-quadrant-as-origin = concordant; opposite = reversed.</sup>"
+                    "<br><sup>Matching signs indicate directional coherence. ER and OR magnitudes are not directly comparable.</sup>"
                 ),
                 "x": 0.5, "xanchor": "center", "font": {"size": 13},
             },
@@ -818,7 +850,7 @@ class AdjustmentConcordanceSummaryPlotter:
     _CATEGORY_ORDER = ("concordant", "attenuated", "reversed", "unavailable")
     _CATEGORY_LABELS = {
         "concordant": "Concordant<br><span style='font-size:0.8em'>(persists, CI excl. 1)</span>",
-        "attenuated": "Attenuated<br><span style='font-size:0.8em'>(same side, CI incl. 1)</span>",
+        "attenuated": "Same direction<br><span style='font-size:0.8em'>(CI incl. 1)</span>",
         "reversed": "Reversed<br><span style='font-size:0.8em'>(opposite side of 1)</span>",
         "unavailable": "Non-estimable<br><span style='font-size:0.8em'>(no adjusted OR)</span>",
     }

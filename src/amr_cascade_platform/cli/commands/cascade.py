@@ -23,6 +23,7 @@ def register_cascade_command(subparsers, project_root: Path, context_builder) ->
     )
     parser.add_argument("--site", default=None, help="Site name when using --gold-scope site.")
     parser.add_argument("--organism", default=None, help="Optional organism filter for organism-stratified cascade analysis.")
+    parser.add_argument("--skip-shap", action="store_true", help="Keep adjusted model fits but omit optional SHAP computation.")
     parser.add_argument(
         "--ignore-precomputed-validation",
         action="store_true",
@@ -41,7 +42,7 @@ def register_cascade_command(subparsers, project_root: Path, context_builder) ->
 
 def _run(args, project_root: Path, context_builder) -> None:
     settings, path_manager, _ = context_builder(project_root, args.env)
-    workflow = CascadeAnalysisWorkflow(settings, path_manager)
+    workflow = CascadeAnalysisWorkflow(settings, path_manager, explain=not args.skip_shap)
     request = CascadeAnalysisRequest(
         gold_scope=args.gold_scope,
         site=args.site,

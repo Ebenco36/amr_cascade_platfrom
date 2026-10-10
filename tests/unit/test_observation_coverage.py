@@ -91,6 +91,23 @@ def test_print_geometry_scales_canvas_and_marks_but_not_fonts(eligible_pairs, re
     assert marker(paper) > 2 * marker(screen)
 
 
+@pytest.mark.parametrize("medium,scale", [("screen", 1), ("print", 2.6)])
+def test_title_free_coverage_moves_both_legends_with_panel_top(eligible_pairs, resolver, medium, scale):
+    from amr_cascade_platform.visualization.report.figure_presentation import without_plotly_headings
+    table = observation_coverage_table(eligible_pairs, resolver, ("armd", "armd_ecuh"))
+    fig = PlotlyObservationCoveragePlotter(exporter=None, template="plotly_white").figure(table, medium=medium)
+    clean = without_plotly_headings(fig, width=fig.layout.width, height=fig.layout.height)
+    assert clean.layout.title.text == ""
+    assert clean.layout.width == fig.layout.width and clean.layout.height == fig.layout.height
+    reclaimed = (fig.layout.margin.t - clean.layout.margin.t) * scale
+    assert reclaimed > 0
+    for key in ("legend", "legend2"):
+        shift = (clean.layout[key].y - fig.layout[key].y) * fig.layout.height
+        assert shift == pytest.approx(reclaimed)
+        assert clean.layout[key].font.size == fig.layout[key].font.size
+    assert len(clean.layout.annotations) == len(fig.layout.annotations)
+
+
 def test_small_multiples_have_one_column_per_scope_and_mark_absent_drugs(eligible_pairs, resolver):
     table = observation_coverage_table(eligible_pairs, resolver, ("armd", "armd_ecuh"))
     fig = PlotlyObservationCoveragePlotter(exporter=None, template="plotly_white").small_multiples_figure(table)

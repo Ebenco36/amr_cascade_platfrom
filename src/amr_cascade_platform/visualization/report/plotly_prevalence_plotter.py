@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from amr_cascade_platform.visualization.report.figure_presentation import save_matplotlib
+
 from pathlib import Path
 
 import numpy as np
@@ -312,7 +314,7 @@ class PlotlyPrevalencePlotter:
                 fontsize=9.5,
             )
         fig.subplots_adjust(left=0.25, right=0.94, top=0.88, bottom=0.20)
-        fig.savefig(path, format=fmt, dpi=300, bbox_inches="tight")
+        save_matplotlib(fig, path, format=fmt, dpi=300, bbox_inches="tight")
         plt.close(fig)
 
     @staticmethod
@@ -481,6 +483,7 @@ class PlotlyPrevalencePlotter:
             0.0,
             1.01,
             "Share of observed tests occurring after a validated upstream resistant trigger",
+            gid="figure_subtitle",
             transform=ax.transAxes,
             fontsize=9.5,
             color="#475467",
@@ -491,7 +494,7 @@ class PlotlyPrevalencePlotter:
         ax.set_axisbelow(True)
         ax.spines[["top", "right", "left"]].set_visible(False)
         fig.tight_layout()
-        fig.savefig(path, format=fmt, dpi=300, bbox_inches="tight")
+        save_matplotlib(fig, path, format=fmt, dpi=300, bbox_inches="tight")
         plt.close(fig)
 
     @staticmethod
@@ -531,6 +534,7 @@ class PlotlyPrevalencePlotter:
             0.0,
             1.01,
             "Selective observation, resistance enrichment, and eligible-denominator uncertainty by drug",
+            gid="figure_subtitle",
             transform=ax.transAxes,
             fontsize=9.5,
             color="#475467",
@@ -546,8 +550,16 @@ class PlotlyPrevalencePlotter:
                 label_indices_set.update(np.argsort(values)[-4:].tolist())
             label_indices = sorted(label_indices_set)
         offsets = ((6, 6), (6, -11), (-6, 7), (-6, -12))
+        x_left, x_right = ax.get_xlim()
         for order, index in enumerate(label_indices):
             offset_x, offset_y = offsets[order % len(offsets)]
+            relative_x = (x_values[index] - x_left) / (x_right - x_left)
+            # Long drug names near an edge must point into the plotting area,
+            # not across the y-axis or the adjacent colour bar.
+            if relative_x >= 0.65:
+                offset_x = -6
+            elif relative_x <= 0.35:
+                offset_x = 6
             ax.annotate(
                 str(data.iloc[index]["drug"]),
                 (x_values[index], y_values[index]),
@@ -560,7 +572,7 @@ class PlotlyPrevalencePlotter:
             )
         ax.spines[["top", "right"]].set_visible(False)
         fig.tight_layout()
-        fig.savefig(path, format=fmt, dpi=300, bbox_inches="tight")
+        save_matplotlib(fig, path, format=fmt, dpi=300, bbox_inches="tight")
         plt.close(fig)
 
     @staticmethod

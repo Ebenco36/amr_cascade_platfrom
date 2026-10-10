@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from amr_cascade_platform.visualization.report.figure_presentation import save_matplotlib
+
 import math
 from pathlib import Path
 
@@ -468,5 +470,5 @@ class PlotlyTemporalStabilityPlotter:
             fontsize=8.5,
             color="#667085",
         )
-        fig.savefig(path, format=fmt, dpi=300, bbox_inches="tight")
+        save_matplotlib(fig, path, format=fmt, dpi=300, bbox_inches="tight")
         plt.close(fig)

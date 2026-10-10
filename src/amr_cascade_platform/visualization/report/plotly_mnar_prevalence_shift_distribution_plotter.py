@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from amr_cascade_platform.visualization.report.figure_presentation import save_matplotlib
+
 import math
 from pathlib import Path
 
@@ -14,8 +16,9 @@ from matplotlib import pyplot as plt
 from amr_cascade_platform.visualization.report.organism_labels import format_organism_label
 from amr_cascade_platform.visualization.report.plotly_exporter import PlotlyFigureExporter
 
-_OVER_COLOR  = "rgba(214,39,40,0.82)"   # positive shift — naive overstates resistance
-_UNDER_COLOR = "rgba(31,119,180,0.82)"  # negative shift — naive understates resistance
+_OVER_COLOR  = "rgba(214,39,40,0.82)"   # positive shift: naive above the reference
+_UNDER_COLOR = "rgba(31,119,180,0.82)"  # negative shift: naive below the reference
+_EQUAL_COLOR = "#667085"
 _OVER_MPL = "#D62728"
 _UNDER_MPL = "#1F77B4"
 _GRID = "#E8EEF5"
@@ -39,13 +42,13 @@ class PlotlyMNARPrevalenceShiftDistributionPlotter:
     Panel A — Diverging waterfall (sorted by absolute shift)
         Each bar = one organism-antibiotic pair.
         Bar length = naive prevalence minus reference-model (lambda = 0) prevalence.
-        Red = naive rate overstates resistance.
-        Blue = naive rate understates resistance.
+        Red = naive rate above the reference-model prevalence.
+        Blue = naive rate below the reference-model prevalence.
 
     Panel B — Naive prevalence vs. reference-model (lambda = 0) prevalence scatter
         Each point = one pair.
-        Points above the diagonal: naive > shifted (overestimate).
-        Points below the diagonal: naive < shifted (underestimate).
+        Points above the diagonal: reference-model prevalence > naive prevalence.
+        Points below the diagonal: reference-model prevalence < naive prevalence.
     """
 
     def __init__(self, exporter: PlotlyFigureExporter, template: str, width: int, height: int) -> None:
@@ -158,7 +161,7 @@ class PlotlyMNARPrevalenceShiftDistributionPlotter:
     # ── Panel A ───────────────────────────────────────────────────────────
 
     def _panel_a_waterfall(self, fig: go.Figure, df: pd.DataFrame) -> None:
-        colors = [_OVER_COLOR if v > 0 else _UNDER_COLOR for v in df["shift_pct"]]
+        colors = [_OVER_COLOR if v > 0 else _UNDER_COLOR if v < 0 else _EQUAL_COLOR for v in df["shift_pct"]]
 
         fig.add_trace(
             go.Bar(
@@ -194,10 +197,10 @@ class PlotlyMNARPrevalenceShiftDistributionPlotter:
 
         # Legend proxies
         fig.add_trace(go.Bar(x=[None], y=[None], orientation="h",
-                             marker_color=_OVER_COLOR, name="Naive overstates resistance",
+                             marker_color=_OVER_COLOR, name="Naive above reference",
                              showlegend=True), row=1, col=1)
         fig.add_trace(go.Bar(x=[None], y=[None], orientation="h",
-                             marker_color=_UNDER_COLOR, name="Naive understates resistance",
+                             marker_color=_UNDER_COLOR, name="Naive below reference",
                              showlegend=True), row=1, col=1)
 
         fig.update_xaxes(title_text="Naive − reference-model prevalence (percentage points)", zeroline=False, row=1, col=1)
@@ -218,7 +221,7 @@ class PlotlyMNARPrevalenceShiftDistributionPlotter:
                 x=[0, ax_max], y=[0, ax_max],
                 mode="lines",
                 line=dict(color="#bbbbbb", dash="dot", width=1.5),
-                name="No distortion",
+                name="Equal to reference",
                 showlegend=False,
                 hoverinfo="skip",
             ),
@@ -226,11 +229,12 @@ class PlotlyMNARPrevalenceShiftDistributionPlotter:
         )
 
         over_mask  = df["shift_pct"] > 0
-        under_mask = df["shift_pct"] <= 0
+        under_mask = df["shift_pct"] < 0
 
         for mask, color, label in [
-            (over_mask,  _OVER_COLOR,  "Naive overstates"),
-            (under_mask, _UNDER_COLOR, "Naive understates"),
+            (over_mask,  _OVER_COLOR,  "Naive above reference"),
+            (under_mask, _UNDER_COLOR, "Naive below reference"),
+            (df["shift_pct"].eq(0), _EQUAL_COLOR, "Equal to reference"),
         ]:
             sub = df[mask]
             if sub.empty:
@@ -288,7 +292,7 @@ class PlotlyMNARPrevalenceShiftDistributionPlotter:
             title += f" ({organism_title})"
         fig.suptitle(title, fontsize=15, fontweight="bold", y=0.985)
 
-        colors = [_OVER_MPL if value > 0 else _UNDER_MPL for value in df["shift_pct"]]
+        colors = [_OVER_MPL if value > 0 else _UNDER_MPL if value < 0 else _EQUAL_COLOR for value in df["shift_pct"]]
         y_pos = np.arange(len(df))
         ax_bar.barh(y_pos, df["shift_pct"], color=colors, alpha=0.85)
         ax_bar.axvline(0, color="#475467", linewidth=1.2)
@@ -303,9 +307,9 @@ class PlotlyMNARPrevalenceShiftDistributionPlotter:
             float(df["mnar_lambda0_prevalence_pct"].max()),
             1.0,
         ) * 1.10
-        ax_scatter.plot([0, ax_max], [0, ax_max], linestyle=":", color="#98A2B3", linewidth=1.3, label="No distortion")
+        ax_scatter.plot([0, ax_max], [0, ax_max], linestyle=":", color="#98A2B3", linewidth=1.3, label="Equal to reference")
         over_mask = df["shift_pct"] > 0
-        under_mask = ~over_mask
+        under_mask = df["shift_pct"] < 0
         if over_mask.any():
             ax_scatter.scatter(
                 df.loc[over_mask, "naive_prevalence_pct"],
@@ -314,7 +318,7 @@ class PlotlyMNARPrevalenceShiftDistributionPlotter:
                 edgecolors="white",
                 linewidths=0.6,
                 s=38,
-                label="Naive overstates",
+                label="Naive above reference",
                 alpha=0.85,
             )
         if under_mask.any():
@@ -325,9 +329,14 @@ class PlotlyMNARPrevalenceShiftDistributionPlotter:
                 edgecolors="white",
                 linewidths=0.6,
                 s=38,
-                label="Naive understates",
+                label="Naive below reference",
                 alpha=0.85,
             )
+        equal_mask = df["shift_pct"].eq(0)
+        if equal_mask.any():
+            ax_scatter.scatter(df.loc[equal_mask, "naive_prevalence_pct"],
+                               df.loc[equal_mask, "mnar_lambda0_prevalence_pct"],
+                               color=_EQUAL_COLOR, edgecolors="white", s=38)
         ax_scatter.set_xlim(0, ax_max)
         ax_scatter.set_ylim(0, ax_max)
         ax_scatter.set_xlabel("Naive prevalence (%)")
@@ -336,5 +345,5 @@ class PlotlyMNARPrevalenceShiftDistributionPlotter:
         ax_scatter.grid(True, color=_GRID, linewidth=0.7)
         ax_scatter.legend(frameon=False, fontsize=8, loc="lower right")
 
-        fig.savefig(path, format=fmt, dpi=300, bbox_inches="tight")
+        save_matplotlib(fig, path, format=fmt, dpi=300, bbox_inches="tight")
         plt.close(fig)

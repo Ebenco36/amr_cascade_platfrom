@@ -419,7 +419,7 @@ class PlotlyObservationCoveragePlotter:
                    "font": {"size": _FONT_TITLE, "color": _TEXT}},
             margin=dict(margin),
             hoverlabel={"font": {"family": _FONT}},
-            meta={"print_geometry": True},  # laid out for print already: the exporter only scales its text
+            meta={"print_geometry": True, "geometry_scale": g.margin_scale, "heading_band": 36},
         )
 
     @staticmethod

@@ -61,10 +61,12 @@ from amr_cascade_platform.visualization.report.plotly_descriptive_plotters impor
 class FigureManager:
     """High-level facade for manuscript-facing figure families."""
 
-    def __init__(self, settings: Settings, path_manager: PathManager) -> None:
+    def __init__(self, settings: Settings, path_manager: PathManager, *, allow_generic_static_fallback: bool = True, hide_titles: bool = False) -> None:
         exporter = PlotlyFigureExporter(
             width=settings.reporting.image_width,
             height=settings.reporting.image_height,
+            allow_generic_fallback=allow_generic_static_fallback,
+            hide_titles=hide_titles,
         )
         classification = AntibioticClassificationResolver(
             path_manager.project_root / "data" / "antibiotic_classification_complete.csv"
@@ -77,11 +79,11 @@ class FigureManager:
         self._directional_matrix_plotter = DirectionalMatrixPlotter(
             exporter=exporter, template=settings.reporting.plotly_template, classification=classification
         )
-        self._directional_network_plotter = DirectionalNetworkPlotter(classification)
+        self._directional_network_plotter = DirectionalNetworkPlotter(classification, hide_titles=hide_titles)
         self._directional_forest_plotter = DirectionalForestPlotter(
             exporter=exporter, template=settings.reporting.plotly_template, classification=classification,
         )
-        self._directional_aware_plotter = DirectionalAwarePlotter(classification)
+        self._directional_aware_plotter = DirectionalAwarePlotter(classification, hide_titles=hide_titles)
         self._anti_artefact_plotter = AntiArtefactScatterPlotter(
             exporter=exporter, template=settings.reporting.plotly_template,
             width=settings.reporting.image_width, height=settings.reporting.image_height,
@@ -108,6 +110,7 @@ class FigureManager:
             height=settings.reporting.image_height,
             top_n=settings.reporting.forest_top_n,
             classification_resolver=classification,
+            hide_titles=hide_titles,
         )
         self._threshold_plotter = PlotlyThresholdSensitivityPlotter(
             exporter=exporter,
@@ -174,8 +177,8 @@ class FigureManager:
             width=settings.reporting.image_width,
             height=settings.reporting.image_height,
         )
-        self._delta_curves_plotter = PrevalenceDeltaCurvePlotter()
-        self._mnar_tipping_point_plotter = PlotlyMNARTippingPointPlotter()
+        self._delta_curves_plotter = PrevalenceDeltaCurvePlotter(hide_titles=hide_titles)
+        self._mnar_tipping_point_plotter = PlotlyMNARTippingPointPlotter(hide_titles=hide_titles)
         self._validation_diagnostics_plotter = PlotlyValidationDiagnosticsPlotter(
             exporter=exporter,
             template=settings.reporting.plotly_template,
@@ -335,6 +338,7 @@ class FigureManager:
             outputs.update(self._directional_sankey_plotter.export(
                 links, direction, output_dir / f"figure_{direction}_sankey_{tier}", formats,
                 order=order, tier=tier, coverage=coverage, n_eligible=len(displayed), min_fold=min_fold,
+                n_direction=n_direction,
             ))
 
             cells = dv.matrix_frame(validated.loc[validated.direction == direction], direction, order)
