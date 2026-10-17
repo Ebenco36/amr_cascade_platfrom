@@ -17,6 +17,28 @@ from sklearn.metrics import precision_recall_curve, roc_curve
 from amr_cascade_platform.visualization.report.plotly_exporter import PlotlyFigureExporter
 
 
+
+CURVE_DISPLAY_POINTS = 4000
+
+
+def thin_curve(x: np.ndarray, y: np.ndarray, max_points: int = CURVE_DISPLAY_POINTS) -> tuple[np.ndarray, np.ndarray]:
+    """Points of a ROC or PR curve to draw, spaced evenly along its length.
+
+    A curve over millions of test rows has millions of vertices; drawing them all ran the
+    supplementary prediction export past its time limit (2026-10-17). Only existing vertices are kept (nothing is
+    interpolated), always including both ends, so the drawn line differs from the full
+    curve by less than 1/max_points of the axis range. AUC values are computed on the
+    full curve before this, and are unaffected.
+    """
+    x, y = np.asarray(x, dtype=float), np.asarray(y, dtype=float)
+    if len(x) <= max_points:
+        return x, y
+    length = np.concatenate([[0.0], np.cumsum(np.hypot(np.diff(x), np.diff(y)))])
+    targets = np.linspace(0.0, length[-1], max_points)
+    keep = np.unique(np.concatenate([[0, len(x) - 1], np.searchsorted(length, targets).clip(0, len(x) - 1)]))
+    return x[keep], y[keep]
+
+
 class PlotlyModelEvaluationPlotter:
     """Export standard model-comparison figures from real evaluation artifacts."""
 
@@ -148,6 +170,7 @@ class PlotlyModelEvaluationPlotter:
             fig.add_hline(y=prevalence, line_dash="dash", line_color="#7F8C8D")
             for model_name, subset in plot_data.groupby("model_name", sort=False):
                 precision, recall, _ = precision_recall_curve(subset["target"], subset["predicted_probability"])
+                recall, precision = thin_curve(recall, precision)
                 fig.add_trace(
                     go.Scatter(
                         x=recall,
@@ -194,6 +217,7 @@ class PlotlyModelEvaluationPlotter:
             fig.add_trace(go.Scatter(x=[0, 1], y=[0, 1], mode="lines", line={"dash": "dash", "color": "#7F8C8D"}, name="Chance"))
             for model_name, subset in plot_data.groupby("model_name", sort=False):
                 fpr, tpr, _ = roc_curve(subset["target"], subset["predicted_probability"])
+                fpr, tpr = thin_curve(fpr, tpr)
                 fig.add_trace(
                     go.Scatter(
                         x=fpr,
@@ -514,11 +538,13 @@ class PlotlyModelEvaluationPlotter:
         for model_name, subset in plot_data.groupby("model_name", sort=False):
             if curve_type == "roc":
                 x, y, _ = roc_curve(subset["target"], subset["predicted_probability"])
+                x, y = thin_curve(x, y)
                 ax.set_xlabel("False Positive Rate")
                 ax.set_ylabel("True Positive Rate")
                 ax.set_title("ROC Curves")
             else:
                 y, x, _ = precision_recall_curve(subset["target"], subset["predicted_probability"])
+                x, y = thin_curve(x, y)
                 ax.set_xlabel("Recall")
                 ax.set_ylabel("Precision")
                 ax.set_title("Precision-Recall Curves")

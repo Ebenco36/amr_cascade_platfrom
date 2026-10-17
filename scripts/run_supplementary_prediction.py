@@ -79,6 +79,10 @@ SPLIT_LABEL = {"train": "Train (armd)", "validation": "Validation (armd_ecuh)", 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 from amr_cascade_platform.visualization.report.figure_presentation import figure_titles_hidden, save_matplotlib, title_policy
+from amr_cascade_platform.visualization.report.plotly_model_plotters import (  # noqa: E402
+    CURVE_DISPLAY_POINTS as _CURVE_DISPLAY_POINTS,
+    thin_curve as _thin_curve,
+)
 
 
 @dataclass(frozen=True)
@@ -411,6 +415,7 @@ def fig_roc_curves(preds: pd.DataFrame, fig_dir: Path) -> dict[str, Path]:
         if sub.empty:
             continue
         fpr, tpr, _ = roc_curve(sub["target"], sub["predicted_probability"])
+        fpr, tpr = _thin_curve(fpr, tpr)
         auc = roc_auc_score(sub["target"], sub["predicted_probability"])
         fig.add_trace(go.Scatter(
             x=fpr, y=tpr, mode="lines",
@@ -460,6 +465,7 @@ def fig_pr_curves(preds: pd.DataFrame, fig_dir: Path) -> dict[str, Path]:
         if sub.empty:
             continue
         prec, rec, _ = precision_recall_curve(sub["target"], sub["predicted_probability"])
+        rec, prec = _thin_curve(rec, prec)
         pr_auc = average_precision_score(sub["target"], sub["predicted_probability"])
         fig.add_trace(go.Scatter(
             x=rec, y=prec, mode="lines",
