@@ -55,7 +55,7 @@ AWARE_ORDER = ("Access", "Watch", "Reserve", "Not Set", "Unclassified")
 AWARE_DISPLAY = {"Not Set": "Not classified", "Unclassified": "Not classified"}
 MIN_SITE_SUPPORT = 20
 TITLE = "Observation coverage of the eligible opportunity space"
-X_TITLE = "Observed share of eligible episode-drug opportunities"
+X_TITLE = "Observed share of eligible episode–antibiotic opportunities"
 
 _INK = "#2f3b4c"
 _INK_SPARSE = "#a3acb9"
@@ -203,7 +203,7 @@ class PlotlyObservationCoveragePlotter:
 
     def figure(self, coverage: pd.DataFrame, medium: str = "screen") -> go.Figure:
         if coverage.empty:
-            return self._empty("No eligible episode-drug opportunities to summarise")
+            return self._empty("No eligible episode–antibiotic opportunities to summarise")
         g = _Geometry.for_medium(medium, screen_width=1400, print_width=2000)
         sites, show_sites = _scopes(coverage)
         styles = self._site_styles(sites)
@@ -311,7 +311,7 @@ class PlotlyObservationCoveragePlotter:
 
     def small_multiples_figure(self, coverage: pd.DataFrame, medium: str = "screen") -> go.Figure:
         if coverage.empty:
-            return self._empty("No eligible episode-drug opportunities to summarise")
+            return self._empty("No eligible episode–antibiotic opportunities to summarise")
         g = _Geometry.for_medium(medium, screen_width=1500, print_width=2400)
         sites, show_sites = _scopes(coverage)
         columns = ([ALL_SITES] if show_sites else []) + sites

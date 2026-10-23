@@ -23,7 +23,7 @@ from plotly.subplots import make_subplots
 
 from amr_cascade_platform.reporting.builders import directional_views as dv
 from amr_cascade_platform.visualization.report.antibiotic_classification import AntibioticClassificationResolver
-from amr_cascade_platform.visualization.report.plotly_exporter import PlotlyFigureExporter
+from amr_cascade_platform.visualization.report.plotly_exporter import PRINT_FONT_SCALE, PlotlyFigureExporter
 
 DIRECTION_STYLE: dict[str, dict[str, str]] = {
     dv.ESCALATION: {
@@ -36,6 +36,40 @@ DIRECTION_STYLE: dict[str, dict[str, str]] = {
     },
 }
 TIER_TITLE = {"validated": "robust + supported", "robust": "robust only"}
+# Both forest panels share one symmetric log axis centred on ER = 1 (no difference), so each shows
+# both sides of the neutral line and the two directions read on the same scale. Estimates or
+# interval ends beyond it are drawn at the edge with an arrow; the ER column gives their value.
+FOREST_AXIS_SPAN = 100.0
+FOREST_TICKS = (0.01, 0.1, 0.5, 1, 2, 10, 100)
+# The two diagnostics scatters print side by side at half the text width; a canvas of this size
+# makes their type print at about 8-9 pt once the exporter has enlarged it for print.
+PANEL_WIDTH, PANEL_HEIGHT = 900, 900
+# The legend is pinned to the canvas bottom (container coordinates), so the print step does not budget
+# its own, larger, estimate for it; this bottom margin holds the tick labels, axis title and legend.
+PANEL_MARGIN = {"l": 60, "r": 14, "t": 16, "b": 172}
+PANEL_LEGEND = {"orientation": "h", "x": 0.5, "xanchor": "center", "xref": "container", "y": 0.0, "yref": "container",
+                "yanchor": "bottom", "font": {"size": 12}}
+
+
+def padded_range(values, share: float) -> list[float] | None:
+    """[min, max] of *values* widened by *share* of their span on each side (None if empty)."""
+    finite = pd.to_numeric(pd.Series(values), errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+    if finite.empty:
+        return None
+    low, high = float(finite.min()), float(finite.max())
+    pad = share * (high - low or 1.0)
+    return [low - pad, high + pad]
+
+
+def forest_number(value: float) -> str:
+    """ER or interval end with the precision a reader needs at its size."""
+    if value >= 100:
+        return f"{value:,.0f}"
+    if value >= 10:
+        return f"{value:.1f}"
+    if value >= 0.1:
+        return f"{value:.2f}"
+    return f"{value:.3f}"
 
 
 def fold_label(strength_log2: float, direction: str) -> str:
@@ -53,7 +87,7 @@ def selection_note(direction: str, n_shown: int, n_eligible: int, n_direction: i
 
 
 class DirectionalSankeyPlotter:
-    """Bipartite flow: upstream drug (left) -> downstream drug (right), one direction per figure."""
+    """Bipartite flow: upstream antibiotic (left) -> downstream antibiotic (right), one direction per figure."""
 
     def __init__(self, exporter: PlotlyFigureExporter, template: str, width: int, classification: AntibioticClassificationResolver) -> None:
         self._exporter = exporter
@@ -108,13 +142,46 @@ class DirectionalSankeyPlotter:
                 f"Adjusted OR {adj}<br>Validation: {row.validation_status}<extra></extra>"
             )
 
+        # Node positions are set here rather than left to Plotly, because Plotly writes node labels on the
+        # inner side of each column, over the flows. With the positions known, the labels are written
+        # outside the two columns, where they do not overlap the flows. Node heights follow Plotly's rule
+        # (d3-sankey): height = value x (plot height - (n_max - 1) x pad) / total value.
+        label_font, pad = 11, 34
+        n_max = max(len(left), len(right))
+        margin = {"l": 10, "r": 10, "t": 70, "b": 70}
+        height = max(820, 52 * n_max + 240)
+        plot_height = height - margin["t"] - margin["b"]
+        total = float(links.support_n.sum())
+        fill = 1.0 - (n_max - 1) * pad / plot_height
+        node_value = {**links.groupby("upstream_antibiotic").support_n.sum().to_dict()}
+        right_value = links.groupby("downstream_antibiotic").support_n.sum().to_dict()
+
+        def centres(column: list[str], values: dict) -> list[float]:
+            heights = [fill * values[name] / total for name in column]
+            gap = (1.0 - sum(heights)) / (len(column) - 1) if len(column) > 1 else 0.0
+            top = 0.0 if len(column) > 1 else (1.0 - heights[0]) / 2
+            out = []
+            for h in heights:
+                out.append(top + h / 2)
+                top += h + gap
+            return out
+
+        y_left, y_right = centres(left, node_value), centres(right, right_value)
+        # Labels in sentence case (generic names); room for them at about 0.58 em per character of the
+        # print-scaled label font.
+        shown = {name: name.capitalize() for name in labels}
+        print_px = label_font * PRINT_FONT_SCALE
+        left_room = min(0.34, 0.014 + max(len(shown[n]) for n in left) * 0.58 * print_px / self._width)
+        right_room = min(0.34, 0.014 + max(len(shown[n]) for n in right) * 0.58 * print_px / self._width)
         fig = go.Figure(go.Sankey(
             arrangement="fixed",
-            textfont={"size": 10},  # node-label font, independent of the layout font the title/legend use
+            domain={"x": [left_room, 1.0 - right_room], "y": [0.0, 1.0]},
             node={
-                "label": labels, "color": node_colors, "pad": 26, "thickness": 14,
+                "label": [""] * len(labels), "color": node_colors, "pad": pad, "thickness": 16,
+                "x": [0.001] * len(left) + [0.999] * len(right), "y": y_left + y_right,
                 "line": {"color": "#22313F", "width": 0.6},
-                "customdata": aware, "hovertemplate": "<b>%{label}</b><br>AWaRe %{customdata}<extra></extra>",
+                "customdata": np.stack([labels, aware], axis=-1),
+                "hovertemplate": "<b>%{customdata[0]}</b><br>AWaRe %{customdata[1]}<extra></extra>",
             },
             link={
                 "source": [left_index[d] for d in links.upstream_antibiotic],
@@ -123,12 +190,17 @@ class DirectionalSankeyPlotter:
                 "color": link_colors, "hovertemplate": "%{customdata}", "customdata": hovers,
             },
         ))
+        for name, y in zip(left, y_left):
+            fig.add_annotation(text=shown[name], x=left_room - 0.006, y=1.0 - y, xref="paper", yref="paper", xanchor="right", yanchor="middle",
+                               showarrow=False, font={"size": label_font, "color": "#1F2937"})
+        for name, y in zip(right, y_right):
+            fig.add_annotation(text=shown[name], x=1.0 - right_room + 0.006, y=1.0 - y, xref="paper", yref="paper", xanchor="left", yanchor="middle",
+                               showarrow=False, font={"size": label_font, "color": "#1F2937"})
         for name, color in (("Access", "Access"), ("Watch", "Watch"), ("Reserve", "Reserve")):
             fig.add_trace(go.Scatter(x=[None], y=[None], mode="markers", name=f"{name} (AWaRe)", showlegend=True,
                                      marker={"size": 11, "color": self._classification.CATEGORY_COLORS[color]}))
         fig.add_trace(go.Scatter(x=[None], y=[None], mode="markers", name="darker flow = robust, lighter = supported", showlegend=True,
                                  marker={"size": 11, "color": "rgba(90,90,90,0.55)", "symbol": "square"}))
-        height = max(900, 55 * max(len(left), len(right)) + 260)  # 30->55 px/node: PRINT_FONT_SCALE enlarges node-label text, so the band each node gets must grow too or adjacent labels overlap
         fig.update_layout(
             template=self._template, width=self._width, height=height,
             title={
@@ -141,15 +213,14 @@ class DirectionalSankeyPlotter:
                 "x": 0.5, "xanchor": "center", "font": {"size": 13},
             },
             xaxis={"visible": False}, yaxis={"visible": False},
-            legend={"orientation": "h", "x": 0.5, "xanchor": "center", "y": -0.02},
-            margin={"l": 30, "r": 30, "t": 150, "b": 50}, font={"size": 13, "family": "Arial"},
+            legend={"orientation": "h", "x": 0.5, "xanchor": "center", "y": -0.02, "yanchor": "top", "font": {"size": 11}},
+            margin=margin, font={"size": 11, "family": "Arial"},
             paper_bgcolor="white", plot_bgcolor="white",
         )
-        # Column headers sit just above the diagram (a pixel offset, clear of the
-        # top node's label), not at a fraction of its height above it.
-        for text, x, anchor in (("<b>Upstream drug (R vs S)</b>", 0.0, "left"), ("<b>Downstream drug (observed?)</b>", 1.0, "right")):
+        # Column headers sit just above the label columns.
+        for text, x, anchor in (("<b>Upstream antibiotic (R vs S)</b>", 0.0, "left"), ("<b>Downstream antibiotic (observed?)</b>", 1.0, "right")):
             fig.add_annotation(text=text, x=x, y=1.0, xref="paper", yref="paper", showarrow=False, xanchor=anchor, yanchor="bottom",
-                               yshift=12, font={"size": 12, "color": "#475467"})
+                               yshift=12, font={"size": 11, "color": "#475467"})
         return self._exporter.write(fig, output_stem, formats)
 
 
@@ -225,13 +296,13 @@ class DirectionalMatrixPlotter:
             title={
                 "text": (
                     f"<b style='color:{style['hue']}'>{style['title']} matrix ({style['rule']})</b> — {TIER_TITLE[tier]}: {len(cells)} of {n_direction} validated patterns"
-                    f"<br><sub>Same drug order and grid as the {'suppression' if direction == dv.ESCALATION else 'escalation'} matrix. Colour = |log2 ER| within this direction; "
+                    f"<br><sub>Same antibiotic order and grid as the {'suppression' if direction == dv.ESCALATION else 'escalation'} matrix. Colour = |log2 ER| within this direction; "
                     f"◆ robust, ○ supported. Blank = no validated pattern in this direction.</sub>"
                 ),
                 "x": 0.5, "xanchor": "center", "font": {"size": 13}, "y": 0.99,
             },
-            xaxis={"tickangle": 90, "tickfont": {"size": 12}, "side": "bottom", "constrain": "domain", "title": {"text": "Downstream drug"}},
-            yaxis={"tickfont": {"size": 12}, "autorange": "reversed", "scaleanchor": "x", "title": {"text": "Upstream drug (R vs S)"}},
+            xaxis={"tickangle": 90, "tickfont": {"size": 12}, "side": "bottom", "constrain": "domain", "title": {"text": "Downstream antibiotic"}},
+            yaxis={"tickfont": {"size": 12}, "autorange": "reversed", "scaleanchor": "x", "title": {"text": "Upstream antibiotic (R vs S)"}},
             legend={"orientation": "h", "x": 0.5, "xanchor": "center", "y": -0.1},
             margin={"l": 110, "r": 90, "t": 160, "b": 140}, plot_bgcolor="white", paper_bgcolor="white", font={"family": "Arial"},
         )
@@ -327,7 +398,7 @@ class DirectionalNetworkPlotter:
                     ha="center", va="center", fontsize=12, color="#475467", zorder=6)
         title = f"{style['title']} network ({style['rule']}) — {TIER_TITLE[tier]}"
         subtitle = (
-            f"{selection_note(direction, len(edges), n_eligible, n_direction, min_fold)}. Arrow: upstream resistant result → downstream drug observed "
+            f"{selection_note(direction, len(edges), n_eligible, n_direction, min_fold)}. Arrow: upstream resistant result → downstream antibiotic observed "
             f"{'more' if direction == dv.ESCALATION else 'less'} often. Line width = |log2 ER|; solid = robust, faint = supported. "
             f"Node size = weighted degree within this direction; grey = no pattern in this direction. Node positions identical in both directions."
         )
@@ -369,9 +440,11 @@ class DirectionalNetworkPlotter:
 class DirectionalForestPlotter:
     """Forest of one direction: ER with its own 95% CI, strongest effects first.
 
-    Never plots both directions on one axis -- an escalation-only forest and a
-    suppression-only forest, each centred on ER=1 with its own log-scale range,
-    so a suppression pattern's CI is never dwarfed by an escalation pattern's.
+    One file per direction, never pooled, but both on the same symmetric log axis
+    (1/FOREST_AXIS_SPAN to FOREST_AXIS_SPAN) centred on ER = 1, with the side of
+    less and of more downstream observation marked, so a reader sees the neutral
+    point and both sides in either panel. Columns give the observed/total episodes
+    in each upstream branch, the ER with its 95% CI and the adjusted OR.
     """
 
     def __init__(self, exporter: PlotlyFigureExporter, template: str, classification: AntibioticClassificationResolver) -> None:
@@ -416,18 +489,20 @@ class DirectionalForestPlotter:
         lo = pd.to_numeric(data.get("er_ci_lower"), errors="coerce").to_numpy() if "er_ci_lower" in data else np.full(n, np.nan)
         hi = pd.to_numeric(data.get("er_ci_upper"), errors="coerce").to_numpy() if "er_ci_upper" in data else np.full(n, np.nan)
         has_ci = np.isfinite(lo) & np.isfinite(hi) & (lo > 0) & (hi > 0)
-        x_lo = min(np.nanmin(np.where(has_ci, lo, est)), np.nanmin(est), 0.95) * 0.85
-        x_hi = max(np.nanmax(np.where(has_ci, hi, est)), np.nanmax(est), 1.05) * 1.18
+        edge_lo, edge_hi = 1.0 / FOREST_AXIS_SPAN, FOREST_AXIS_SPAN
 
-        y_pos = list(range(n - 1, -1, -1))  # row 0 at top, matching the original np.arange(n)[::-1]
+        def on_axis(value: float) -> float:
+            return float(min(max(value, edge_lo), edge_hi))
 
+        y_pos = list(range(n - 1, -1, -1))  # row 0 at top
+
+        # Columns: pattern and branch counts | forest | ER (95% CI) | adjusted OR.
         fig = make_subplots(
-            rows=1, cols=3, shared_yaxes=True,
-            column_widths=[0.64, 0.26, 0.10], horizontal_spacing=0.006,
+            rows=1, cols=4, shared_yaxes=True,
+            column_widths=[0.50, 0.27, 0.13, 0.07], horizontal_spacing=0.006,
         )
 
-        # Alternating row shading, drawn full-width via paper xref so it spans
-        # all three columns from one shape instead of three.
+        # Alternating row shading, drawn full-width via paper xref so it spans every column.
         for i in range(n):
             if i % 2 == 0:
                 fig.add_shape(
@@ -435,30 +510,44 @@ class DirectionalForestPlotter:
                     y0=y_pos[i] - 0.48, y1=y_pos[i] + 0.48,
                     fillcolor="#F8FAFC", line={"width": 0}, layer="below",
                 )
+        # The two sides of ER = 1, tinted in the colour of the direction each belongs to.
+        for x0, x1, side in ((edge_lo, 1.0, dv.SUPPRESSION), (1.0, edge_hi, dv.ESCALATION)):
+            fig.add_shape(
+                type="rect", x0=x0, x1=x1, y0=-0.5, y1=n - 0.5, fillcolor=DIRECTION_STYLE[side]["hue"],
+                opacity=0.06, line={"width": 0}, layer="below", row=1, col=2,
+            )
 
-        # Category order/colour comes from the shared classification resolver so
-        # this matches every other AWaRe-coloured figure in the platform.
         category_order = list(getattr(self._classification, "CATEGORY_ORDER", ("Access", "Watch", "Reserve", "Not Set")))
         data["_aware_category"] = [self._classification.resolve(d).aware_category for d in data.downstream_antibiotic]
-        data["_colour"] = [self._classification.resolve(d).color for d in data.downstream_antibiotic]
 
-        # CI whiskers: one neutral-slate line per row, no legend entry of its own
-        # (the point marker already carries the legend-relevant colour/symbol).
-        for i, row in data.iterrows():
-            if has_ci[i]:
-                fig.add_trace(
-                    go.Scatter(
-                        x=[lo[i], hi[i]], y=[y_pos[i], y_pos[i]], mode="lines",
-                        line={"color": "#334155", "width": 1.8}, hoverinfo="skip", showlegend=False,
-                    ),
-                    row=1, col=2,
-                )
+        # CI whiskers, clipped to the axis; an arrow marks an end that lies beyond it.
+        for i in range(n):
+            if not has_ci[i]:
+                continue
+            fig.add_trace(
+                go.Scatter(x=[on_axis(lo[i]), on_axis(hi[i])], y=[y_pos[i], y_pos[i]], mode="lines",
+                           line={"color": "#334155", "width": 1.8}, hoverinfo="skip", showlegend=False),
+                row=1, col=2,
+            )
+            for beyond, at, symbol in ((lo[i] < edge_lo, edge_lo, "triangle-left"), (hi[i] > edge_hi, edge_hi, "triangle-right")):
+                if beyond:
+                    fig.add_trace(
+                        go.Scatter(x=[at], y=[y_pos[i]], mode="markers", marker={"symbol": symbol, "size": 9, "color": "#334155"},
+                                   hoverinfo="skip", showlegend=False),
+                        row=1, col=2,
+                    )
+
+        def count(row: pd.Series, tested: str, support: str) -> str:
+            k, total = pd.to_numeric(row.get(tested), errors="coerce"), pd.to_numeric(row.get(support), errors="coerce")
+            return f"{int(k):,}/{int(total):,}" if pd.notna(k) and pd.notna(total) else "—"
 
         hover = [
             f"<b>{str(row.upstream_antibiotic).title()} → {str(row.downstream_antibiotic).title()}</b><br>"
             f"ER {row.escalation_ratio:.3g}"
             + (f" (95% CI {lo[i]:.3g}–{hi[i]:.3g})" if has_ci[i] else " (CI not estimable)")
-            + f"<br>Episode–pair rows: {int(row.total_support_n):,}<br>Validation: {row.validation_status}"
+            + f"<br>Observed, resistant upstream: {count(row, 'resistant_tested_n', 'resistant_support_n')}"
+            + f"<br>Observed, susceptible upstream: {count(row, 'susceptible_tested_n', 'susceptible_support_n')}"
+            + f"<br>Validation: {row.validation_status}"
             for i, row in data.iterrows()
         ]
         for category in category_order:
@@ -469,7 +558,7 @@ class DirectionalForestPlotter:
             idx = subset.index.tolist()
             fig.add_trace(
                 go.Scatter(
-                    x=est[idx], y=[y_pos[i] for i in idx], mode="markers",
+                    x=[on_axis(est[i]) for i in idx], y=[y_pos[i] for i in idx], mode="markers",
                     marker={
                         "size": 11,
                         "symbol": ["diamond" if r == "robust" else "square" for r in subset.validation_status],
@@ -481,95 +570,90 @@ class DirectionalForestPlotter:
                     },
                     name=f"{category} (AWaRe)", legendgroup=f"aware-{category}",
                     text=[hover[i] for i in idx], hovertemplate="%{text}<extra></extra>",
+                    cliponaxis=False,  # a marker drawn at the axis edge stays whole
                 ),
                 row=1, col=2,
             )
-        # Symbol-meaning legend entries (robust/supported), grey and data-less --
-        # colour already carries AWaRe tier, these two only explain the shape.
         for symbol, edge, label in (("diamond", "#0F172A", "Robust"), ("square", "#9A3412", "Supported")):
             fig.add_trace(
-                go.Scatter(
-                    x=[None], y=[None], mode="markers",
-                    marker={"symbol": symbol, "size": 11, "color": "#64748B", "line": {"width": 1.4, "color": edge}},
-                    name=label, hoverinfo="skip",
-                ),
+                go.Scatter(x=[None], y=[None], mode="markers",
+                           marker={"symbol": symbol, "size": 11, "color": "#64748B", "line": {"width": 1.4, "color": edge}},
+                           name=label, hoverinfo="skip"),
                 row=1, col=2,
             )
+        # An estimate beyond the axis sits at the edge; its value is written beside it.
+        for i in range(n):
+            if est[i] > edge_hi or est[i] < edge_lo:
+                right = est[i] > edge_hi
+                fig.add_annotation(
+                    x=math.log10(on_axis(est[i])), y=y_pos[i], text=f"{forest_number(est[i])} ▸" if right else f"◂ {forest_number(est[i])}",
+                    showarrow=False, xanchor="right" if right else "left", xshift=-14 if right else 14,
+                    font={"size": 11, "color": "#475467"}, row=1, col=2,
+                )
 
-        not_estimable = [i for i in range(n) if not has_ci[i]]
-        for i in not_estimable:
-            fig.add_annotation(
-                x=est[i], y=y_pos[i], xref="x2", yref="y2", text="n.e.", showarrow=False,
-                xanchor="left", xshift=9, font={"size": 10.5, "color": "#94A3B8"}, row=1, col=2,
-            )
-
+        cell = {"showarrow": False, "font": {"size": 13, "color": "#0F172A"}}
         for i, row in data.iterrows():
-            up_full, down_full = str(row.upstream_antibiotic).title(), str(row.downstream_antibiotic).title()
-            up_abbr = self._classification.resolve(row.upstream_antibiotic).abbreviation
-            down_abbr = self._classification.resolve(row.downstream_antibiotic).abbreviation
-            up = f"{up_full} ({up_abbr})" if up_abbr and up_abbr != up_full else up_full
-            down = f"{down_full} ({down_abbr})" if down_abbr and down_abbr != down_full else down_full
-            fig.add_annotation(x=0.015, y=y_pos[i], xref="x1", yref="y1", text=f"{up}  →  {down}",
-                                showarrow=False, xanchor="left", font={"size": 13, "color": "#0F172A"}, row=1, col=1)
-            fig.add_annotation(x=0.985, y=y_pos[i], xref="x1", yref="y1", text=f"{int(row.total_support_n):,}",
-                                showarrow=False, xanchor="right", font={"size": 13, "color": "#475467"}, row=1, col=1)
+            up, down = str(row.upstream_antibiotic).title(), str(row.downstream_antibiotic).title()
+            fig.add_annotation(x=0.01, y=y_pos[i], text=f"{up}  →  {down}", xanchor="left", row=1, col=1, **cell)
+            fig.add_annotation(x=0.79, y=y_pos[i], text=count(row, "resistant_tested_n", "resistant_support_n"),
+                               xanchor="right", row=1, col=1, **{**cell, "font": {"size": 13, "color": "#475467"}})
+            fig.add_annotation(x=0.995, y=y_pos[i], text=count(row, "susceptible_tested_n", "susceptible_support_n"),
+                               xanchor="right", row=1, col=1, **{**cell, "font": {"size": 13, "color": "#475467"}})
+            interval = f" ({forest_number(lo[i])}–{forest_number(hi[i])})" if has_ci[i] else " (n.e.)"
+            fig.add_annotation(x=0.5, y=y_pos[i], text=f"{forest_number(est[i])}{interval}", xanchor="center", row=1, col=3, **cell)
             adj = row.get("adjusted_odds_ratio", np.nan)
             adj_text = f"{adj:.2f}" if pd.notna(adj) and abs(adj) < 1000 else "n/e"
-            fig.add_annotation(x=0.5, y=y_pos[i], xref="x3", yref="y3", text=adj_text,
-                                showarrow=False, xanchor="center", font={"size": 13, "color": "#0F172A"}, row=1, col=3)
+            fig.add_annotation(x=0.5, y=y_pos[i], text=adj_text, xanchor="center", row=1, col=4, **cell)
 
-        fig.add_annotation(x=0.015, y=n - 0.35, xref="x1", yref="y1", text="<b>Upstream → downstream</b>",
-                            showarrow=False, xanchor="left", yanchor="bottom", font={"size": 12, "color": "#0F172A"}, row=1, col=1)
-        fig.add_annotation(x=0.985, y=n - 0.35, xref="x1", yref="y1", text="<b>Episode–pair rows</b>",
-                            showarrow=False, xanchor="right", yanchor="bottom", font={"size": 12, "color": "#0F172A"}, row=1, col=1)
-        fig.add_annotation(x=0.5, y=n - 0.35, xref="x3", yref="y3", text="<b>Adj. OR</b>",
-                            showarrow=False, xanchor="center", yanchor="bottom", font={"size": 12, "color": "#0F172A"}, row=1, col=3)
+        head = {"showarrow": False, "yanchor": "bottom", "font": {"size": 12, "color": "#0F172A"}}
+        top = n - 0.35
+        fig.add_annotation(x=0.01, y=top, text="<b>Upstream → downstream</b>", xanchor="left", row=1, col=1, **head)
+        fig.add_annotation(x=0.79, y=top, text="<b>Upstream R</b><br>observed/n", xanchor="right", align="right", row=1, col=1, **head)
+        fig.add_annotation(x=0.995, y=top, text="<b>Upstream S</b><br>observed/n", xanchor="right", align="right", row=1, col=1, **head)
+        fig.add_annotation(x=math.log10(edge_lo), y=top, text="◂ less observed", xanchor="left", row=1, col=2,
+                           **{**head, "font": {"size": 12, "color": DIRECTION_STYLE[dv.SUPPRESSION]["hue"]}})
+        fig.add_annotation(x=math.log10(edge_hi), y=top, text="more observed ▸", xanchor="right", row=1, col=2,
+                           **{**head, "font": {"size": 12, "color": DIRECTION_STYLE[dv.ESCALATION]["hue"]}})
+        fig.add_annotation(x=0.5, y=top, text="<b>ER (95% CI)</b>", xanchor="center", row=1, col=3, **head)
+        fig.add_annotation(x=0.5, y=top, text="<b>Adj. OR</b>", xanchor="center", row=1, col=4, **head)
 
-        wide_axis = math.log10(x_hi / x_lo) > 1.5
-        ticks = [
-            t for t in (0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 1, 1.5, 2, 3, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000)
-            if x_lo <= t <= x_hi and not (wide_axis and t in (0.7, 1.5))
-        ]
         fig.add_vline(x=1.0, line={"color": "#B91C1C", "dash": "dash", "width": 1.6}, opacity=0.85, row=1, col=2)
         fig.add_trace(
-            go.Scatter(x=[None], y=[None], mode="lines", line={"color": "#B91C1C", "dash": "dash", "width": 1.6}, name="ER = 1 (no effect)", hoverinfo="skip"),
+            go.Scatter(x=[None], y=[None], mode="lines", line={"color": "#B91C1C", "dash": "dash", "width": 1.6},
+                       name="ER = 1 (no difference)", hoverinfo="skip"),
             row=1, col=2,
         )
 
-        height = max(1050, 72 * n + 600)
-        fig.update_xaxes(visible=False, range=[0, 1], row=1, col=1)
-        fig.update_xaxes(visible=False, range=[0, 1], row=1, col=3)
+        height = max(900, 58 * n + 420)
+        for col in (1, 3, 4):
+            fig.update_xaxes(visible=False, range=[0, 1], row=1, col=col)
         fig.update_xaxes(
-            type="log", range=[math.log10(x_lo), math.log10(x_hi)],
-            tickvals=ticks, ticktext=[f"{t:g}" for t in ticks], tickangle=0,
-            title={"text": f"Escalation ratio, ER (log scale) — {style['rule']}", "font": {"size": 13}},
+            type="log", range=[math.log10(edge_lo), math.log10(edge_hi)],
+            tickvals=list(FOREST_TICKS), ticktext=[f"{t:g}" for t in FOREST_TICKS], tickangle=0,
+            title={"text": "Escalation ratio (log scale)", "font": {"size": 13}},
             tickfont={"size": 12}, gridcolor="#E2E8F0", showline=True, linecolor="#CBD5E1", zeroline=False,
             row=1, col=2,
         )
-        fig.update_yaxes(visible=False, range=[-0.8, n + 0.35], row=1, col=1)
-        fig.update_yaxes(visible=False, range=[-0.8, n + 0.35], row=1, col=2)
-        fig.update_yaxes(visible=False, range=[-0.8, n + 0.35], row=1, col=3)
+        for col in (1, 2, 3, 4):
+            fig.update_yaxes(visible=False, range=[-0.8, n + 0.55], row=1, col=col)
         fig.update_layout(
             template=self._template,
-            width=2450, height=height,
+            width=2700, height=height,
             title={
                 "text": (
                     f"<b style='color:{style['hue']}'>{style['title']} patterns ({style['rule']})</b> — {TIER_TITLE[tier]}: strongest {n} of {n_direction}"
-                    f"<br><sup>Point = ER; bar = 95% CI (log-scale, continuity-corrected). ◆ robust, ■ supported.</sup>"
-                    f"<br><sup>Marker colour = downstream drug's AWaRe tier. Ranked by the {'lower' if direction == dv.ESCALATION else 'upper'} 95% CI limit, most conservative effect first.</sup>"
+                    f"<br><sup>Point = ER; bar = 95% CI (continuity-corrected). ◆ robust, ■ supported. Marker colour = downstream antibiotic's AWaRe tier.</sup>"
+                    f"<br><sup>Ranked by the {'lower' if direction == dv.ESCALATION else 'upper'} 95% CI limit, most conservative effect first.</sup>"
                 ),
                 "x": 0.5, "xanchor": "center", "font": {"size": 16},
             },
             legend={"orientation": "h", "x": 0.5, "xanchor": "center", "y": -0.16, "font": {"size": 12}},
-            margin={"l": 20, "r": 80, "t": 160, "b": 240},
+            margin={"l": 20, "r": 40, "t": 150, "b": 200},
             plot_bgcolor="white", paper_bgcolor="white", font={"family": "Arial"},
             annotations=list(fig.layout.annotations) + [
                 {
-                    "text": "n/e = adjusted OR not estimable (separation or sparse cells).<br>"
-                            "Pairs with no downstream-observed episode in one upstream branch are ranked after all others:<br>"
-                            "their ER is set by the continuity correction rather than estimated from both branches.",
-                    # A fixed pixel offset under the axis title, not a fraction of the
-                    # (row-count dependent) plot height below it.
+                    "text": "R, S: resistant, susceptible upstream result. n/e: adjusted OR not estimable. "
+                            "◂ ▸: value beyond the axis, given in the ER column.",
                     "showarrow": False, "x": 0.0, "y": 0.0, "yshift": -64, "xref": "paper", "yref": "paper",
                     "xanchor": "left", "yanchor": "top", "align": "left", "font": {"size": 10.5, "color": "#475467"},
                 }
@@ -616,41 +700,47 @@ class DirectionalAwarePlotter:
             if row.upstream_aware in index and row.downstream_aware in index:
                 counts[index[row.upstream_aware], index[row.downstream_aware]] = row.n_patterns
                 robust[index[row.upstream_aware], index[row.downstream_aware]] = row.n_robust
-        fig, ax = plt.subplots(figsize=(8.2, 7.4), facecolor="white")
+        # A tier with no pattern in either role (in practice 'Not Set': every antibiotic has a 2023
+        # category) is dropped, so the grid holds only tiers that occur.
+        keep = [k for k in range(len(tiers)) if counts[k, :].any() or counts[:, k].any()] or list(range(len(tiers)))
+        tiers = [tiers[k] for k in keep]
+        counts, robust = counts[np.ix_(keep, keep)], robust[np.ix_(keep, keep)]
+        # Drawn at about the size it prints (half the text width), so its type prints at 8-12 pt.
+        fig, ax = plt.subplots(figsize=(4.3, 4.7), facecolor="white")
         mesh = ax.pcolormesh(counts, cmap=style["scale"], vmin=0, vmax=max(counts.max(), 1), edgecolors="white", linewidth=2)
-        ax.set_xticks(np.arange(len(tiers)) + 0.5, tiers)
-        ax.set_yticks(np.arange(len(tiers)) + 0.5, tiers)
+        ax.set_xticks(np.arange(len(tiers)) + 0.5, tiers, fontsize=11)
+        ax.set_yticks(np.arange(len(tiers)) + 0.5, tiers, fontsize=11, rotation=90, va="center")
         ax.invert_yaxis()
         ax.xaxis.tick_top()
         ax.xaxis.set_label_position("top")
-        ax.set_xlabel("Downstream drug AWaRe tier", fontsize=11, labelpad=10)
-        ax.set_ylabel("Upstream drug AWaRe tier", fontsize=11)
+        ax.set_xlabel("Downstream antibiotic AWaRe category", fontsize=11.5, labelpad=6)
+        ax.set_ylabel("Upstream antibiotic AWaRe category", fontsize=11.5, labelpad=6)
+        ax.set_aspect("equal")
         for (i, j), value in np.ndenumerate(counts):
             if value:
                 dark = value > 0.55 * counts.max()
-                ax.text(j + 0.5, i + 0.5, f"{int(value)}", ha="center", va="center", fontsize=15, fontweight="bold", color="white" if dark else "#0F172A")
-                ax.text(j + 0.5, i + 0.72, f"{int(robust[i, j])} robust", ha="center", va="center", fontsize=8.5, color="white" if dark else "#475467")
+                ax.text(j + 0.5, i + 0.42, f"{int(value)}", ha="center", va="center", fontsize=16, fontweight="bold", color="white" if dark else "#0F172A")
+                ax.text(j + 0.5, i + 0.74, f"{int(robust[i, j])} robust", ha="center", va="center", fontsize=10, color="white" if dark else "#334155")
         for spine in ax.spines.values():
             spine.set_visible(False)
         if not counts.any():
             ax.text(0.5, 0.5, f"No {TIER_TITLE[tier]}\n{direction} patterns to draw",
                     transform=ax.transAxes, ha="center", va="center", fontsize=12,
                     color="#475467", bbox={"facecolor": "white", "edgecolor": "none", "pad": 10})
-        ax.tick_params(length=0)
-        bar = fig.colorbar(mesh, ax=ax, fraction=0.04, pad=0.03)
-        bar.set_label("Validated patterns")
+        ax.tick_params(length=0, pad=3)
+        bar = fig.colorbar(mesh, ax=ax, orientation="horizontal", location="bottom", fraction=0.05, pad=0.04, aspect=30)
+        bar.set_label("Validated patterns", fontsize=11)
+        bar.ax.tick_params(labelsize=10)
         if not table.empty:
             ups, lats, downs = (int(table.loc[table.aware_direction == d, "n_patterns"].sum()) for d in ("upward", "lateral", "downward"))
         else:
             ups = lats = downs = 0
-        fig.suptitle(f"{style['title']} patterns ({style['rule']}) by AWaRe tier — {TIER_TITLE[tier]}", fontsize=14, fontweight="bold", color=style["hue"], y=0.985)
+        fig.suptitle(f"{style['title']} patterns ({style['rule']}) by AWaRe tier — {TIER_TITLE[tier]}", fontsize=12, fontweight="bold", color=style["hue"], y=0.995)
         fig.text(
-            0.5, 0.925,
-            f"{n_direction} validated {direction} patterns. AWaRe upward {ups}, lateral {lats}, downward {downs} "
-            "(stewardship-tier movement, a different axis from the escalation/suppression direction this figure is already split on).",
-            ha="center", fontsize=9.2, color="#475467", gid="figure_subtitle",
+            0.5, 0.955,
+            f"{n_direction} validated {direction} patterns. AWaRe upward {ups}, lateral {lats}, downward {downs}.",
+            ha="center", fontsize=8, color="#475467", gid="figure_subtitle",
         )
-        fig.tight_layout(rect=(0, 0, 1, 0.91))
         output_stem.parent.mkdir(parents=True, exist_ok=True)
         outputs: dict[str, Path] = {}
         png_bytes = None
@@ -724,7 +814,7 @@ class AntiArtefactScatterPlotter:
                 x=subset.panel_bundling_index, y=subset.directional_asymmetry_score,
                 mode="markers", name=f"{style['title']} ({style['rule']})",
                 marker={
-                    "size": np.clip(np.sqrt(subset.total_support_n.clip(lower=1)) * 0.9, 5, 32),
+                    "size": np.clip(np.sqrt(subset.total_support_n.clip(lower=1)) * 0.5, 4, 18),
                     "color": style["hue"],
                     "opacity": np.where(subset.validation_status == "robust", 0.85, 0.45),
                     "line": {"width": 0.6, "color": "white"},
@@ -737,11 +827,11 @@ class AntiArtefactScatterPlotter:
             x=self._cotesting_threshold,
             line={"dash": "dash", "color": "#94A3B8", "width": 1.2},
             annotation_text=threshold_label,
-            annotation_font={"size": 9},
+            annotation_font={"size": 11},
             annotation_position="top left",
         )
         fig.update_layout(
-            template=self._template, width=self._width, height=self._height,
+            template=self._template, width=PANEL_WIDTH, height=PANEL_HEIGHT,
             title={
                 "text": (
                     "<b>Directional asymmetry vs. panel-bundling index</b> — "
@@ -750,10 +840,11 @@ class AntiArtefactScatterPlotter:
                 ),
                 "x": 0.5, "xanchor": "center", "font": {"size": 13},
             },
-            xaxis={"title": {"text": "Panel-bundling index (PBI)"}, "range": [-0.02, 1.02]},
-            yaxis={"title": {"text": "Directional asymmetry score (DAS)"}},
-            legend={"orientation": "h", "x": 0.5, "xanchor": "center", "y": -0.14},
-            margin={"l": 90, "r": 40, "t": 110, "b": 90}, plot_bgcolor="white", paper_bgcolor="white", font={"family": "Arial"},
+            xaxis={"title": {"text": "Panel-bundling index (PBI)", "font": {"size": 13}}, "range": [-0.02, 1.0], "tickfont": {"size": 12}},
+            yaxis={"title": {"text": "Directional asymmetry score (DAS)", "font": {"size": 13}}, "tickfont": {"size": 12},
+                   "range": padded_range(validated.directional_asymmetry_score, 0.06)},
+            legend=PANEL_LEGEND,
+            margin=PANEL_MARGIN, plot_bgcolor="white", paper_bgcolor="white", font={"family": "Arial", "size": 12},
         )
         return self._exporter.write(fig, output_stem, formats)
 
@@ -803,7 +894,7 @@ class AdjustmentConcordancePlotter:
             fig.add_trace(go.Scatter(
                 x=subset.log_er, y=subset.log_or, mode="markers", name=f"{style['title']} ({style['rule']})",
                 marker={
-                    "size": 9, "color": style["hue"],
+                    "size": 8, "color": style["hue"],
                     "opacity": np.where(subset.validation_status == "robust", 0.85, 0.45),
                     "line": {"width": 0.6, "color": "white"},
                 },
@@ -820,7 +911,7 @@ class AdjustmentConcordancePlotter:
             fig.add_shape(type="line", x0=lower, y0=lower, x1=upper, y1=upper,
                           line={"color": "#CBD5E1", "width": 1, "dash": "dot"}, layer="below")
         fig.update_layout(
-            template=self._template, width=self._width, height=self._height,
+            template=self._template, width=PANEL_WIDTH, height=PANEL_HEIGHT,
             title={
                 "text": (
                     "<b>Raw escalation ratio vs. adjusted odds ratio</b> — "
@@ -829,10 +920,13 @@ class AdjustmentConcordancePlotter:
                 ),
                 "x": 0.5, "xanchor": "center", "font": {"size": 13},
             },
-            xaxis={"title": {"text": "log(escalation ratio)"}, "zeroline": False},
-            yaxis={"title": {"text": "log(adjusted odds ratio)"}, "zeroline": False},
-            legend={"orientation": "h", "x": 0.5, "xanchor": "center", "y": -0.14},
-            margin={"l": 90, "r": 40, "t": 110, "b": 90}, plot_bgcolor="white", paper_bgcolor="white", font={"family": "Arial"},
+            # Axes span the data with a small margin (autorange left wide empty bands).
+            xaxis={"title": {"text": "log(escalation ratio)", "font": {"size": 13}}, "zeroline": False, "tickfont": {"size": 12},
+                   "range": padded_range(finite.log_er, 0.04) if not finite.empty else None},
+            yaxis={"title": {"text": "log(adjusted odds ratio)", "font": {"size": 13}}, "zeroline": False, "tickfont": {"size": 12},
+                   "range": padded_range(finite.log_or, 0.04) if not finite.empty else None},
+            legend=PANEL_LEGEND,
+            margin=PANEL_MARGIN, plot_bgcolor="white", paper_bgcolor="white", font={"family": "Arial", "size": 12},
         )
         return self._exporter.write(fig, output_stem, formats)
 

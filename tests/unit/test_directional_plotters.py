@@ -208,3 +208,30 @@ def test_forest_ranks_by_conservative_bound_and_puts_near_deterministic_pairs_la
 
     drawn = [a.text for a in captured["fig"].layout.annotations if a.text and "→" in a.text and not a.text.startswith("<b>")]
     assert len(drawn) == 1 and drawn[0].startswith("Ceftriaxone")
+
+
+def test_forest_panels_share_a_symmetric_axis_and_label_off_scale_values(figure_manager, monkeypatch):
+    captured = []
+
+    class _CapturingExporter:
+        def write(self, fig, output_stem, formats):
+            captured.append(fig)
+            return {}
+
+    plotter = figure_manager._directional_forest_plotter
+    monkeypatch.setattr(plotter, "_exporter", _CapturingExporter())
+    common = {"total_support_n": 5000, "validation_status": "robust", "adjusted_odds_ratio": 2.0,
+              "resistant_tested_n": 3, "resistant_support_n": 41, "susceptible_tested_n": 2, "susceptible_support_n": 37544}
+    edges = pd.DataFrame([
+        {**common, "direction": "escalation", "upstream_antibiotic": "ERTAPENEM", "downstream_antibiotic": "CEFIDEROCOL",
+         "escalation_ratio": 1251.5, "er_ci_lower": 254.0, "er_ci_upper": 6165.0},
+        {**common, "direction": "suppression", "upstream_antibiotic": "AZTREONAM", "downstream_antibiotic": "PIPERACILLIN/TAZOBACTAM",
+         "escalation_ratio": 0.66, "er_ci_lower": 0.64, "er_ci_upper": 0.68},
+    ])
+    for direction in ("escalation", "suppression"):
+        plotter.export(edges, direction, Path("unused"), ("html",), tier="validated", top_n=5, n_direction=1)
+    assert [tuple(f.layout.xaxis2.range) for f in captured] == [(-2.0, 2.0), (-2.0, 2.0)]
+    texts = [a.text for a in captured[0].layout.annotations]
+    assert any(t == "1,252 \u25b8" for t in texts), texts
+    assert any(t == "3/41" for t in texts) and any(t == "2/37,544" for t in texts)
+    assert not any("continuity correction" in (t or "") for f in captured for t in [a.text for a in f.layout.annotations])
