@@ -458,22 +458,32 @@ class FigureManager:
     ) -> dict[str, Path]:
         return self._aware_transition_plotter.export_transition_heatmap(transition_summary, output_stem, formats)
 
+    def _readable_antibiotics(self, frame: pd.DataFrame | None, column: str = "drug") -> pd.DataFrame | None:
+        """Generic antibiotic names in sentence case (as in the tables), not the pipeline's internal labels."""
+        if frame is None or frame.empty or column not in frame.columns:
+            return frame
+        named = frame.copy()
+        names = {value: str(self._classification.resolve(str(value)).display_label).strip().lower()
+                 for value in named[column].dropna().unique()}
+        named[column] = named[column].map(lambda value: names[value][:1].upper() + names[value][1:] if value in names else value)
+        return named
+
     def export_prevalence_shift_forest(
         self,
         results: pd.DataFrame,
         output_stem: Path,
         formats: tuple[str, ...],
     ) -> dict[str, Path]:
-        return self._prevalence_plotter.export_forest(results, output_stem, formats)
+        return self._prevalence_plotter.export_forest(self._readable_antibiotics(results), output_stem, formats)
 
     def export_kappa_ranked(self, results: pd.DataFrame, output_stem: Path, formats: tuple[str, ...]) -> dict[str, Path]:
-        return self._prevalence_plotter.export_kappa_ranked(results, output_stem, formats)
+        return self._prevalence_plotter.export_kappa_ranked(self._readable_antibiotics(results), output_stem, formats)
 
     def export_cascade_vs_independent_dumbbell(self, results: pd.DataFrame, output_stem: Path, formats: tuple[str, ...]) -> dict[str, Path]:
-        return self._prevalence_plotter.export_cascade_vs_independent_dumbbell(results, output_stem, formats)
+        return self._prevalence_plotter.export_cascade_vs_independent_dumbbell(self._readable_antibiotics(results), output_stem, formats)
 
     def export_surveillance_sensitivity_map(self, results: pd.DataFrame, output_stem: Path, formats: tuple[str, ...]) -> dict[str, Path]:
-        return self._prevalence_plotter.export_surveillance_sensitivity_map(results, output_stem, formats)
+        return self._prevalence_plotter.export_surveillance_sensitivity_map(self._readable_antibiotics(results), output_stem, formats)
 
     def export_prevalence_delta_curves(
         self,
@@ -483,7 +493,9 @@ class FigureManager:
         formats: tuple[str, ...],
         organism: str = "",
     ) -> dict[str, Path]:
-        return self._delta_curves_plotter.export(curves, prevalence_summary, output_stem, formats, organism=organism)
+        return self._delta_curves_plotter.export(
+            self._readable_antibiotics(curves), self._readable_antibiotics(prevalence_summary), output_stem, formats, organism=organism
+        )
 
     def export_mnar_tipping_point(
         self,
@@ -516,7 +528,7 @@ class FigureManager:
     def export_mnar_prevalence_shift_distribution(
         self, prevalence_shift: pd.DataFrame, output_stem: Path, formats: tuple[str, ...]
     ) -> dict[str, Path]:
-        return self._mnar_prevalence_shift_distribution_plotter.export(prevalence_shift, output_stem, formats)
+        return self._mnar_prevalence_shift_distribution_plotter.export(self._readable_antibiotics(prevalence_shift), output_stem, formats)
 
     def export_validation_funnel(
         self, edge_report: pd.DataFrame, output_stem: Path, formats: tuple[str, ...]

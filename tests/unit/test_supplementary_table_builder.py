@@ -423,7 +423,7 @@ def test_prevalence_tables_join_raw_and_display_drug_names(resolver):
     assert s2["observed_n"].tolist() == [41, 31]
     s3, summary = stb.smd_balance_table(diagnostics, resolver)
     assert s3["drug"].tolist() == ["CEFEPIME", "IMIPENEM/CILASTATIN"]
-    assert summary["drug_with_largest_mean_abs_smd"] == "IMIPENEM/CILASTATIN"
+    assert summary["drug_with_largest_mean_abs_smd"] == "Imipenem/cilastatin"
     mismatched = diagnostics.assign(**{"Binary-evaluable tested n": [40, 29]})
     with pytest.raises(ValueError, match="Binary-evaluable counts differ"):
         stb.prevalence_diagnostics_table(prevalence, mismatched, resolver)
@@ -768,3 +768,79 @@ def test_signed_numbers_drop_the_sign_when_they_round_to_zero():
     assert stb._signed(-0.04, 1) == "0.0" and stb._signed(2.46, 1) == "$+$2.5" and stb._signed(-9.71, 1) == "$-$9.7"
     macros = stb.numbers_tex({"shift": -0.04}, "test")
     assert "amrnum:shift|signed1\\endcsname{0.0}" in macros and "amrnum:shift|signed2\\endcsname{$-$0.04}" in macros
+
+
+def _masking_rows():
+    common = {"truth_eligible_n": 1000, "truth_binary_share": 0.9, "population_n": 900, "lower_bound_pct": 2.0, "upper_bound_pct": 90.0,
+              "mnar_curve_min_pct_grid_pm2": 10.0, "mnar_curve_max_pct_grid_pm2": 60.0}
+    return pd.DataFrame([
+        {**common, "truth_antibiotic": "CIPROFLOXACIN", "mechanism": "transplanted", "pattern": "MOXIFLOXACIN", "true_lambda": np.nan, "kept_n": 100,
+         "kept_share": 0.10, "truth_pct": 23.0, "naive_pct": 21.0, "standardised_pct": 20.0, "mnar_lambda0_pct": 32.0,
+         "mnar_at_true_lambda_pct": np.nan, "mnar_at_true_lambda_error_pp": np.nan, "implied_lambda": 0.66, "truth_within_curve_pm2": True},
+        {**common, "truth_antibiotic": "CIPROFLOXACIN", "mechanism": "transplanted", "pattern": "CEFOXITIN", "true_lambda": np.nan, "kept_n": 300,
+         "kept_share": 0.30, "truth_pct": 23.0, "naive_pct": 30.0, "standardised_pct": 26.0, "mnar_lambda0_pct": 24.0,
+         "mnar_at_true_lambda_pct": np.nan, "mnar_at_true_lambda_error_pp": np.nan, "implied_lambda": np.nan, "truth_within_curve_pm2": False},
+        {**common, "truth_antibiotic": "CIPROFLOXACIN", "mechanism": "synthetic", "pattern": "lambda=-1.0", "true_lambda": -1.0, "kept_n": 250,
+         "kept_share": 0.25, "truth_pct": 24.0, "naive_pct": 12.0, "standardised_pct": 13.0, "mnar_lambda0_pct": 13.0,
+         "mnar_at_true_lambda_pct": 23.8, "mnar_at_true_lambda_error_pp": -0.2, "implied_lambda": -1.02, "truth_within_curve_pm2": True},
+    ])
+
+
+def test_masking_summary_compares_each_estimator_with_the_known_prevalence(resolver):
+    table, numbers = stb.masking_summary(_masking_rows(), resolver)
+
+    transplanted = numbers["transplanted"]
+    assert (transplanted["scenarios"], transplanted["donors"], transplanted["with_mnar"]) == (2, 2, 2)
+    assert transplanted["naive_abs_error_pp"] == {"median": 4.5, "max": 7.0}
+    assert transplanted["lambda0_abs_error_pp"] == {"median": 5.0, "max": 9.0}
+    assert (transplanted["lambda0_closer"], transplanted["lambda0_above_truth"], transplanted["naive_above_truth"]) == (1, 2, 1)
+    assert (transplanted["truth_within_curve"], transplanted["implied_lambda_found"]) == (1, 1)
+    assert numbers["synthetic"]["scenarios"] == 1
+    assert numbers["synthetic"]["lambda_recovery_max_abs_error"] == pytest.approx(0.02)
+    assert table["pattern_display"].tolist() == ["Cefoxitin", "Moxifloxacin", "Synthetic, lambda = -1"]
+    rows = stb.masking_fragment(table).splitlines()
+    assert rows[1] == "Ciprofloxacin & Moxifloxacin & 10.0 & 23.0 & 21.0 & 2.0--90.0 & 20.0 & 32.0 & $+$0.66 \\\\"
+    assert rows[0].endswith("& 24.0 & --- \\\\")
+    assert "Synthetic, $\\lambda=-1$" in rows[2]
+
+
+def test_build_reads_the_masking_experiment_only_from_a_full_data_run(tmp_path, settings):
+    paths = PathManager(tmp_path, settings)
+    builder = stb.SupplementaryTableBuilder(settings, paths, PROJECT_ROOT / "data" / "antibiotic_classification_complete.csv")
+    folder = builder._tables_dir("ESCHERICHIA COLI") / "masking_experiment"
+
+    result = builder.build("ESCHERICHIA COLI", publication="manuscripts")
+    assert "table_masking_experiment.csv" not in result.written
+    assert not any(str(folder) in path for path in result.missing_inputs)
+
+    folder.mkdir(parents=True)
+    _masking_rows().to_csv(folder / "masking_results.csv", index=False)
+    (folder / "masking_run.json").write_text(json.dumps({"data_root_override": "manuscript_edit_log/test_root"}))
+    result = builder.build("ESCHERICHIA COLI", publication="manuscripts")
+    assert "table_masking_experiment.csv" not in result.written
+    assert any("made on another data root" in path for path in result.missing_inputs)
+
+    (folder / "masking_run.json").write_text(json.dumps({"data_root_override": None}))
+    result = builder.build("ESCHERICHIA COLI", publication="manuscripts")
+    assert "table_masking_experiment.csv" in result.written
+    macros = (result.output_dir / "latex" / "generated_numbers.tex").read_text()
+    assert "amrnum:masking.transplanted.scenarios\\endcsname{2}" in macros
+    assert "\\csname amrrows:masking\\endcsname{%\nCiprofloxacin & Cefoxitin" in macros
+    assert "table_masking_experiment.csv" not in builder.build("ESCHERICHIA COLI", publication="paper1").written
+
+
+def test_prevalence_paper_supplementary_rows_print_every_antibiotic():
+    resolver = AntibioticClassificationResolver(Path(__file__).resolve().parents[2] / "data" / "antibiotic_classification_complete.csv")
+    diagnostics = pd.DataFrame({
+        "drug": ["AMPICILLIN/SULBACTAM", "CEFTRIAXONE"], "eligible_n": [1500, 20], "observed_n": [1200, 10],
+        "binary_evaluable_n": [1190, 10], "unknown_binary_n": [310, 10], "naive_resistant_pct": [40.04, 5.0],
+        "lower_bound_resistant_pct": [31.76, 2.5], "upper_bound_resistant_pct": [52.43, 52.5], "mnar_lambda0_resistant_pct": [41.0, float("nan")],
+    })
+    rows = stb.prevalence_diagnostics_fragment(diagnostics, resolver).splitlines()
+    assert rows[0] == "Ampicillin\\slash sulbactam & 1{,}500 & 1{,}200 & 1{,}190 & 310 & 40.0 & 31.8 & 52.4 & 41.0 \\\\"
+    assert rows[1].endswith("& 52.5 & --- \\\\")
+    smd = pd.DataFrame({
+        "drug": ["CEFTRIAXONE"], "mean_abs_smd_observed_vs_unobserved": [0.234], "mean_abs_smd_triggered_vs_unobserved": [0.25],
+        "mean_abs_smd_independent_vs_unobserved": [0.226], "flagged_covariates_observed_vs_unobserved": [34],
+    })
+    assert stb.smd_balance_fragment(smd, resolver) == "Ceftriaxone & 0.23 & 0.25 & 0.23 & 34 \\\\\n"

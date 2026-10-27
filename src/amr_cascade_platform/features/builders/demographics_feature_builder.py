@@ -32,6 +32,7 @@ class DemographicsFeatureBuilder:
             "demo_gender_unknown",
             "demo_gender_category",
             "baseline_adi_available",
+            "baseline_adi_state_rank_available",
             "demo_adi_score",
             "demo_adi_state_rank",
         ]
@@ -100,6 +101,7 @@ class DemographicsFeatureBuilder:
         if adi.empty:
             frame = frame.copy()
             frame["baseline_adi_available"] = 0
+            frame["baseline_adi_state_rank_available"] = 0
             frame["demo_adi_score"] = 0.0
             frame["demo_adi_state_rank"] = 0.0
             return frame
@@ -114,6 +116,9 @@ class DemographicsFeatureBuilder:
         frame["baseline_adi_available"] = (
             frame["adi_score"].notna() | frame["adi_state_rank"].notna()
         ).astype(int)
+        # Most ECU and UTSW cultures with a score have no state rank: the rank's 0 below is a
+        # fill value, so the rank gets its own indicator.
+        frame["baseline_adi_state_rank_available"] = frame["adi_state_rank"].notna().astype(int)
         frame["demo_adi_score"] = pd.to_numeric(frame["adi_score"], errors="coerce").fillna(0.0)
         frame["demo_adi_state_rank"] = pd.to_numeric(frame["adi_state_rank"], errors="coerce").fillna(0.0)
         return frame

@@ -6,63 +6,62 @@ usage() {
 Usage:
   bash scripts/archive_export_artifacts.sh [options]
 
-Create an export-ready archive of AMR Cascade Platform artefacts. The script is
+Export everything the manuscripts need from a finished run in one verified archive. The script is
 non-destructive: it does not delete, move, or modify pipeline outputs.
 
-Default archive contents:
-  data/artifacts
-  data/gold
-  data/features
-  outputs
+What it does, in order:
+  1. Checks that the run is finished and current, and refuses to export otherwise:
+     - no amr_/fix_ jobs queued or running (when squeue exists);
+     - every ESKAPE target finished (_SUCCESS.json; --eskape-expected, default 24);
+     - the covariate re-run (scripts/submit_covariate_fix_hpc.sh) was submitted, and its key
+       outputs exist and are newer than that submission;
+     - Table 1 carries the corrected comorbidity rows;
+     - the masking experiment ran on the full data;
+     - the manuscripts audit passed (logs/fix_audit_*.out).
+  2. Writes a run record into logs/: commit, uncommitted code, validation-reuse check, job
+     accounting and installed packages.
+  3. Archives the default contents below plus any requested extras.
+  4. Verifies the archive: checksum, and every key file present in it.
+
+Default archive contents (paths that do not exist are skipped with a warning):
+  data/artifacts  data/gold  data/features  data/metadata  data/reference  outputs  logs
+  data_availability_sensitivity/artifacts
+  data_availability_annual_sensitivity/artifacts
+  data_availability_joint_sensitivity/artifacts
 
 Options:
   --output-dir DIR           Directory for archives. Default: export_archives
-  --name NAME                Archive basename prefix. Default: amr_cascade_export
-  --include-manuscripts      Include split manuscript source directories:
-                             paper1_detection_validation and
+  --name NAME                Archive basename prefix. Default: amr_cascade_hpc_outputs
+  --allow-incomplete         Archive even if a check in step 1 fails (the failures are written
+                             into the run record). Use for test or partial exports.
+  --eskape-expected N        Finished ESKAPE targets required. Default: 24
+  --include-manuscripts      Also include paper1_detection_validation and
                              paper2_prevalence_surveillance.
-  --include-test-outputs     Include test_dataset/outputs when present
-  --include-reference        Include data/reference when present
-  --include-intermediate     Include data/bronze, data/silver, data/harmonized,
-                             data/interim, and data/metadata when present
-  --include-raw              Include data/raw. This can be very large.
-  --include-all-data         Include the full data directory. This can be huge.
-                             Overrides the default data/artifacts/gold/features
-                             selection and ignores other data include flags.
-  --include-logs             Include the top-level logs/ directory (SLURM job
-                             .out/.err files, pipeline event and timeline logs,
-                             and the job-ID file). Not part of the default set
-                             because logs are run-specific, not pipeline
-                             artefacts. Composable with any data mode above,
-                             including --include-all-data.
-  --include-path PATH        Include an additional path, relative to the
-                             project root. Repeatable: pass --include-path
-                             more than once to add several arbitrary paths
-                             without needing a dedicated flag for each.
-                             Existence is checked the same way as every other
-                             include; a missing path is skipped with a warning,
-                             not a failure. Composable with any data mode above.
+  --include-test-outputs     Also include test_dataset/outputs when present
+  --include-intermediate     Also include data/bronze, data/silver, data/harmonized and
+                             data/interim when present
+  --include-raw              Also include data/raw. This can be very large.
+  --include-all-data         Include the full data directory instead of the default data paths.
+                             This can be huge.
+  --include-path PATH        Include an additional path, relative to the project root.
+                             Repeatable; a missing path is skipped with a warning.
+  --include-logs, --include-reference
+                             Accepted for compatibility; logs and data/reference are now
+                             included by default.
   --keep-stale-figures       Keep */_stale_figure_archive/* in the archive.
                              Default: exclude stale archived figures.
   --keep-ds-store            Keep .DS_Store files. Default: exclude them.
-  --dry-run                  Print what would be archived, without creating files.
+  --dry-run                  Run the checks and print what would be archived, without
+                             creating files.
   --help                     Show this message.
 
-Examples:
+The final HPC export (after the ESKAPE and covariate re-runs):
+  cd /scratch/Projekte/FG37_ARS_ZKI_PH5/amr_cascade_platfrom
+  bash scripts/archive_export_artifacts.sh --dry-run
   bash scripts/archive_export_artifacts.sh
-  bash scripts/archive_export_artifacts.sh --include-test-outputs
-  bash scripts/archive_export_artifacts.sh --include-reference --include-intermediate
-  bash scripts/archive_export_artifacts.sh --include-raw --name amr_cascade_full_data
-  bash scripts/archive_export_artifacts.sh --include-logs --include-intermediate
-  bash scripts/archive_export_artifacts.sh --include-path configs --include-path notebooks
 
-Recommended HPC usage after production finishes:
-  cd /scratch/projekte/FG37_ARS_ZKI_PH5/amr_cascade_platfrom
-  bash scripts/archive_export_artifacts.sh --include-logs --include-intermediate --name amr_cascade_hpc_outputs
-
-Recommended Mac usage:
-  cd /Users/awotoroebenezer/Desktop/amr_cascade_platform
-  bash scripts/archive_export_artifacts.sh --include-test-outputs
+Mac test export:
+  bash scripts/archive_export_artifacts.sh --allow-incomplete --include-test-outputs
 EOF
 }
 
@@ -85,14 +84,14 @@ die() {
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUTPUT_DIR="export_archives"
-ARCHIVE_NAME="amr_cascade_export"
+ARCHIVE_NAME="amr_cascade_hpc_outputs"
+ALLOW_INCOMPLETE=0
+ESKAPE_EXPECTED=24
 INCLUDE_TEST_OUTPUTS=0
 INCLUDE_MANUSCRIPTS=0
-INCLUDE_REFERENCE=0
 INCLUDE_INTERMEDIATE=0
 INCLUDE_RAW=0
 INCLUDE_ALL_DATA=0
-INCLUDE_LOGS=0
 EXTRA_PATHS=()
 KEEP_STALE_FIGURES=0
 KEEP_DS_STORE=0
@@ -110,6 +109,15 @@ while [[ $# -gt 0 ]]; do
       ARCHIVE_NAME="$2"
       shift 2
       ;;
+    --allow-incomplete)
+      ALLOW_INCOMPLETE=1
+      shift
+      ;;
+    --eskape-expected)
+      [[ $# -ge 2 ]] || die "--eskape-expected requires a value"
+      ESKAPE_EXPECTED="$2"
+      shift 2
+      ;;
     --include-test-outputs)
       INCLUDE_TEST_OUTPUTS=1
       shift
@@ -118,8 +126,7 @@ while [[ $# -gt 0 ]]; do
       INCLUDE_MANUSCRIPTS=1
       shift
       ;;
-    --include-reference)
-      INCLUDE_REFERENCE=1
+    --include-reference|--include-logs)
       shift
       ;;
     --include-intermediate)
@@ -132,10 +139,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --include-all-data)
       INCLUDE_ALL_DATA=1
-      shift
-      ;;
-    --include-logs)
-      INCLUDE_LOGS=1
       shift
       ;;
     --include-path)
@@ -167,20 +170,133 @@ done
 
 cd "${PROJECT_ROOT}"
 
+PY=".venv/bin/python"
+[[ -x "${PY}" ]] || PY="python3"
+E="data/artifacts/cascade/combined/organisms/escherichia_coli"
+P="data/artifacts/prevalence_shift/combined/organisms/escherichia_coli"
+T="outputs/tables/combined/organisms/escherichia_coli"
+MARKER="logs/covariate_fix_submitted.txt"
+RECORD="logs/export_record.txt"
+
+# ---------------------------------------------------------------------------- 1. checks
+problems=()
+fail() { problems+=("$1"); printf '  FAIL  %s\n' "$1"; }
+pass() { printf '  ok    %s\n' "$1"; }
+
+log "Checking that the run is finished and current"
+
+if command -v squeue >/dev/null 2>&1; then
+  active="$(squeue -h -u "${USER}" -o '%j' 2>/dev/null | grep -E '^(amr_|fix_)' | sort | uniq -c | tr -s ' ' | tr '\n' ';' || true)"
+  if [[ -n "${active}" ]]; then fail "jobs still queued or running:${active}"; else pass "no amr_/fix_ jobs queued or running"; fi
+fi
+
+eskape="$(find data/artifacts/eskape_validation -name _SUCCESS.json 2>/dev/null | wc -l | tr -d ' ')"
+if [[ "${eskape}" -ge "${ESKAPE_EXPECTED}" ]]; then pass "ESKAPE: ${eskape} finished targets"
+else fail "ESKAPE: ${eskape} of ${ESKAPE_EXPECTED} targets finished"; fi
+
+if [[ -f "${MARKER}" ]]; then
+  pass "covariate re-run submitted $(head -1 "${MARKER}")"
+  for f in "${E}/adjusted_results.parquet" "${E}/edge_report.parquet" "${P}/prevalence_shift.parquet" \
+           "${P}/prevalence_mnar_sensitivity_curves.parquet" "${T}/table_v_cohort_characteristics.csv" \
+           "${T}/supplementary/latex/generated_numbers.tex" "${T}/supplementary/supplementary_numbers.json" \
+           "${T}/masking_experiment/masking_results.csv"; do
+    if [[ ! -f "${f}" ]]; then fail "missing: ${f}"
+    elif [[ -z "$(find "${f}" -newer "${MARKER}" 2>/dev/null)" ]]; then fail "older than the covariate re-run: ${f}"
+    else pass "${f}"; fi
+  done
+else
+  fail "no ${MARKER}: the covariate re-run (scripts/submit_covariate_fix_hpc.sh) was not submitted from this checkout"
+fi
+[[ -f "${E}/validation_results.parquet" ]] && pass "${E}/validation_results.parquet" || fail "missing: ${E}/validation_results.parquet"
+
+# Every figure the two manuscripts cite (the publication profiles' list; Fig. 1 is hand-made and not
+# here) must have been redrawn by the covariate re-run, so that all come from the current plotting code.
+F="outputs/figures/combined/organisms/escherichia_coli"
+if [[ -f "${MARKER}" ]]; then
+  stems="$(.venv/bin/python -c 'import sys; sys.path.insert(0, "src")
+from amr_cascade_platform.reporting.manuscript_profile import MANUSCRIPT_REPORT_FIGURES
+from amr_cascade_platform.reporting.paper1_profile import PAPER1_PREDICTION_FIGURES
+print(" ".join(MANUSCRIPT_REPORT_FIGURES + PAPER1_PREDICTION_FIGURES))' 2>/dev/null || true)"
+  if [[ -z "${stems}" ]]; then fail "could not read the manuscript figure list from the publication profiles"
+  else
+    stale_figs=(); missing_figs=(); n_figs=0
+    for stem in ${stems}; do
+      n_figs=$((n_figs + 1))
+      if [[ ! -f "${F}/${stem}.pdf" ]]; then missing_figs+=("${stem}")
+      elif [[ -z "$(find "${F}/${stem}.pdf" -newer "${MARKER}" 2>/dev/null)" ]]; then stale_figs+=("${stem}"); fi
+    done
+    if [[ ${#missing_figs[@]} -gt 0 ]]; then fail "manuscript figures missing: ${missing_figs[*]}"; fi
+    if [[ ${#stale_figs[@]} -gt 0 ]]; then fail "manuscript figures not redrawn by the covariate re-run: ${stale_figs[*]}"; fi
+    [[ ${#missing_figs[@]} -eq 0 && ${#stale_figs[@]} -eq 0 ]] && pass "all ${n_figs} manuscript figures redrawn after the covariate re-run"
+  fi
+fi
+
+if [[ -n "$(find outputs/shap_explainability -type f 2>/dev/null | head -1)" ]]; then
+  pass "SHAP figures: $(find outputs/shap_explainability -type f | wc -l | tr -d ' ') files"
+else fail "outputs/shap_explainability is missing or empty"; fi
+
+if grep -q "Condition with unrecorded start" "${T}/table_v_cohort_characteristics.csv" 2>/dev/null; then
+  pass "Table 1 has the corrected comorbidity rows"
+else fail "Table 1 lacks the 'Condition with unrecorded start' row (report not re-run with the corrected code?)"; fi
+
+if [[ -f "${T}/masking_experiment/masking_run.json" ]]; then
+  masking="$("${PY}" -c "import json,sys; r=json.load(open(sys.argv[1])); print('ok' if not r.get('data_root_override') and (r.get('scenarios') or 0)>0 else 'bad', r.get('scenarios'))" "${T}/masking_experiment/masking_run.json" 2>&1 || echo "bad unreadable")"
+  if [[ "${masking}" == ok* ]]; then pass "masking experiment: ${masking#ok } scenarios on the full data"
+  else fail "masking_run.json: ${masking}"; fi
+else fail "missing: ${T}/masking_experiment/masking_run.json"; fi
+
+audit_log="$(ls -t logs/fix_audit_*.out 2>/dev/null | head -1 || true)"
+if [[ -n "${audit_log}" ]] && grep -q "artifact audit: PASS" "${audit_log}"; then pass "audit PASS (${audit_log})"
+else fail "manuscripts audit did not pass (${audit_log:-no logs/fix_audit_*.out})"; fi
+
+if [[ ${#problems[@]} -gt 0 ]]; then
+  if [[ "${ALLOW_INCOMPLETE}" -eq 1 ]]; then
+    warn "${#problems[@]} check(s) failed; archiving anyway (--allow-incomplete). They are listed in ${RECORD}."
+  else
+    die "Not exported: ${#problems[@]} check(s) failed (listed above). Fix them, or use --allow-incomplete for a partial export."
+  fi
+fi
+
+# ---------------------------------------------------------------------------- 2. run record
+if [[ "${DRY_RUN}" -eq 0 ]]; then
+  mkdir -p logs
+  {
+    echo "Export record, $(timestamp) on $(hostname)"
+    echo "git HEAD: $(git rev-parse --verify -q HEAD 2>/dev/null || echo unknown)"
+    echo "uncommitted code changes (src, scripts, configs):"
+    git status --porcelain -- src scripts configs 2>/dev/null || true
+    echo
+    echo "checks failed: ${#problems[@]}"
+    if [[ ${#problems[@]} -gt 0 ]]; then printf '  %s\n' "${problems[@]}"; fi
+    echo
+    echo "validation reuse check:"
+    "${PY}" scripts/check_validation_reuse.py --env hpc 2>&1 || true
+    if command -v sacct >/dev/null 2>&1 && [[ -f "${MARKER}" ]]; then
+      echo
+      echo "job accounting (covariate re-run):"
+      sacct -u "${USER}" -S "$(head -1 "${MARKER}" | cut -c1-10)" -X -o JobID,JobName%18,State,Elapsed,MaxRSS \
+        --name=fix_cascade,fix_ridge,fix_prev,fix_masking,fix_report,fix_shap_figures,fix_tables,fix_audit 2>&1 || true
+    fi
+  } > "${RECORD}"
+  "${PY}" -m pip freeze > logs/export_pip_freeze.txt 2>/dev/null || true
+  log "Run record: ${RECORD}"
+fi
+
+# ---------------------------------------------------------------------------- 3. archive
 includes=()
 if [[ "${INCLUDE_ALL_DATA}" -eq 1 ]]; then
   includes+=(data)
 else
-  includes+=(data/artifacts data/gold data/features outputs)
-  [[ "${INCLUDE_MANUSCRIPTS}" -eq 1 ]] && includes+=(paper1_detection_validation paper2_prevalence_surveillance)
-  [[ "${INCLUDE_TEST_OUTPUTS}" -eq 1 ]] && includes+=(test_dataset/outputs)
-  [[ "${INCLUDE_REFERENCE}" -eq 1 ]] && includes+=(data/reference)
-  if [[ "${INCLUDE_INTERMEDIATE}" -eq 1 ]]; then
-    includes+=(data/bronze data/silver data/harmonized data/interim data/metadata)
-  fi
+  includes+=(data/artifacts data/gold data/features data/metadata data/reference)
+  [[ "${INCLUDE_INTERMEDIATE}" -eq 1 ]] && includes+=(data/bronze data/silver data/harmonized data/interim)
   [[ "${INCLUDE_RAW}" -eq 1 ]] && includes+=(data/raw)
 fi
-[[ "${INCLUDE_LOGS}" -eq 1 ]] && includes+=(logs)
+includes+=(outputs logs
+           data_availability_sensitivity/artifacts
+           data_availability_annual_sensitivity/artifacts
+           data_availability_joint_sensitivity/artifacts)
+[[ "${INCLUDE_MANUSCRIPTS}" -eq 1 ]] && includes+=(paper1_detection_validation paper2_prevalence_surveillance)
+[[ "${INCLUDE_TEST_OUTPUTS}" -eq 1 ]] && includes+=(test_dataset/outputs)
 if [[ "${#EXTRA_PATHS[@]}" -gt 0 ]]; then
   includes+=("${EXTRA_PATHS[@]}")
 fi
@@ -214,7 +330,7 @@ for path in "${existing[@]}"; do
 done
 
 if [[ "${DRY_RUN}" -eq 1 ]]; then
-  log "Dry run only. No archive created."
+  log "Dry run only. Checks done; no archive created."
   exit 0
 fi
 
@@ -236,6 +352,32 @@ else
   rm -f "${checksum_path}"
 fi
 
+# ---------------------------------------------------------------------------- 4. verification
+log "Verifying the archive"
+if [[ -f "${checksum_path}" ]]; then
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum -c "${checksum_path}"; else shasum -a 256 -c "${checksum_path}"; fi
+fi
+missing=0
+check_in_archive() {
+  if grep -qxF "$1" "${manifest_path}"; then printf '  in archive  %s\n' "$1"
+  else printf '  MISSING     %s\n' "$1" >&2; missing=1; fi
+}
+for f in "${E}/validation_results.parquet" "${E}/adjusted_results.parquet" "${E}/edge_report.parquet" \
+         "${P}/prevalence_shift.parquet" "${T}/supplementary/latex/generated_numbers.tex" \
+         "${T}/table_v_cohort_characteristics.csv" "${T}/masking_experiment/masking_results.csv" \
+         "${T}/masking_experiment/masking_run.json" "data/gold/combined/organisms/escherichia_coli/culture_episodes.parquet" \
+         "${RECORD}"; do
+  check_in_archive "${f}"
+done
+markers="$(grep -c '^data/artifacts/eskape_validation/.*_SUCCESS.json$' "${manifest_path}" || true)"
+if [[ "${markers}" -ge "${ESKAPE_EXPECTED}" ]]; then printf '  in archive  ESKAPE results (%s completion markers)\n' "${markers}"
+else printf '  MISSING     ESKAPE results (%s of %s completion markers)\n' "${markers}" "${ESKAPE_EXPECTED}" >&2; missing=1; fi
+if grep -q '^outputs/shap_explainability/.' "${manifest_path}"; then printf '  in archive  SHAP figures\n'
+else printf '  MISSING     SHAP figures\n' >&2; missing=1; fi
+if [[ "${missing}" -eq 1 && "${ALLOW_INCOMPLETE}" -eq 0 ]]; then
+  die "The archive lacks key files; do not use it."
+fi
+
 file_count="$(wc -l < "${manifest_path}" | tr -d ' ')"
 archive_size="$(du -sh "${archive_path}" | awk '{print $1}')"
 
@@ -247,3 +389,4 @@ printf 'Manifest: %s\n' "${manifest_path}"
 if [[ -f "${checksum_path}" ]]; then
   printf 'Checksum: %s\n' "${checksum_path}"
 fi
+printf 'Copy all three files into the project folder on the Mac.\n'

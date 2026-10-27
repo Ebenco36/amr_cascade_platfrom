@@ -54,7 +54,9 @@ CSV_SOURCES = {
 }
 
 # Hand-made assets: never generated, never overwritten, never moved aside.
-STATIC_ASSETS = {"figure_pipeline_overview.pdf", "figure_pipeline_overview.svg"}
+# Hand-made figures kept in submission_figures/<paper>/ rather than produced by the run. Paper 1's Fig. 1 is the
+# author's drawio figure (since 27 October 2026); the earlier pipeline overview stays listed so it is not moved aside.
+STATIC_ASSETS = {"figure_pipeline_overview.pdf", "figure_pipeline_overview.svg", "Cascade_publication.drawio.pdf"}
 SUPERSEDED_DIR = "_superseded"
 MANIFEST_NAME = "package_manifest.json"
 

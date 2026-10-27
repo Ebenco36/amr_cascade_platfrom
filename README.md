@@ -158,16 +158,17 @@ and `outputs/` for reproducible exports.
 After jobs finish, preview an export:
 
 ```bash
-bash scripts/archive_export_artifacts.sh \
-  --include-logs \
-  --name amr_cascade_hpc_outputs \
-  --dry-run
+bash scripts/archive_export_artifacts.sh --dry-run
 ```
 
 Remove `--dry-run` to create the archive, manifest and checksum in `export_archives/`.
-The default includes `data/artifacts`, `data/gold`, `data/features` and `outputs`.
-`--include-path` adds to these defaults; it does not restrict the export.
-Archiving is non-destructive and does not certify analysis completion.
+The script first checks that the run is finished and current (no jobs running, all ESKAPE
+targets finished, covariate re-run outputs newer than its submission, masking on the full data,
+audit PASS) and refuses to export otherwise (`--allow-incomplete` overrides). The default
+includes `data/artifacts`, `data/gold`, `data/features`, `data/metadata`, `data/reference`,
+`outputs`, `logs` and the three availability-sensitivity runs' artifacts; it writes a run record
+into `logs/` and verifies the archive's checksum and key files. `--include-path` adds to these
+defaults. Archiving is non-destructive.
 
 ## Repository Guide
 

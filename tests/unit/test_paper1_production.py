@@ -87,7 +87,7 @@ def test_paper1_contract_matches_manuscript_if_available():
         pytest.skip("Manuscript is not distributed in the git repository")
     content = "\n".join((folder / name).read_text() for name in ("results_only.tex", "supplementary.tex"))
     stems = set(re.findall(r"\\includegraphics[^\n]*\{\./([^}]+)\.pdf\}", content))
-    assert stems == set(PAPER1_REPORT_FIGURES + PAPER1_PREDICTION_FIGURES) | {"figure_pipeline_overview"}
+    assert stems == set(PAPER1_REPORT_FIGURES + PAPER1_PREDICTION_FIGURES) | {"Cascade_publication.drawio"}  # Fig. 1: the author's drawio figure (2026-10-27)
 
 
 def test_report_reuse_requires_all_saved_exports(tmp_path):

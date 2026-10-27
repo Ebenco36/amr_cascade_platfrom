@@ -130,6 +130,9 @@ class CascadeCovariateBuilder:
         frame["cov_comorbidity_available"] = pd.to_numeric(
             self._series_or_default(frame, "cov_comorbidity_available"), errors="coerce"
         ).fillna(0).astype(int)
+        frame["cov_comorbidity_start_unrecorded"] = pd.to_numeric(
+            self._series_or_default(frame, "cov_comorbidity_start_unrecorded"), errors="coerce"
+        ).fillna(0).astype(int)
         frame["cov_adi_score"] = pd.to_numeric(
             self._series_or_default(frame, "demo_adi_score"), errors="coerce"
         ).fillna(0.0)
@@ -138,6 +141,11 @@ class CascadeCovariateBuilder:
         ).fillna(0.0)
         frame["cov_adi_available"] = pd.to_numeric(
             self._series_or_default(frame, "baseline_adi_available"), errors="coerce"
+        ).fillna(0).astype(int)
+        # The state rank is missing for most ECU and UTSW cultures that have a score; its
+        # 0 is a fill value, so it needs its own indicator.
+        frame["cov_adi_state_rank_available"] = pd.to_numeric(
+            self._series_or_default(frame, "baseline_adi_state_rank_available"), errors="coerce"
         ).fillna(0).astype(int)
 
         comorbidity_component_columns = sorted(column for column in frame.columns if column.startswith("comorb_"))
@@ -164,9 +172,11 @@ class CascadeCovariateBuilder:
             "cov_prior_organism_available",
             "cov_comorbidity_count",
             "cov_comorbidity_available",
+            "cov_comorbidity_start_unrecorded",
             "cov_adi_score",
             "cov_adi_state_rank",
             "cov_adi_available",
+            "cov_adi_state_rank_available",
             "cov_labs_available",
             "cov_lab_wbc",
             "cov_lab_neutrophils",
@@ -249,19 +259,25 @@ class CascadeCovariateBuilder:
                     "comorbidity_component",
                 ],
             )
+            if not table.empty:
+                # Only rows that name a condition carry information. The extracts add one
+                # row with a blank (Null) label for a culture with nothing found; that row
+                # is not evidence of no comorbidity, so it does not make the data available.
+                label = table["comorbidity_component"].astype("string").str.strip()
+                table = table.loc[label.notna() & label.ne("")]
             if table.empty:
                 empty = site_base.loc[:, feature_join_keys].drop_duplicates().copy()
                 empty["comorbidity_count"] = 0
                 empty["cov_comorbidity_available"] = 0
+                empty["cov_comorbidity_start_unrecorded"] = 0
                 results.append(empty)
                 continue
-            # Availability means "do we have ANY comorbidity extract row for this
-            # patient", independent of whether that row passes the active-at-culture
-            # window below -- a patient whose only comorbidity row resolved before
-            # culture is a genuine, known zero count, not missing data. Restricted
-            # (inner join) to this site's actual culture-episode patients, mirroring
-            # the pattern used by the other _available builders in this file (e.g.
-            # _build_prior_antibiotic) instead of a blanket assignment.
+            # Availability means "at least one named condition is recorded for this
+            # culture", independent of whether it passes the active-at-culture window
+            # below -- a patient whose only conditions resolved before culture is a
+            # genuine, known zero count, not missing data. Restricted (inner join) to
+            # this site's actual culture-episode patients, mirroring the pattern used by
+            # the other _available builders in this file (e.g. _build_prior_antibiotic).
             available_keys = (
                 table.loc[:, feature_join_keys]
                 .drop_duplicates()
@@ -277,6 +293,13 @@ class CascadeCovariateBuilder:
             )
             active["comorbidity_component_end_days_culture"] = pd.to_numeric(
                 active["comorbidity_component_end_days_culture"], errors="coerce"
+            )
+            # A named condition without a start cannot be placed before or after the
+            # culture, so the count of that culture is incomplete; flagged, not imputed.
+            undated_keys = (
+                active.loc[active["comorbidity_component_start_days_culture"].isna(), feature_join_keys]
+                .drop_duplicates()
+                .assign(cov_comorbidity_start_unrecorded=1)
             )
             # The ARMD day-offset convention is culture_time - event_time:
             # positive values occurred before culture; negative values occurred after culture.
@@ -311,16 +334,22 @@ class CascadeCovariateBuilder:
                     how="left",
                     validate="one_to_one",
                 )
+                .merge(undated_keys, on=feature_join_keys, how="left", validate="one_to_one")
             )
             site_frame["comorbidity_count"] = site_frame["comorbidity_count"].fillna(0).astype(int)
             site_frame["cov_comorbidity_available"] = (
                 site_frame["cov_comorbidity_available"].fillna(0).astype(int)
             )
+            site_frame["cov_comorbidity_start_unrecorded"] = (
+                site_frame["cov_comorbidity_start_unrecorded"].fillna(0).astype(int)
+            )
             results.append(site_frame)
             del table, active, grouped
             gc.collect()
         if not results:
-            return pd.DataFrame(columns=feature_join_keys + ["comorbidity_count", "cov_comorbidity_available"])
+            return pd.DataFrame(
+                columns=feature_join_keys + ["comorbidity_count", "cov_comorbidity_available", "cov_comorbidity_start_unrecorded"]
+            )
         combined = pd.concat(results, ignore_index=True)
         if not active_component_results:
             return combined

@@ -1107,8 +1107,9 @@ def smd_balance_table(
         "drugs_with_a_mean_abs_smd_of_at_least_0.10": int(largest.ge(0.10).sum()),
         "largest_mean_abs_smd_min": float(largest.min()) if len(table) else math.nan,
         "largest_mean_abs_smd_max": float(largest.max()) if len(table) else math.nan,
-        "drug_with_smallest_largest_mean_abs_smd": table.loc[largest.idxmin(), "drug"] if len(table) else None,
-        "drug_with_largest_mean_abs_smd": table.loc[largest.idxmax(), "drug"] if len(table) else None,
+        # Named in running text, so in the sentence case the paper's tables use.
+        "drug_with_smallest_largest_mean_abs_smd": _display(resolver, table.loc[largest.idxmin(), "drug"]) if len(table) else None,
+        "drug_with_largest_mean_abs_smd": _display(resolver, table.loc[largest.idxmax(), "drug"]) if len(table) else None,
     }
     return table, summary
 
@@ -1925,6 +1926,115 @@ def prevalence_fragment(top: pd.DataFrame, resolver: AntibioticClassificationRes
     ])
 
 
+def prevalence_diagnostics_fragment(table: pd.DataFrame, resolver: AntibioticClassificationResolver) -> str:
+    """Rows of the prevalence paper's Supplementary Table S1: every analysed antibiotic, as in its CSV."""
+    return _rows([
+        [
+            latex_text(_display(resolver, row.drug)),
+            latex_int(row.eligible_n),
+            latex_int(row.observed_n),
+            latex_int(row.binary_evaluable_n),
+            latex_int(row.unknown_binary_n),
+            latex_float(row.naive_resistant_pct, 1),
+            latex_float(row.lower_bound_resistant_pct, 1),
+            latex_float(row.upper_bound_resistant_pct, 1),
+            latex_float(row.mnar_lambda0_resistant_pct, 1),
+        ]
+        for row in table.itertuples(index=False)
+    ])
+
+
+def smd_balance_fragment(table: pd.DataFrame, resolver: AntibioticClassificationResolver) -> str:
+    """Rows of the prevalence paper's Supplementary Table S2: mean absolute SMD per contrast."""
+    return _rows([
+        [
+            latex_text(_display(resolver, row.drug)),
+            latex_float(row.mean_abs_smd_observed_vs_unobserved, 2),
+            latex_float(row.mean_abs_smd_triggered_vs_unobserved, 2),
+            latex_float(row.mean_abs_smd_independent_vs_unobserved, 2),
+            latex_int(row.flagged_covariates_observed_vs_unobserved),
+        ]
+        for row in table.itertuples(index=False)
+    ])
+
+
+def masking_summary(results: pd.DataFrame, resolver: AntibioticClassificationResolver) -> tuple[pd.DataFrame, dict[str, object]]:
+    """Masking experiment of the prevalence paper: each estimator against a known prevalence.
+
+    Transplanted scenarios hide a near-universally tested antibiotic's results in another
+    antibiotic's real observation pattern; synthetic ones hide them with a set odds tilt.
+    Errors are absolute differences from the known prevalence, in percentage points; the
+    implied lambda is where the MNAR curve meets the known prevalence (absent when it does not).
+    """
+    frame = results.copy()
+    for column in ("naive", "standardised", "mnar_lambda0"):
+        frame[f"{column}_abs_error_pp"] = (pd.to_numeric(frame[f"{column}_pct"], errors="coerce") - frame["truth_pct"]).abs()
+    transplanted = frame[frame["mechanism"].eq("transplanted")]
+    synthetic = frame[frame["mechanism"].eq("synthetic")]
+    with_mnar = transplanted.dropna(subset=["mnar_lambda0_abs_error_pp"])
+    implied = transplanted["implied_lambda"].dropna()
+
+    def spread(series: pd.Series, *stats: str) -> dict[str, float]:
+        series = series.dropna()
+        return {stat: float(getattr(series, stat)()) for stat in stats} if len(series) else {}
+
+    coverage = frame.groupby("truth_antibiotic")["truth_binary_share"].first()
+    numbers: dict[str, object] = {
+        "truth_antibiotics": int(frame["truth_antibiotic"].nunique()),
+        "truth_binary_share": spread(coverage, "min", "max"),
+        "transplanted": {
+            "scenarios": len(transplanted),
+            "donors": int(transplanted["pattern"].nunique()),
+            "with_mnar": len(with_mnar),
+            "kept_share": spread(transplanted["kept_share"], "min", "median", "max"),
+            "naive_abs_error_pp": spread(transplanted["naive_abs_error_pp"], "median", "max"),
+            "standardised_abs_error_pp": spread(transplanted["standardised_abs_error_pp"], "median", "max"),
+            "lambda0_abs_error_pp": spread(with_mnar["mnar_lambda0_abs_error_pp"], "median", "max"),
+            "lambda0_closer": int((with_mnar["mnar_lambda0_abs_error_pp"] < with_mnar["naive_abs_error_pp"]).sum()),
+            "lambda0_above_truth": int((with_mnar["mnar_lambda0_pct"] > with_mnar["truth_pct"]).sum()),
+            "naive_above_truth": int((transplanted["naive_pct"] > transplanted["truth_pct"]).sum()),
+            "truth_within_curve": int(with_mnar["truth_within_curve_pm2"].astype(bool).sum()),
+            "implied_lambda_found": len(implied),
+            "implied_lambda": spread(implied, "min", "median", "max"),
+        },
+        "synthetic": {
+            "scenarios": len(synthetic),
+            "lambda_recovery_max_abs_error": float((synthetic["implied_lambda"] - synthetic["true_lambda"]).abs().max()) if len(synthetic) else None,
+            "at_true_lambda_max_abs_error_pp": float(synthetic["mnar_at_true_lambda_error_pp"].abs().max()) if len(synthetic) else None,
+        },
+    }
+    frame["truth_display"] = frame["truth_antibiotic"].map(lambda value: _display(resolver, value))
+    frame["pattern_display"] = [
+        _display(resolver, pattern) if mechanism == "transplanted" else f"Synthetic, lambda = {true_lambda:+.0f}"
+        for mechanism, pattern, true_lambda in zip(frame["mechanism"], frame["pattern"], frame["true_lambda"])
+    ]
+    frame["mechanism_order"] = frame["mechanism"].map({"transplanted": 0, "synthetic": 1})
+    frame = frame.sort_values(["truth_display", "mechanism_order", "true_lambda", "pattern_display"]).drop(columns="mechanism_order")
+    return frame.reset_index(drop=True), numbers
+
+
+def masking_fragment(table: pd.DataFrame) -> str:
+    def pattern(row: object) -> str:
+        if row.mechanism == "transplanted":
+            return latex_text(row.pattern_display)
+        return f"Synthetic, $\\lambda={'-' if row.true_lambda < 0 else ''}{abs(row.true_lambda):.0f}$"
+
+    return _rows([
+        [
+            latex_text(row.truth_display),
+            pattern(row),
+            latex_float(100 * row.kept_share, 1),
+            latex_float(row.truth_pct, 1),
+            latex_float(row.naive_pct, 1),
+            f"{latex_float(row.lower_bound_pct, 1)}--{latex_float(row.upper_bound_pct, 1)}",
+            latex_float(row.standardised_pct, 1),
+            latex_float(row.mnar_lambda0_pct, 1),
+            _signed(row.implied_lambda, 2),
+        ]
+        for row in table.itertuples(index=False)
+    ])
+
+
 _MODEL_DISPLAY = {"logistic_regression": "logistic regression", "random_forest": "random forest", "xgboost": "XGBoost"}
 
 
@@ -2141,6 +2251,24 @@ class SupplementaryTableBuilder:
         times = [path.stat().st_mtime for path in gold_dir.glob("*.parquet")] if gold_dir.exists() else []
         return min(times) if times else None
 
+    @classmethod
+    def _masking_results(cls, folder: Path, missing: list[str], not_before: float | None) -> pd.DataFrame | None:
+        """The masking experiment's results (scripts/run_masking_experiment.py), when it was run.
+
+        The experiment is run on its own, so its absence is not a missing input. Results made
+        on a different data root (a local test) are refused, as are results older than the run.
+        """
+        results, run = folder / "masking_results.csv", folder / "masking_run.json"
+        if not results.exists():
+            return None
+        record = cls._read(run, missing)
+        if record is None:
+            return None
+        if record.get("data_root_override"):
+            missing.append(f"{results} (made on another data root: {record['data_root_override']})")
+            return None
+        return cls._read(results, missing, not_before=not_before)
+
     @staticmethod
     def _read(
         path: Path,
@@ -2321,6 +2449,8 @@ class SupplementaryTableBuilder:
         if prevalence is not None and diagnostics is not None:
             tables["table_s2_prevalence_diagnostics.csv"] = prevalence_diagnostics_table(prevalence, diagnostics, self._resolver)
             tables["table_s3_smd_balance_summary.csv"], numbers["smd_balance"] = smd_balance_table(diagnostics, self._resolver)
+            fragments["prevalence_diagnostics"] = prevalence_diagnostics_fragment(tables["table_s2_prevalence_diagnostics.csv"], self._resolver)
+            fragments["smd_balance"] = smd_balance_fragment(tables["table_s3_smd_balance_summary.csv"], self._resolver)
 
         sites = list(settings.platform.sites)
         if cohort_long is not None and cohort_display is not None:
@@ -2368,6 +2498,10 @@ class SupplementaryTableBuilder:
             top = prevalence_top(prevalence, self.PREVALENCE_TABLE_ROWS)
             numbers["prevalence_summary"] = {**prevalence_summary(prevalence), "shown": len(top)}
             fragments["prevalence_top"] = prevalence_fragment(top, self._resolver)
+        masking = self._masking_results(tables_dir / "masking_experiment", missing, run_started) if publication != "paper1" else None
+        if masking is not None:
+            tables["table_masking_experiment.csv"], numbers["masking"] = masking_summary(masking, self._resolver)
+            fragments["masking"] = masking_fragment(tables["table_masking_experiment.csv"])
         if model_metrics is not None and "prediction" in numbers:
             numbers["prediction"].update(prediction_details(model_metrics, lr_thresholds, lr_coefficients))
         if threshold_selected is not None and threshold_tested is not None:

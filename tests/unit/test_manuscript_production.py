@@ -26,7 +26,7 @@ def test_both_manuscripts_match_the_named_output_contract():
     assert {Path(name).stem for name in citations[1].figures} == set(PAPER2_REPORT_FIGURES)
     assert set.union(*(c.figures for c in citations)) == {
         f"{stem}.pdf" for stem in MANUSCRIPT_REPORT_FIGURES + PAPER1_PREDICTION_FIGURES
-    } | {"figure_pipeline_overview.pdf"}
+    } | {"Cascade_publication.drawio.pdf"}  # paper 1 Fig. 1: the author's drawio figure (2026-10-27)
     assert set.union(*(c.csv_cited | c.csvreader for c in citations)) == set(CSV_SOURCES)
 
 

@@ -55,8 +55,9 @@ _SPECIMENS = (
 _ORDERING = (("inpatient", "Inpatient"), ("outpatient", "Outpatient"), ("emergency", "Emergency department"))
 # (indicator, record flag, label, no-record label): binary covariates of the adjusted
 # model. The flag marks a patient with any record before the culture in that source
-# table (the model includes it alongside the indicator), so each indicator is
-# reported among episodes with a record and the rest are reported as having none.
+# table (the model includes it alongside the indicator). Both rows are shares of all
+# episodes: the indicator among all episodes (a share among those with a record read
+# as, e.g., 99.9% nursing-home stays), and the no-record row the episodes without one.
 _HISTORY = (
     ("cov_prior_abx_any_90d", "cov_prior_abx_available", "Antibiotic exposure", "No medication record"),
     ("cov_prior_same_organism_any_90d", "cov_prior_organism_available", "Infection with the same genus", "No prior culture record"),
@@ -172,12 +173,15 @@ def _characteristics(part: pd.DataFrame, levels: dict[str, list[tuple[str, str]]
         if {indicator, available} <= set(part.columns):
             record = _flag(part, available)
             section = "In the 90 days before culture"
-            _count_rows(section, rows, label, int((_flag(part, indicator) & record).sum()), int(record.sum()))
+            _count_rows(section, rows, label, int((_flag(part, indicator) & record).sum()), n)
             _count_rows(section, rows, no_record, int((~record).sum()), n)
     if {"cov_comorbidity_count", "cov_comorbidity_available"} <= set(part.columns):
         available = _flag(part, "cov_comorbidity_available")
         _median_row("Comorbidity and deprivation", rows, "Comorbidity count, median [IQR]", part.loc[available, "cov_comorbidity_count"])
         _count_rows("Comorbidity and deprivation", rows, "Comorbidity data not available", int((~available).sum()), n)
+        if "cov_comorbidity_start_unrecorded" in part.columns:
+            undated = int(_flag(part, "cov_comorbidity_start_unrecorded").sum())
+            _count_rows("Comorbidity and deprivation", rows, "Condition with unrecorded start", undated, n)
     if {"cov_adi_score", "cov_adi_available"} <= set(part.columns):
         available = _flag(part, "cov_adi_available")
         # Both ADI measures start at 1; the covariate builder writes 0 where the
@@ -185,9 +189,13 @@ def _characteristics(part: pd.DataFrame, levels: dict[str, list[tuple[str, str]]
         score = pd.to_numeric(part.loc[available, "cov_adi_score"], errors="coerce")
         _median_row("Comorbidity and deprivation", rows, "Area Deprivation Index score, median [IQR]", score.where(score.gt(0)))
         if "cov_adi_state_rank" in part.columns:
-            rank = pd.to_numeric(part.loc[available, "cov_adi_state_rank"], errors="coerce")
+            rank_available = _flag(part, "cov_adi_state_rank_available") if "cov_adi_state_rank_available" in part.columns else available
+            rank = pd.to_numeric(part.loc[rank_available, "cov_adi_state_rank"], errors="coerce")
             _median_row("Comorbidity and deprivation", rows, "Area Deprivation Index state rank, median [IQR]", rank.where(rank.gt(0)))
         _count_rows("Comorbidity and deprivation", rows, "Area Deprivation Index not available", int((~available).sum()), n)
+        if "cov_adi_state_rank_available" in part.columns:
+            _count_rows("Comorbidity and deprivation", rows, "Area Deprivation Index state rank not available",
+                        int((~_flag(part, "cov_adi_state_rank_available")).sum()), n)
     return rows
 
 
@@ -256,6 +264,12 @@ def cohort_characteristics(
     long = pd.DataFrame(records)
     if long.empty:
         return long, pd.DataFrame()
+    # A missing-data row that is zero in every scope says nothing; leave it out.
+    missing_rows = {"Ward data not recorded", "Comorbidity data not available", "Condition with unrecorded start",
+                    "Area Deprivation Index not available", "Area Deprivation Index state rank not available",
+                    *(no_record for *_, no_record in _HISTORY)}
+    empty = long.loc[long["characteristic"].isin(missing_rows)].groupby(["section", "characteristic"])["n"].sum()
+    long = long.loc[~long.set_index(["section", "characteristic"]).index.isin(empty[empty.eq(0)].index)].copy()
     long["display"] = long.apply(format_characteristic, axis=1)
     scopes = list(dict.fromkeys(long["scope"]))
     display = (

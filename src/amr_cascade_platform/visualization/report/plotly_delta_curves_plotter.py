@@ -226,13 +226,13 @@ class PrevalenceDeltaCurvePlotter:
         for spine in ax.spines.values():
             spine.set_color("#D0D5DD")
         message = (
-            "No drug's MNAR estimate fell in this tier."
+            "No antibiotic's MNAR estimate fell in this tier."
             if any_drugs
-            else "No organism-drug pairs met the prevalence-shift support thresholds."
+            else "No organism-antibiotic pairs met the prevalence-shift support thresholds."
         )
         ax.text(0.5, 0.5, message, ha="center", va="center", fontsize=13, fontfamily=self._FONT,
                 color="#475467", transform=ax.transAxes)
-        title = f"Cascade-Aware MNAR Prevalence Sensitivity Curves — {tier_label} (0 drugs)"
+        title = f"Cascade-Aware MNAR Prevalence Sensitivity Curves — {tier_label} (0 antibiotics)"
         if organism:
             title += f" — {format_organism_label(organism)}"
         fig.suptitle(title, fontsize=12, fontfamily=self._FONT, fontweight="bold", color=color)
@@ -253,14 +253,14 @@ class PrevalenceDeltaCurvePlotter:
         rows = math.ceil(len(drugs) / cols)
         fig_w = cols * 4.4
         plural = "s" if len(drugs) != 1 else ""
-        title = f"Cascade-Aware MNAR Prevalence Sensitivity Curves — {tier_label} ({len(drugs)} drug{plural})"
+        title = f"Cascade-Aware MNAR Prevalence Sensitivity Curves — {tier_label} ({len(drugs)} antibiotic{plural})"
         if organism:
             title += f" — {format_organism_label(organism)}"
         title = fill(title, width=int(fig_w * 8))
         if tier_key == "not_evaluable":
-            caption = "No MNAR model could be fit for these drugs at any λ; drugs are listed alphabetically."
+            caption = "No MNAR model could be fit for these antibiotics at any λ; antibiotics are listed alphabetically."
         else:
-            caption = "Δ = the percentage-point range each drug's MNAR estimate spans across the λ grid; drugs are sorted by descending Δ."
+            caption = "Δ = the percentage-point range each antibiotic's MNAR estimate spans across the λ grid; antibiotics are sorted by descending Δ."
         caption = fill(caption, width=int(fig_w * 12))
         legend_cols = min(cols, 3)
         title_h = 0.0 if self._hide_titles else 0.27 * (title.count("\n") + 1) + 0.16

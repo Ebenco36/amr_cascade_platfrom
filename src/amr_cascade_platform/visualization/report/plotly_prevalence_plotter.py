@@ -58,7 +58,7 @@ class PlotlyPrevalencePlotter:
                 title="Eligible-denominator resistance summaries",
                 annotations=[
                     {
-                        "text": "No organism-drug pairs met the prevalence-shift support thresholds.",
+                        "text": "No organism-antibiotic pairs met the prevalence-shift support thresholds.",
                         "showarrow": False,
                         "x": 0.5,
                         "y": 0.5,
@@ -186,7 +186,7 @@ class PlotlyPrevalencePlotter:
                 "font": {"size": 16},
             },
             xaxis_title={"text": "Resistance prevalence (%)", "font": {"size": 13}},
-            yaxis_title={"text": "Drug" if single_organism else "Organism | Drug", "font": {"size": 13}},
+            yaxis_title={"text": "Antibiotic" if single_organism else "Organism | Antibiotic", "font": {"size": 13}},
             xaxis={"tickfont": {"size": 12}},
             yaxis={"tickfont": {"size": 12}},
             legend={
@@ -221,7 +221,7 @@ class PlotlyPrevalencePlotter:
             ax.text(
                 0.5,
                 0.5,
-                "No organism-drug pairs met the prevalence-shift support thresholds.",
+                "No organism-antibiotic pairs met the prevalence-shift support thresholds.",
                 ha="center",
                 va="center",
                 fontsize=12,
@@ -270,7 +270,7 @@ class PlotlyPrevalencePlotter:
             ax.set_yticks(y_positions)
             ax.set_yticklabels(plot_data["label"], fontsize=13)
             ax.set_xlabel("Resistance prevalence (%)", fontsize=15)
-            ax.set_ylabel("Drug" if single_organism else "Organism | Drug", fontsize=15)
+            ax.set_ylabel("Antibiotic" if single_organism else "Organism | Antibiotic", fontsize=15)
             ax.set_title(
                 f"Eligible-denominator resistance summaries — {format_organism_label(single_organism)}"
                 if single_organism
@@ -349,8 +349,8 @@ class PlotlyPrevalencePlotter:
         fig.update_layout(
             template=self._template, width=self._width, height=max(self._height, 32 * len(data) + 200),
             title={
-                "text": "<b>Cascade-trigger concentration (κ) by drug</b>"
-                        "<br><sup>Share of this drug's observed tests that followed a validated upstream resistant trigger</sup>",
+                "text": "<b>Cascade-trigger concentration (κ) by antibiotic</b>"
+                        "<br><sup>Share of this antibiotic's observed results in episodes with a validated upstream resistant trigger</sup>",
                 "font": {"size": 15},
             },
             xaxis={"title": {"text": "Cascade-trigger fraction, κ (%)"}, "range": [0, 100]},
@@ -394,7 +394,7 @@ class PlotlyPrevalencePlotter:
             template=self._template, width=self._width, height=max(self._height, 32 * len(data) + 220),
             title={
                 "text": "<b>Resistance prevalence: episodes with vs. without an observed validated resistant trigger</b>"
-                        "<br><sup>Among observed binary tests for this drug, split by whether a validated upstream resistant trigger was active</sup>",
+                        "<br><sup>Among observed binary results for this antibiotic, by whether the episode had a validated upstream resistant trigger</sup>",
                 "font": {"size": 15},
             },
             xaxis={"title": {"text": "Resistance prevalence (%)"}},
@@ -445,7 +445,7 @@ class PlotlyPrevalencePlotter:
                 "text": (
                     "<b>Surveillance-sensitivity map</b>"
                     "<br><sup>Selective observation, resistance enrichment, "
-                    "and eligible-denominator uncertainty by drug</sup>"
+                    "and eligible-denominator uncertainty by antibiotic</sup>"
                 ),
                 "font": {"size": 15},
             },
@@ -478,7 +478,7 @@ class PlotlyPrevalencePlotter:
         ax.set_yticklabels(data["drug"], fontsize=10)
         ax.set_xlim(0, 105)
         ax.set_xlabel("Cascade-trigger fraction, κ (%)", fontsize=11)
-        ax.set_title("Cascade-trigger concentration by drug", fontsize=15, fontweight="bold", pad=22)
+        ax.set_title("Cascade-trigger concentration by antibiotic", fontsize=15, fontweight="bold", pad=22)
         ax.text(
             0.0,
             1.01,
@@ -533,7 +533,7 @@ class PlotlyPrevalencePlotter:
         ax.text(
             0.0,
             1.01,
-            "Selective observation, resistance enrichment, and eligible-denominator uncertainty by drug",
+            "Selective observation, resistance enrichment, and eligible-denominator uncertainty by antibiotic",
             gid="figure_subtitle",
             transform=ax.transAxes,
             fontsize=9.5,

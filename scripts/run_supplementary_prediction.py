@@ -83,6 +83,7 @@ from amr_cascade_platform.visualization.report.plotly_model_plotters import (  #
     CURVE_DISPLAY_POINTS as _CURVE_DISPLAY_POINTS,
     thin_curve as _thin_curve,
 )
+from amr_cascade_platform.visualization.report.antibiotic_classification import AntibioticClassificationResolver  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -368,9 +369,28 @@ _FEATURE_RENAME = {
 }
 
 
+# One-hot antibiotic features carry the source label (e.g. MINOCYCLIN, CO-TRIMOXAZOL); show the
+# display name the manuscripts use, as the Supplementary tables of the companion builder do.
+_ANTIBIOTIC_FEATURE_PREFIXES = ("upstream_antibiotic_", "downstream_antibiotic_")
+_CLASSIFICATION_PATH = PROJECT_ROOT / "data" / "antibiotic_classification_complete.csv"
+_RESOLVER: AntibioticClassificationResolver | None = None
+
+
+def _antibiotic_display(label: str) -> str:
+    global _RESOLVER
+    if not _CLASSIFICATION_PATH.exists():
+        return label
+    if _RESOLVER is None:
+        _RESOLVER = AntibioticClassificationResolver(_CLASSIFICATION_PATH)
+    return _RESOLVER.canonical_display_label(label)
+
+
 def _clean_feature_name(raw: str) -> str:
     if raw in _FEATURE_RENAME:
         return _FEATURE_RENAME[raw]
+    for prefix in _ANTIBIOTIC_FEATURE_PREFIXES:
+        if raw.startswith(prefix):
+            return f"{prefix.replace('_', ' ').title()}{_antibiotic_display(raw[len(prefix):]).title()}"
     if raw.startswith("comorb_"):
         name = raw[len("comorb_"):]
         name = name.replace("_", " ").title()

@@ -163,7 +163,8 @@ def test_cohort_characteristics_reports_record_based_covariates_and_ignores_zero
     long, display = ds.cohort_characteristics(covariates, SITES, era_years=5)
     rows = long.loc[long["scope"].eq("all_sites")].set_index("characteristic")
     assert rows.loc["Culture episodes", "n"] == 3
-    assert rows.loc["Nursing-home stay", "denominator"] == 1 and rows.loc["Nursing-home stay", "share"] == 1.0
+    # Shares of all episodes, not of the episodes with a record (which read as 100% here).
+    assert rows.loc["Nursing-home stay", "denominator"] == 3 and rows.loc["Nursing-home stay", "share"] == pytest.approx(1 / 3)
     assert rows.loc["No nursing-home record", "n"] == 2
     assert rows.loc["Area Deprivation Index state rank, median [IQR]", "median"] == 7.0  # the zero is missing, not a rank
     assert rows.loc["18\u201344", "n"] == 1
@@ -172,6 +173,33 @@ def test_cohort_characteristics_reports_record_based_covariates_and_ignores_zero
     assert list(display.columns[:4]) == ["section", "characteristic", "all_sites", "armd"]
     assert display.set_index("characteristic").loc["Emergency-department presentation", "all_sites"] == "1 (50.0)"
 
+
+def test_cohort_characteristics_drops_missing_data_rows_that_are_zero_everywhere() -> None:
+    covariates = pd.DataFrame({
+        "source_site": ["armd", "armd_ecuh"], "anon_id": ["p1", "p2"],
+        "cov_er_status": [1, 0], "cov_er_available": [1, 1], "cov_icu_status": [0, 1], "cov_icu_available": [1, 1],
+        "cov_nursing_home_90d": [0, 0], "cov_nursing_home_available": [1, 0],
+    })
+    long, display = ds.cohort_characteristics(covariates, SITES, era_years=5)
+    assert "Ward data not recorded" not in set(long["characteristic"])  # zero at every site
+    assert "No nursing-home record" in set(long["characteristic"])  # one episode has none
+    assert "Ward data not recorded" not in set(display["characteristic"])
+
+
+
+def test_cohort_characteristics_reports_undated_conditions_and_missing_adi_rank() -> None:
+    covariates = pd.DataFrame({
+        "source_site": ["armd", "armd_ecuh", "armd_ecuh"], "anon_id": ["p1", "p2", "p3"],
+        "cov_comorbidity_count": [3, 0, 5], "cov_comorbidity_available": [1, 0, 1], "cov_comorbidity_start_unrecorded": [0, 0, 1],
+        "cov_adi_score": [2.0, 80.0, 70.0], "cov_adi_available": [1, 1, 1],
+        "cov_adi_state_rank": [1.0, 9.0, 0.0], "cov_adi_state_rank_available": [1, 1, 0],
+    })
+    long, _ = ds.cohort_characteristics(covariates, SITES, era_years=5)
+    rows = long[long["scope"].eq("all_sites")].set_index("characteristic")
+    assert rows.loc["Condition with unrecorded start", "n"] == 1
+    assert rows.loc["Area Deprivation Index state rank not available", "n"] == 1
+    # The rank median uses only the cultures with a rank (1 and 9), not the filled 0.
+    assert rows.loc["Area Deprivation Index state rank, median [IQR]", "median"] == 5.0
 
 def _ledger(**overrides) -> dict[str, int]:
     entry = {"cohort_rows": 100, "organism_rows": 60, "no_result_rows": 5, "other_non_interpretive_rows": 3,

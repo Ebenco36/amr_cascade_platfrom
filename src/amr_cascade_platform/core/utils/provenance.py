@@ -45,6 +45,12 @@ _VALIDATION_CODE_PATHS = (
     "src/amr_cascade_platform/features",
     "src/amr_cascade_platform/infrastructure",
     ":(exclude)src/amr_cascade_platform/core/utils/provenance.py",
+    # Covariate code: the validation shards never build covariates (run_cascade_validation_shard.py
+    # uses only DownstreamTestingRegression._empty_results(), whose columns are _RESULT_COLUMNS), so
+    # these files shape the adjusted and MNAR models, not the validated patterns (2026-10-25).
+    ":(exclude)src/amr_cascade_platform/cascade/statistics/cascade_covariate_builder.py",
+    ":(exclude)src/amr_cascade_platform/cascade/statistics/downstream_testing_regression.py",
+    ":(exclude)src/amr_cascade_platform/features/builders/demographics_feature_builder.py",
 )
 # Commits whose validation results stay valid for as long as every path above is unchanged
 # since them. Checked with git at run time, never assumed: one differing byte and the

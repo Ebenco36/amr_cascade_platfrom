@@ -113,7 +113,7 @@ class PlotlyMNARPrevalenceShiftDistributionPlotter:
         fig = make_subplots(
             rows=1, cols=2,
             subplot_titles=(
-                "<b>A</b>   Naive − Reference-Model Prevalence per Drug",
+                "<b>A</b>   Naive − Reference-Model Prevalence per Antibiotic",
                 "<b>B</b>   Naive vs. Reference-Model (λ=0) Prevalence",
             ),
             column_widths=[0.55, 0.45],
@@ -299,7 +299,7 @@ class PlotlyMNARPrevalenceShiftDistributionPlotter:
         ax_bar.set_yticks(y_pos)
         ax_bar.set_yticklabels(df["pair_label"], fontsize=8)
         ax_bar.set_xlabel("Naive minus reference-model prevalence (percentage points)")
-        ax_bar.set_title("A. Shift per drug", loc="left", fontsize=11, fontweight="bold")
+        ax_bar.set_title("A. Shift per antibiotic", loc="left", fontsize=11, fontweight="bold")
         ax_bar.grid(True, axis="x", color=_GRID, linewidth=0.7)
 
         ax_max = max(

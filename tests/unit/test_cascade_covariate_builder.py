@@ -304,3 +304,61 @@ def test_prior_same_organism_history_is_matched_at_genus_level(tmp_path: Path) -
 
     assert result["cov_prior_same_organism_any_90d"].astype(int).to_dict() == {"p1": 1, "p2": 0, "p3": 1, "p4": 0}
     assert result["cov_prior_organism_available"].astype(int).tolist() == [1, 1, 1, 1]
+
+
+def _comorbidity_frame(tmp_path: Path, rows_by_order: dict[str, list[dict]]):
+    project_root = Path(__file__).resolve().parents[2]
+    settings = ConfigLoader(project_root).load("mac")
+    paths = PathManager(tmp_path, settings)
+    site_dir = paths.paths.harmonized / "site_aligned" / "armd"
+    site_dir.mkdir(parents=True, exist_ok=True)
+    base = {"anon_id": "p1", "pat_enc_csn_id_coded": "e1", "order_time_jittered": "2024-03-15T10:00:00Z",
+            "organism": "ESCHERICHIA COLI", "source_site": "armd"}
+    culture_episodes = pd.DataFrame([{**base, "order_proc_id_coded": order} for order in rows_by_order])
+    rows = [{**base, "order_proc_id_coded": order, **row} for order, rows in rows_by_order.items() for row in rows]
+    pd.DataFrame(rows).to_parquet(site_dir / "comorbidity.parquet", index=False)
+    result = CascadeCovariateBuilder(settings, paths)._build_comorbidity_counts(culture_episodes)
+    return result.set_index("order_proc_id_coded")
+
+
+def test_comorbidity_placeholder_rows_lag_zero_and_undated_conditions(tmp_path: Path) -> None:
+    def row(label, start, end=None):
+        return {"comorbidity_component": label, "comorbidity_component_start_days_culture": start,
+                "comorbidity_component_end_days_culture": end}
+
+    result = _comorbidity_frame(tmp_path, {
+        "placeholder": [row(None, None)],                                      # extract's "nothing found" row
+        "same_day": [row("urinary tract infections", 0), row("diabetes", 400)],
+        "undated": [row("copd", None), row("asthma", 30)],
+        "only_undated": [row("copd", None)],
+    })
+
+    # A blank-label row is not evidence of no comorbidity: unknown, like no row at all.
+    assert (result.loc["placeholder", "cov_comorbidity_available"], result.loc["placeholder", "comorbidity_count"]) == (0, 0)
+    # Conditions recorded on or before the culture day (lag >= 0) are counted.
+    assert (result.loc["same_day", "cov_comorbidity_available"], result.loc["same_day", "comorbidity_count"]) == (1, 2)
+    assert result.loc["same_day", "cov_comorbidity_start_unrecorded"] == 0
+    # A named condition without a start is flagged, not counted.
+    assert (result.loc["undated", "comorbidity_count"], result.loc["undated", "cov_comorbidity_start_unrecorded"]) == (1, 1)
+    assert tuple(result.loc["only_undated", ["cov_comorbidity_available", "comorbidity_count", "cov_comorbidity_start_unrecorded"]]) == (1, 0, 1)
+
+
+def test_adi_state_rank_has_its_own_availability(tmp_path: Path) -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    settings = ConfigLoader(project_root).load("mac")
+    paths = PathManager(tmp_path, settings)
+    site_dir = paths.paths.harmonized / "site_aligned" / "armd"
+    site_dir.mkdir(parents=True, exist_ok=True)
+    base = {"anon_id": "p1", "pat_enc_csn_id_coded": "e1", "order_time_jittered": "2024-03-15T10:00:00Z",
+            "organism": "ESCHERICHIA COLI", "source_site": "armd"}
+    culture_episodes = pd.DataFrame([{**base, "order_proc_id_coded": "ranked"}, {**base, "order_proc_id_coded": "unranked"}])
+    pd.DataFrame([{**base, "order_proc_id_coded": "ranked", "age": "45-54", "gender": "0"},
+                  {**base, "order_proc_id_coded": "unranked", "age": "45-54", "gender": "1"}]).to_parquet(site_dir / "demographics.parquet", index=False)
+    pd.DataFrame([{**base, "order_proc_id_coded": "ranked", "adi_score": 80.0, "adi_state_rank": 9.0},
+                  {**base, "order_proc_id_coded": "unranked", "adi_score": 75.0, "adi_state_rank": None}]).to_parquet(site_dir / "adi_scores.parquet", index=False)
+
+    result = CascadeCovariateBuilder(settings, paths).build(culture_episodes).set_index("order_proc_id_coded")
+
+    assert tuple(result.loc["ranked", ["cov_adi_available", "cov_adi_state_rank_available", "cov_adi_state_rank"]]) == (1, 1, 9.0)
+    # The missing rank is filled with 0 for the model, and its indicator says so.
+    assert tuple(result.loc["unranked", ["cov_adi_available", "cov_adi_state_rank_available", "cov_adi_state_rank"]]) == (1, 0, 0.0)
