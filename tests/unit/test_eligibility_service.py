@@ -379,3 +379,60 @@ def test_availability_support_counts_episodes_not_rows_and_eligibility_comes_fir
     assert int(intrinsic["is_observed_tested"]) == 1 and int(intrinsic["is_eligible"]) == 0
     assert intrinsic["eligibility_state"] == "intrinsic_resistance"
     assert intrinsic["observation_status"] == "structural_intrinsic_resistance"
+
+
+def test_empty_observed_results_keep_the_same_schema_as_nonempty() -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    settings = ConfigLoader(project_root).load("mac")
+    service = EligibilityService(settings, PathManager(project_root, settings).paths.reference)
+    culture_episodes = pd.DataFrame([_ecoli_row("1")])
+    culture_drug_episodes = pd.DataFrame([_ecoli_row("1", "AMPICILLIN", "SUSCEPTIBLE")])
+
+    nonempty = service.build_episode_eligibility(culture_episodes, culture_drug_episodes)
+    empty = service.build_episode_eligibility(culture_episodes, culture_drug_episodes.iloc[0:0])
+
+    assert empty.empty
+    assert list(empty.columns) == list(nonempty.columns)
+    assert "eligibility_state" in empty.columns
+
+
+def test_partial_timestamp_failure_warns_and_preserves_unknown_era(caplog: pytest.LogCaptureFixture) -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    settings = ConfigLoader(project_root).load("mac")
+    service = EligibilityService(settings, PathManager(project_root, settings).paths.reference)
+    rows = [_ecoli_row("1"), _ecoli_row("2")]
+    rows[1]["order_time_jittered"] = "not-a-date"
+    culture_episodes = pd.DataFrame(rows)
+    culture_drug_episodes = culture_episodes.assign(
+        antibiotic="AMPICILLIN",
+        susceptibility="SUSCEPTIBLE",
+        was_tested=1,
+    )
+
+    with caplog.at_level("WARNING"):
+        eligible = service.build_episode_eligibility(culture_episodes, culture_drug_episodes)
+
+    eras = eligible.set_index("pat_enc_csn_id_coded")["availability_era"]
+    assert eras.loc["1"] == "2020-2024"
+    assert eras.loc["2"] == "unknown"
+    assert "could not parse 1 of 2 timestamps" in caplog.text
+    assert "site" in caplog.text
+
+
+def test_intrinsic_reference_aliases_use_the_same_organism_normalizer(tmp_path: Path) -> None:
+    (tmp_path / "intrinsic_resistance.csv").write_text(
+        "microorganism;antibiotic\nSTAPH AUREUS {MRSA};AZTREONAM\n",
+        encoding="utf-8",
+    )
+    project_root = Path(__file__).resolve().parents[2]
+    settings = ConfigLoader(project_root).load("mac")
+    service = EligibilityService(settings, tmp_path)
+    episode = _ecoli_row("1")
+    episode["organism"] = "STAPH AUREUS {MRSA}"
+    culture_episodes = pd.DataFrame([episode])
+    culture_drug_episodes = pd.DataFrame([{**episode, "antibiotic": "AZTREONAM", "susceptibility": "RESISTANT"}])
+
+    eligible = service.build_episode_eligibility(culture_episodes, culture_drug_episodes)
+
+    assert int(eligible.iloc[0]["is_intrinsic_resistance"]) == 1
+    assert int(eligible.iloc[0]["is_eligible"]) == 0

@@ -94,3 +94,18 @@ def test_fingerprint_equals_the_one_the_anchor_commit_recorded(repo):
     assert current == recorded
     assert components["executed_under"]["commit"] != anchor
     assert provenance.fingerprint({k: v for k, v in components.items() if k != "executed_under"}) == recorded
+
+
+def test_gold_eligibility_builder_change_keeps_validation_code_identity(repo):
+    root, anchor, *_ = repo
+    eligibility = root / "src/amr_cascade_platform/domain/services/eligibility_service.py"
+    eligibility.parent.mkdir(parents=True, exist_ok=True)
+    eligibility.write_text("BUILDER_VERSION = 1\n")
+    _git(root, "add", str(eligibility.relative_to(root)))
+    _git(root, "commit", "-q", "-m", "upstream eligibility builder only")
+
+    assert provenance.git_state(root)["commit"] != anchor
+    assert provenance.validation_code_state(root) == _anchor_state(anchor)
+
+    eligibility.write_text("BUILDER_VERSION = 2\n")
+    assert provenance.validation_code_state(root) == _anchor_state(anchor)

@@ -57,6 +57,11 @@ _VALIDATION_CODE_PATHS = (
     # also fingerprints that input (drug_pair_episodes), so a cleaning change that altered what
     # validation reads would still invalidate the saved results.
     ":(exclude)src/amr_cascade_platform/data/cleaning/table_cleaner.py",
+    # Gold eligibility construction is likewise upstream of validation: shards read only the finished
+    # drug_pair_episodes table and never call EligibilityService. Reuse therefore depends on that
+    # input's fingerprint, not on the builder's implementation; rebuilding different pairs still
+    # invalidates the saved validation through the input fingerprint.
+    ":(exclude)src/amr_cascade_platform/domain/services/eligibility_service.py",
 )
 # Commits whose validation results stay valid for as long as every path above is unchanged
 # since them. Checked with git at run time, never assumed: one differing byte and the

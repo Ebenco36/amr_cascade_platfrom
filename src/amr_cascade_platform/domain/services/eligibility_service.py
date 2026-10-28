@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import numpy as np
@@ -10,7 +11,8 @@ import pandas as pd
 from amr_cascade_platform.core.config.config_models import Settings
 from amr_cascade_platform.core.utils.antibiotic_names import normalize_antibiotic_label
 from amr_cascade_platform.core.utils.organism_names import normalize_organism_label
-from amr_cascade_platform.core.utils.text import normalize_label
+
+logger = logging.getLogger(__name__)
 
 
 class EligibilityService:
@@ -43,6 +45,7 @@ class EligibilityService:
                     "is_operationally_available",
                     "eligibility_denominator",
                     "is_eligible",
+                    "eligibility_state",
                     "observation_status",
                 ]
             )
@@ -168,6 +171,28 @@ class EligibilityService:
             raise ValueError(
                 f"Operational eligibility could not parse any years from '{time_column}'."
             )
+        unparsed = years.isna()
+        if (
+            self._settings.gold.eligibility.denominator == "operational_site_organism_era"
+            and unparsed.any()
+        ):
+            by_site = (
+                frame.loc[unparsed, "source_site"]
+                .astype("string")
+                .fillna("unknown")
+                .value_counts()
+                .to_dict()
+                if "source_site" in frame.columns
+                else {"unknown": int(unparsed.sum())}
+            )
+            logger.warning(
+                "Operational eligibility could not parse %d of %d timestamps from '%s'; "
+                "those rows will use availability_era='unknown'. Unparsed rows by site: %s",
+                int(unparsed.sum()),
+                len(frame),
+                time_column,
+                by_site,
+            )
         width = self._settings.gold.eligibility.availability_era_years
         starts = (years // width) * width
         ends = starts + width - 1
@@ -217,7 +242,7 @@ class EligibilityService:
         frames = [
             pd.DataFrame(
                 {
-                    "organism_normalized": reference["microorganism"].map(normalize_label),
+                    "organism_normalized": reference["microorganism"].map(normalize_organism_label),
                     "antibiotic_normalized": reference["antibiotic"].map(normalize_antibiotic_label),
                 }
             )
@@ -233,7 +258,7 @@ class EligibilityService:
             frames.append(
                 pd.DataFrame(
                     {
-                        "organism_normalized": supplemental["microorganism"].map(normalize_label),
+                        "organism_normalized": supplemental["microorganism"].map(normalize_organism_label),
                         "antibiotic_normalized": supplemental["antibiotic"].map(normalize_antibiotic_label),
                     }
                 )
