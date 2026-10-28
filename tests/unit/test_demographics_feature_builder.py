@@ -105,3 +105,23 @@ def test_literal_null_string_is_treated_as_missing_gender_not_as_a_code() -> Non
     assert a1["demo_gender_category"] == "unknown"
     assert a1["demo_gender_unknown"] == 1
     assert a2["demo_gender_category"] == "code_0"
+    # Both source codes reach the models as numeric indicators; only the missing one is unknown.
+    assert (a1["demo_gender_code_0"], a1["demo_gender_code_1"]) == (0, 0)
+    assert (a2["demo_gender_code_0"], a2["demo_gender_code_1"], a2["demo_gender_unknown"]) == (1, 0, 0)
+
+
+def test_code_one_gets_its_indicator_and_a_culture_without_a_demographics_row_is_unknown() -> None:
+    builder = DemographicsFeatureBuilder(_settings())
+    demographics = pd.DataFrame(
+        [{"anon_id": "A1", "pat_enc_csn_id_coded": "1", "order_proc_id_coded": "10", "source_site": "armd", "age": 55, "gender": " 1 "}]
+    )
+
+    def load_site_table(site: str, canonical_table: str) -> pd.DataFrame:
+        if site != "armd" or canonical_table != "demographics":
+            return pd.DataFrame()
+        return demographics
+
+    result = builder.build(_culture_episodes(), load_site_table).set_index("anon_id")
+    assert (result.loc["A1", "demo_gender_code_1"], result.loc["A1", "demo_gender_unknown"], result.loc["A1", "demo_gender_category"]) == (1, 0, "code_1")
+    # A2 has no demographics row: unknown, not a hidden zero in every sex column.
+    assert (result.loc["A2", "demo_gender_code_0"], result.loc["A2", "demo_gender_code_1"], result.loc["A2", "demo_gender_unknown"]) == (0, 0, 1)

@@ -51,6 +51,9 @@ CSV_SOURCES = {
     "table_w_observation_coverage_by_era.csv": "table_w_observation_coverage_by_era.csv",
     "table_w_panel_breadth.csv": "table_w_panel_breadth.csv",
     "table_availability_sensitivity.csv": "supplementary/table_availability_sensitivity.csv",
+    # Year-by-year course of the validated patterns (scripts/run_temporal_regimes.py).
+    "table_s17_temporal_regime_years.csv": "temporal_regimes/temporal_regime_years.csv",
+    "table_s18_temporal_regime_summary.csv": "temporal_regimes/temporal_regime_summary.csv",
 }
 
 # Hand-made assets: never generated, never overwritten, never moved aside.

@@ -13,11 +13,13 @@ What it does, in order:
   1. Checks that the run is finished and current, and refuses to export otherwise:
      - no amr_/fix_ jobs queued or running (when squeue exists);
      - every ESKAPE target finished (_SUCCESS.json; --eskape-expected, default 24);
-     - the covariate re-run (scripts/submit_covariate_fix_hpc.sh) was submitted, and its key
-       outputs exist and are newer than that submission;
+     - after the covariate re-run (scripts/submit_covariate_fix_hpc.sh; logs/covariate_fix_submitted.txt
+       exists): its key outputs and every manuscript figure are newer than its submission, the SHAP
+       figures exist and its audit passed (logs/fix_audit_*.out);
+     - after a full run (scripts/submit_everything_hpc.sh; no such file): the manuscripts audit
+       passed (logs/amr_*_artifact_audit_*.out);
      - Table 1 carries the corrected comorbidity rows;
-     - the masking experiment ran on the full data;
-     - the manuscripts audit passed (logs/fix_audit_*.out).
+     - the masking experiment ran on the full data.
   2. Writes a run record into logs/: commit, uncommitted code, validation-reuse check, job
      accounting and installed packages.
   3. Archives the default contents below plus any requested extras.
@@ -55,8 +57,7 @@ Options:
                              creating files.
   --help                     Show this message.
 
-The final HPC export (after the ESKAPE and covariate re-runs):
-  cd /scratch/Projekte/FG37_ARS_ZKI_PH5/amr_cascade_platfrom
+On the cluster, from the checkout's root, once every job has finished:
   bash scripts/archive_export_artifacts.sh --dry-run
   bash scripts/archive_export_artifacts.sh
 
@@ -190,7 +191,7 @@ if command -v squeue >/dev/null 2>&1; then
   if [[ -n "${active}" ]]; then fail "jobs still queued or running:${active}"; else pass "no amr_/fix_ jobs queued or running"; fi
 fi
 
-eskape="$(find data/artifacts/eskape_validation -name _SUCCESS.json 2>/dev/null | wc -l | tr -d ' ')"
+eskape="$(find data/artifacts/eskape_validation -name _SUCCESS.json 2>/dev/null | wc -l | tr -d ' ' || true)"
 if [[ "${eskape}" -ge "${ESKAPE_EXPECTED}" ]]; then pass "ESKAPE: ${eskape} finished targets"
 else fail "ESKAPE: ${eskape} of ${ESKAPE_EXPECTED} targets finished"; fi
 
@@ -199,13 +200,16 @@ if [[ -f "${MARKER}" ]]; then
   for f in "${E}/adjusted_results.parquet" "${E}/edge_report.parquet" "${P}/prevalence_shift.parquet" \
            "${P}/prevalence_mnar_sensitivity_curves.parquet" "${T}/table_v_cohort_characteristics.csv" \
            "${T}/supplementary/latex/generated_numbers.tex" "${T}/supplementary/supplementary_numbers.json" \
-           "${T}/masking_experiment/masking_results.csv"; do
+           "${T}/masking_experiment/masking_results.csv" "${T}/temporal_regimes/temporal_regime_summary.csv" \
+           "data/artifacts/modeling/downstream_testing/combined/organisms/escherichia_coli/site__all_models/full/logistic_regression_coefficients.parquet" \
+           "data/features/combined/organisms/escherichia_coli/model_ready_pair_features.parquet" \
+           "outputs/figures/combined/organisms/escherichia_coli/dataset_summary/dataset_missing_data_profile.pdf"; do
     if [[ ! -f "${f}" ]]; then fail "missing: ${f}"
     elif [[ -z "$(find "${f}" -newer "${MARKER}" 2>/dev/null)" ]]; then fail "older than the covariate re-run: ${f}"
     else pass "${f}"; fi
   done
 else
-  fail "no ${MARKER}: the covariate re-run (scripts/submit_covariate_fix_hpc.sh) was not submitted from this checkout"
+  warn "no ${MARKER}: checking a full run (scripts/submit_everything_hpc.sh), not the covariate re-run"
 fi
 [[ -f "${E}/validation_results.parquet" ]] && pass "${E}/validation_results.parquet" || fail "missing: ${E}/validation_results.parquet"
 
@@ -215,8 +219,8 @@ F="outputs/figures/combined/organisms/escherichia_coli"
 if [[ -f "${MARKER}" ]]; then
   stems="$(.venv/bin/python -c 'import sys; sys.path.insert(0, "src")
 from amr_cascade_platform.reporting.manuscript_profile import MANUSCRIPT_REPORT_FIGURES
-from amr_cascade_platform.reporting.paper1_profile import PAPER1_PREDICTION_FIGURES
-print(" ".join(MANUSCRIPT_REPORT_FIGURES + PAPER1_PREDICTION_FIGURES))' 2>/dev/null || true)"
+from amr_cascade_platform.reporting.paper1_profile import PAPER1_PREDICTION_FIGURES, PAPER1_TEMPORAL_FIGURES
+print(" ".join(MANUSCRIPT_REPORT_FIGURES + PAPER1_PREDICTION_FIGURES + PAPER1_TEMPORAL_FIGURES))' 2>/dev/null || true)"
   if [[ -z "${stems}" ]]; then fail "could not read the manuscript figure list from the publication profiles"
   else
     stale_figs=(); missing_figs=(); n_figs=0
@@ -233,7 +237,8 @@ fi
 
 if [[ -n "$(find outputs/shap_explainability -type f 2>/dev/null | head -1)" ]]; then
   pass "SHAP figures: $(find outputs/shap_explainability -type f | wc -l | tr -d ' ') files"
-else fail "outputs/shap_explainability is missing or empty"; fi
+elif [[ -f "${MARKER}" ]]; then fail "outputs/shap_explainability is missing or empty"
+else warn "no SHAP figures (a full manuscripts run does not draw them; neither paper cites them)"; fi
 
 if grep -q "Condition with unrecorded start" "${T}/table_v_cohort_characteristics.csv" 2>/dev/null; then
   pass "Table 1 has the corrected comorbidity rows"
@@ -245,9 +250,10 @@ if [[ -f "${T}/masking_experiment/masking_run.json" ]]; then
   else fail "masking_run.json: ${masking}"; fi
 else fail "missing: ${T}/masking_experiment/masking_run.json"; fi
 
-audit_log="$(ls -t logs/fix_audit_*.out 2>/dev/null | head -1 || true)"
+if [[ -f "${MARKER}" ]]; then audit_log="$(ls -t logs/fix_audit_*.out 2>/dev/null | head -1 || true)"
+else audit_log="$(ls -t logs/amr_*_artifact_audit_*.out 2>/dev/null | head -1 || true)"; fi
 if [[ -n "${audit_log}" ]] && grep -q "artifact audit: PASS" "${audit_log}"; then pass "audit PASS (${audit_log})"
-else fail "manuscripts audit did not pass (${audit_log:-no logs/fix_audit_*.out})"; fi
+else fail "manuscripts audit did not pass (${audit_log:-no audit log in logs/})"; fi
 
 if [[ ${#problems[@]} -gt 0 ]]; then
   if [[ "${ALLOW_INCOMPLETE}" -eq 1 ]]; then
@@ -275,7 +281,7 @@ if [[ "${DRY_RUN}" -eq 0 ]]; then
       echo
       echo "job accounting (covariate re-run):"
       sacct -u "${USER}" -S "$(head -1 "${MARKER}" | cut -c1-10)" -X -o JobID,JobName%18,State,Elapsed,MaxRSS \
-        --name=fix_cascade,fix_ridge,fix_prev,fix_masking,fix_report,fix_shap_figures,fix_tables,fix_audit 2>&1 || true
+        --name=fix_reclean,fix_harmonize,fix_site_armd,fix_site_ecuh,fix_site_utsw,fix_dataset_summary,fix_features,fix_training,fix_threshold,fix_cascade,fix_ridge,fix_prev,fix_masking,fix_report,fix_shap_figures,fix_pred_figures,fix_temporal,fix_tables,fix_audit 2>&1 || true
     fi
   } > "${RECORD}"
   "${PY}" -m pip freeze > logs/export_pip_freeze.txt 2>/dev/null || true
@@ -365,7 +371,7 @@ check_in_archive() {
 for f in "${E}/validation_results.parquet" "${E}/adjusted_results.parquet" "${E}/edge_report.parquet" \
          "${P}/prevalence_shift.parquet" "${T}/supplementary/latex/generated_numbers.tex" \
          "${T}/table_v_cohort_characteristics.csv" "${T}/masking_experiment/masking_results.csv" \
-         "${T}/masking_experiment/masking_run.json" "data/gold/combined/organisms/escherichia_coli/culture_episodes.parquet" \
+         "${T}/masking_experiment/masking_run.json" "${T}/temporal_regimes/temporal_regime_years.csv" "data/gold/combined/organisms/escherichia_coli/culture_episodes.parquet" \
          "${RECORD}"; do
   check_in_archive "${f}"
 done

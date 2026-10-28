@@ -53,17 +53,14 @@ Configuration uses `configs/base/*.yaml` plus overrides in
 | `data/reference/intrinsic_resistance.csv` | Biological eligibility reference |
 | `data/antibiotic_classification_complete.csv` | Drug classifications and display labels |
 
-## Production Run on HPC
+## Reproducing the Two Papers on HPC
 
-Use `submit_everything_hpc.sh --publication paper1` for the detection-and-validation
-workflow, including supplementary prediction, sensitivity analyses and artifact audit.
-This profile excludes prevalence/MNAR analysis and unrelated exploratory figures.
+The default profile (`--publication manuscripts`) produces what both *E. coli* papers cite.
 **Inspect the dry run before submitting:**
 
 ```bash
 CASCADE_PARTITION=long \
 bash scripts/submit_everything_hpc.sh \
-  --publication paper1 \
   --partition main \
   --cascade-partition long \
   --sites armd,armd_ecuh,armd_utsw \
@@ -72,16 +69,26 @@ bash scripts/submit_everything_hpc.sh \
   --dry-run
 ```
 
-Remove `--dry-run` to submit. Partition names are cluster-specific. This command
-uses `main` and `long` for the study cluster; inspect the printed resource requests
-and dependencies before running it elsewhere.
+Remove `--dry-run` to submit. Partition names are cluster-specific; inspect the printed
+resource requests and dependencies before running elsewhere. The script queues the primary
+run, the three availability-sensitivity runs and the follow-ups each paper needs: site-by-era
+permutation, patient-cluster bootstrap, ridge-penalty refit, supplementary prediction, the
+masking experiment (paper 2), the year-by-year course of the validated patterns (paper 1),
+the supplementary tables with every quoted number, and a final audit of the named outputs.
 
 - Add `--skip-ingestion --skip-preprocessing --skip-harmonization --skip-comorbidity --skip-gold`
   only when those primary input layers are complete and compatible.
-- Add `--with-eskape` when running the cross-organism extension. It is **not enabled
-  by default** and is needed to reproduce the ESKAPE results.
-- Use `scripts/submit_pipeline_dag_hpc.sh` for individual-stage control. Its ESKAPE
-  flag is `--run-eskape`, not the wrapper's `--with-eskape`.
+- The ESKAPE extension (paper 1) runs after the primary run, through the stage-level submitter:
+
+  ```bash
+  bash scripts/submit_pipeline_dag_hpc.sh --run-eskape \
+    --skip-ingestion --skip-preprocessing --skip-harmonization --skip-comorbidity --skip-gold \
+    --skip-cascade --skip-prevalence --skip-reporting --skip-dataset-summary --skip-install --dry-run
+  ```
+
+  Do not use `submit_everything_hpc.sh --with-eskape` for this: it requires `--publication all`,
+  which moves the finished gold and cascade outputs aside and rebuilds them.
+- `scripts/run_pipeline_gcp_dag.sh` runs the core pipeline on one machine without SLURM.
 
 Use each script's `--help` for supported flags and resource overrides.
 
@@ -163,12 +170,18 @@ bash scripts/archive_export_artifacts.sh --dry-run
 
 Remove `--dry-run` to create the archive, manifest and checksum in `export_archives/`.
 The script first checks that the run is finished and current (no jobs running, all ESKAPE
-targets finished, covariate re-run outputs newer than its submission, masking on the full data,
-audit PASS) and refuses to export otherwise (`--allow-incomplete` overrides). The default
+targets finished, masking on the full data, the manuscripts audit passed and, after the
+28 October 2026 covariate re-run, its outputs newer than its submission) and refuses to export
+otherwise (`--allow-incomplete` overrides). The default
 includes `data/artifacts`, `data/gold`, `data/features`, `data/metadata`, `data/reference`,
 `outputs`, `logs` and the three availability-sensitivity runs' artifacts; it writes a run record
 into `logs/` and verifies the archive's checksum and key files. `--include-path` adds to these
 defaults. Archiving is non-destructive.
+
+The paper folders are not in this repository. Where they are, extract the archive into a
+git-ignored folder and copy every figure and table the manuscripts cite into place with
+`.venv/bin/python scripts/build_manuscript_package.py --env hpc --publication manuscripts --run-root <extracted folder>`
+(add `--dry-run` first).
 
 ## Repository Guide
 
@@ -177,5 +190,7 @@ defaults. Archiving is non-destructive.
 - `configs/`: schemas, defaults and environment overrides.
 - `tests/`: automated checks.
 
-The repository does not currently include a formal license or a finalized citation
-file. Do not treat the README as a published citation or an open-source license grant.
+## License
+
+Released under the MIT License (see `LICENSE`). The source datasets are not part of this
+repository and keep their own terms. A citation file will accompany the archived release.

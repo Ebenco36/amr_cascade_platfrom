@@ -540,9 +540,11 @@ class CascadeCovariateBuilder:
     def _build_labs_severity(self, culture_episodes: pd.DataFrame) -> pd.DataFrame:
         episode_keys = list(self._settings.gold.episode_key_columns)
         feature_join_keys = list(self._settings.platform.id_columns) + ["source_site"]
-        # labs uses its own order_proc_id_coded (lab order IDs, not culture IDs);
-        # join at encounter level so every culture episode inherits the same labs.
-        encounter_join = ["anon_id", "pat_enc_csn_id_coded", "source_site"]
+        # The labs extract is keyed by culture order ("within specific time windows relative
+        # to culture orders", ARMD README), and its order_proc_id_coded matches the culture's
+        # for 99.9% of E. coli cultures with labs. Joining on the culture key keeps one
+        # culture from borrowing another culture's labs in the same encounter (2026-10-28).
+        encounter_join = feature_join_keys
         cov_names = [f"cov_lab_{c.replace('median_', '')}" for c in self._LAB_SEVERITY_COLS]
         results: list[pd.DataFrame] = []
         for site in self._settings.platform.sites:
@@ -590,8 +592,8 @@ class CascadeCovariateBuilder:
     def _build_vitals_severity(self, culture_episodes: pd.DataFrame) -> pd.DataFrame:
         episode_keys = list(self._settings.gold.episode_key_columns)
         feature_join_keys = list(self._settings.platform.id_columns) + ["source_site"]
-        # vitals also uses its own order_proc_id_coded; join at encounter level.
-        encounter_join = ["anon_id", "pat_enc_csn_id_coded", "source_site"]
+        # Keyed by culture order, like labs: join on the culture key (2026-10-28).
+        encounter_join = feature_join_keys
         cov_names = [f"cov_vital_{c.replace('median_', '')}" for c in self._VITAL_SEVERITY_COLS]
         results: list[pd.DataFrame] = []
         for site in self._settings.platform.sites:

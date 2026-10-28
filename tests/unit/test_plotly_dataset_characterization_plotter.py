@@ -184,6 +184,83 @@ def test_covariate_figures_use_recorded_values_by_site(tmp_path: Path) -> None:
     assert boxes[("y2", "Stanford")].median == (55.0,)  # the 0 is missing, not a score
     assert ("y2", "UT Southwestern") not in boxes  # no recorded ADI there
     heatmap = profile.data[0]
-    assert list(heatmap.y) == ["Age", "Comorbidity data", "Area Deprivation Index", "Laboratory values"]
-    assert [round(value, 2) for value in heatmap.z[0]] == [0.75, 0.67, 1.0]  # all sites, Stanford, UT Southwestern
-    assert [round(value, 2) for value in heatmap.z[2]] == [0.5, 0.67, 0.0]
+    assert len(heatmap.y) == 16  # absent inputs remain visible as N/A
+    rows = dict(zip(heatmap.y, heatmap.z)); texts = dict(zip(heatmap.y, heatmap.text))
+    assert [round(value, 2) for value in rows["Age"]] == [0.75, 0.67, 1.0]  # all sites, Stanford, UT Southwestern
+    assert [round(value, 2) for value in rows["Area Deprivation Index"]] == [0.5, 0.67, 0.0]
+    # One number per cell: the share rounded down; 100% only when complete, 0% only when none.
+    assert texts["Age"][0] == "<b>75.0%</b><br>1 not recorded"
+    assert texts["Age"][2] == "<b>100%</b>"
+    assert texts["Area Deprivation Index"][2].startswith("<b>0%</b>")
+    assert texts["Sex"][0] == "<b>N/A</b><br>input unavailable"
+    assert texts["Comorbidity data, all starts dated"][0].startswith("<b>N/A</b>")
+    hovers = dict(zip(heatmap.y, heatmap.customdata))
+    assert hovers["Age"][0] == "3 / 4 recorded; 1 not recorded"
+
+
+def test_availability_text_never_rounds_a_gap_up_to_100_percent() -> None:
+    from amr_cascade_platform.visualization.report.plotly_dataset_characterization_plotter import _availability_text
+    almost = pd.Series([True] * 9_999 + [False])
+    assert _availability_text(almost) == "99.9%"
+    assert _availability_text(pd.Series([False, False])) == "0%"
+    assert _availability_text(pd.Series([True, True])) == "100%"
+    assert _availability_text(None) == "—"
+    assert _availability_text(pd.Series([False] * 10_000 + [True])) == "<0.1%"
+
+
+def test_dated_comorbidity_row_excludes_cultures_with_an_unrecorded_start(tmp_path: Path) -> None:
+    episodes = pd.DataFrame({
+        "source_site": ["armd_utsw"] * 4,
+        "cov_comorbidity_available": [1, 1, 1, 0],
+        "cov_comorbidity_start_unrecorded": [0, 1, 0, 0],
+        "cov_adi_state_rank_available": [1, 0, 0, 1],
+    })
+    plotter, exporter = _capturing_plotter()
+    plotter.export_missing_data_profile(episodes, tmp_path / "profile", ("png",))
+    heatmap = exporter.figures[0].data[0]
+    rows = dict(zip(heatmap.y, heatmap.z))
+    assert rows["Comorbidity data"][0] == 0.75
+    assert rows["Comorbidity data, all starts dated"][0] == 0.5
+    assert rows["Area Deprivation Index state rank"][0] == 0.5
+
+
+def test_profile_excludes_empty_and_literal_missing_categories(tmp_path: Path) -> None:
+    from amr_cascade_platform.visualization.report.plotly_dataset_characterization_plotter import _recorded
+    values = [None, pd.NA, float("nan"), "", "  ", "Null", " NULL ", "NaN", "None", "N/A", "<NA>", "unknown", "code_0", "code_1"]
+    frame = pd.DataFrame({"cov_sex": values})
+    recorded = _recorded(frame, "cov_sex", "known")
+    assert recorded.tolist() == [False] * 12 + [True, True]
+    plotter, exporter = _capturing_plotter()
+    paths = plotter.export_missing_data_profile(frame, tmp_path / "profile", ("png",))
+    counts = pd.read_csv(paths["profile_counts.csv"])
+    sex = counts.loc[counts.covariate.eq("Sex")].iloc[0]
+    assert sex.recorded_n == 2 and sex.not_recorded_n == 12
+    text = dict(zip(exporter.figures[0].data[0].y, exporter.figures[0].data[0].text))["Sex"][0]
+    assert "12 not recorded" in text
+
+
+def test_record_indicators_require_exact_one_and_dating_requires_evidence() -> None:
+    from amr_cascade_platform.visualization.report.plotly_dataset_characterization_plotter import _recorded
+    frame = pd.DataFrame({"flag": [1, 0, None, "", "Null", 1.9]})
+    assert _recorded(frame, "flag", "flag").tolist() == [True, False, False, False, False, False]
+    assert _recorded(frame, "flag", "dated") is None
+    assert _recorded(frame, "flag", "adi") is None
+    frame["cov_comorbidity_start_unrecorded"] = None
+    assert not _recorded(frame, "flag", "dated").any()
+
+
+def test_profile_preserves_missing_counts_and_title_free_geometry(tmp_path: Path) -> None:
+    from amr_cascade_platform.visualization.report.figure_presentation import without_plotly_headings
+    from amr_cascade_platform.visualization.report.plotly_exporter import PRINT_FONT_SCALE
+    frame = pd.DataFrame({"source_site": ["armd"] * 10_000, "cov_sex": ["code_0"] * 9_999 + ["unknown"]})
+    plotter, exporter = _capturing_plotter()
+    plotter.export_missing_data_profile(frame, tmp_path / "profile", ("html", "png"))
+    screen, static = exporter.figures
+    text = dict(zip(screen.data[0].y, screen.data[0].text))["Sex"][0]
+    assert text == "<b>99.9%</b><br>1 not recorded"
+    assert static.layout.width == round(screen.layout.width * PRINT_FONT_SCALE)
+    hidden = without_plotly_headings(static, width=static.layout.width, height=static.layout.height)
+    assert not hidden.layout.title.text
+    assert hidden.layout.width == static.layout.width and hidden.layout.height == static.layout.height
+    assert hidden.layout.margin.t >= 60  # room for the two-line column headers
+    assert len(hidden.layout.annotations) == 1  # explanatory notes are not subtitles

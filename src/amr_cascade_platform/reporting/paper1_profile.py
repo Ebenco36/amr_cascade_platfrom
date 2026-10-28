@@ -23,6 +23,8 @@ PAPER1_PREDICTION_FIGURES = (
     "supp_pred_fig3_calibration", "supp_pred_fig4_cross_split_roc",
     "supp_pred_fig5_threshold_analysis", "supp_pred_fig6_lr_coefficients",
 )
+# Drawn by scripts/run_temporal_regimes.py after the report step (static formats only).
+PAPER1_TEMPORAL_FIGURES = ("figure_temporal_regimes",)
 
 
 def report_ready(manifest_path: Path, edge_report_path: Path, *, hide_titles: bool = False,

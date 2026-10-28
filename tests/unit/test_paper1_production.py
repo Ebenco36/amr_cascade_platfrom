@@ -11,7 +11,7 @@ from amr_cascade_platform.core.config.config_loader import ConfigLoader
 from amr_cascade_platform.core.paths.path_manager import PathManager
 from amr_cascade_platform.modeling.estimators.logistic_regression_estimator import LogisticRegressionEstimator
 from amr_cascade_platform.modeling.workflows.modeling_workflow import ModelingWorkflow
-from amr_cascade_platform.reporting.paper1_profile import PAPER1_REPORT_FIGURES, PAPER1_PREDICTION_FIGURES
+from amr_cascade_platform.reporting.paper1_profile import PAPER1_REPORT_FIGURES, PAPER1_PREDICTION_FIGURES, PAPER1_TEMPORAL_FIGURES
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -64,7 +64,8 @@ def test_paper1_asset_audit_fails_on_missing_figures(tmp_path):
     result = module.audit(tmp_path, tmp_path, tmp_path)
     assert not result["passed"]
     assert any("figure_suppression_matrix_validated.pdf" in error for error in result["errors"])
-    assert len(PAPER1_REPORT_FIGURES + PAPER1_PREDICTION_FIGURES) == 23
+    assert any("figure_temporal_regimes.pdf" in error for error in result["errors"])
+    assert len(PAPER1_REPORT_FIGURES + PAPER1_PREDICTION_FIGURES + PAPER1_TEMPORAL_FIGURES) == 24
 
 
 def test_paper1_supplement_does_not_require_prevalence_inputs(tmp_path):
@@ -87,7 +88,7 @@ def test_paper1_contract_matches_manuscript_if_available():
         pytest.skip("Manuscript is not distributed in the git repository")
     content = "\n".join((folder / name).read_text() for name in ("results_only.tex", "supplementary.tex"))
     stems = set(re.findall(r"\\includegraphics[^\n]*\{\./([^}]+)\.pdf\}", content))
-    assert stems == set(PAPER1_REPORT_FIGURES + PAPER1_PREDICTION_FIGURES) | {"Cascade_publication.drawio"}  # Fig. 1: the author's drawio figure (2026-10-27)
+    assert stems == set(PAPER1_REPORT_FIGURES + PAPER1_PREDICTION_FIGURES + PAPER1_TEMPORAL_FIGURES) | {"Cascade_publication.drawio"}  # Fig. 1: the author's drawio figure (2026-10-27)
 
 
 def test_report_reuse_requires_all_saved_exports(tmp_path):

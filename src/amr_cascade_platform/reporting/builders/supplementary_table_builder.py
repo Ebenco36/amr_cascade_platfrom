@@ -2498,6 +2498,11 @@ class SupplementaryTableBuilder:
             top = prevalence_top(prevalence, self.PREVALENCE_TABLE_ROWS)
             numbers["prevalence_summary"] = {**prevalence_summary(prevalence), "shown": len(top)}
             fragments["prevalence_top"] = prevalence_fragment(top, self._resolver)
+        temporal = tables_dir / "temporal_regimes" / "temporal_regime_numbers.json"
+        if temporal.exists():  # scripts/run_temporal_regimes.py; refused when older than this run's gold layer
+            record = self._read(temporal, missing, not_before=run_started)
+            if record is not None:
+                numbers["temporal"] = record
         masking = self._masking_results(tables_dir / "masking_experiment", missing, run_started) if publication != "paper1" else None
         if masking is not None:
             tables["table_masking_experiment.csv"], numbers["masking"] = masking_summary(masking, self._resolver)

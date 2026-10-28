@@ -51,6 +51,12 @@ _VALIDATION_CODE_PATHS = (
     ":(exclude)src/amr_cascade_platform/cascade/statistics/cascade_covariate_builder.py",
     ":(exclude)src/amr_cascade_platform/cascade/statistics/downstream_testing_regression.py",
     ":(exclude)src/amr_cascade_platform/features/builders/demographics_feature_builder.py",
+    # Silver cleaning (2026-10-28): the only change since the anchor stops comorbidity rows being
+    # deduplicated before the timing rules (TableCleaner._DEDUP_AFTER_TIMING_TABLES). Comorbidity
+    # feeds covariates only, never the gold pair table the shards read; and validation_fingerprint
+    # also fingerprints that input (drug_pair_episodes), so a cleaning change that altered what
+    # validation reads would still invalidate the saved results.
+    ":(exclude)src/amr_cascade_platform/data/cleaning/table_cleaner.py",
 )
 # Commits whose validation results stay valid for as long as every path above is unchanged
 # since them. Checked with git at run time, never assumed: one differing byte and the

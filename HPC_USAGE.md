@@ -3,7 +3,7 @@
 A quick guide for anyone who needs to run this pipeline on a SLURM-based HPC.
 This document is deliberately short. Follow it top to bottom.
 
-For the full command reference and edge-case recipes, see `mini_command.md`.
+For the full command reference, see each script's `--help` and the README.
 
 ---
 
@@ -120,17 +120,17 @@ tmux new -s amr_pipeline
 git pull
 ```
 
-**Step 3 — submit:**
+**Step 3 — submit everything both papers need (dry run first):**
 
 ```bash
-bash scripts/submit_pipeline_dag_hpc.sh \
-  --organisms "ESCHERICHIA COLI" \
-  --run-features --run-training \
-  --force-rerun-existing
+bash scripts/submit_everything_hpc.sh --organisms "ESCHERICHIA COLI" --hide-figure-titles --dry-run
+bash scripts/submit_everything_hpc.sh --organisms "ESCHERICHIA COLI" --hide-figure-titles
 ```
 
 The script bootstraps the virtualenv automatically, submits every stage as its
 own SLURM job with stage-appropriate memory and wall-clock limits, and exits.
+For one stage at a time, use `scripts/submit_pipeline_dag_hpc.sh` (see its `--help`);
+the README gives the command for the ESKAPE extension.
 Your jobs are now running in SLURM — you can safely close the terminal.
 
 **Expected wall-clock:** up to 7 days, with the cascade stage as the long pole
@@ -231,15 +231,12 @@ not waste days on jobs that depend on a broken input.
 | All downstream jobs CANCELLED | Upstream failed; this is expected | Fix the upstream root cause, then resubmit without `--force-rerun-existing` to resume from where it died |
 | Pipeline finished but figures look wrong | Stale reference data or bad input | Inspect `logs/amr_escherichia_coli_report_<jobid>.out` for warnings |
 
-After fixing the root cause, **drop `--force-rerun-existing` and resubmit**.
-The script will skip stages whose outputs already exist and only re-run what
-actually needs to be rebuilt:
+After fixing the root cause, **resubmit the same command** (never with
+`--force-rerun-existing` or `--fresh`). Stages whose outputs already exist and
+match their recorded provenance are skipped; only what needs rebuilding re-runs:
 
 ```bash
-bash scripts/submit_pipeline_dag_hpc.sh \
-  --organisms "ESCHERICHIA COLI" \
-  --run-features --run-training \
-  --wait
+bash scripts/submit_everything_hpc.sh --organisms "ESCHERICHIA COLI" --hide-figure-titles
 ```
 
 ---
@@ -289,8 +286,7 @@ No silent hangs. No five-day waste runs. Everything visible.
 # Submit (run inside tmux/screen — NOT via sbatch)
 tmux new -s amr_pipeline
 git pull
-bash scripts/submit_pipeline_dag_hpc.sh --organisms "ESCHERICHIA COLI" \
-     --run-features --run-training --force-rerun-existing
+bash scripts/submit_everything_hpc.sh --organisms "ESCHERICHIA COLI" --hide-figure-titles
 # Ctrl-B D to detach
 
 # Monitor live
@@ -303,9 +299,5 @@ bash scripts/submit_pipeline_dag_hpc.sh --status logs/pipeline_<TS>.jobs
 scancel $(awk '/^[0-9]+/{print $1}' logs/pipeline_<TS>.jobs | paste -sd, -)
 
 # Resume after fixing a failure (skips completed stages automatically)
-bash scripts/submit_pipeline_dag_hpc.sh --organisms "ESCHERICHIA COLI" \
-     --run-features --run-training
+bash scripts/submit_everything_hpc.sh --organisms "ESCHERICHIA COLI" --hide-figure-titles
 ```
-
-For all 11 recipes (cold start, partial re-run, ESKAPE generalisation,
-per-organism, custom memory / time, re-attach, etc.) see `mini_command.md`.

@@ -97,7 +97,17 @@ class TableCleaner:
             normalized["order_time_jittered"] = normalized["order_time_jittered_utc"]
         return normalized
 
+    # Tables whose rows are deduplicated downstream, after timing rules, not here. A comorbidity
+    # condition can be recorded several times for one culture with different start and end
+    # days; keeping the first row per (culture, condition) here would discard the dated rows
+    # before the covariate builder decides whether the condition was active at culture.
+    # Large tables already skipped this step on the partitioned path
+    # (SiteCleaningManager._DEDUP_SKIP_FOR_DASK); this makes the single-file path agree.
+    _DEDUP_AFTER_TIMING_TABLES = frozenset({"comorbidity"})
+
     def _drop_duplicates(self, dataframe: pd.DataFrame, canonical_table: str) -> tuple[pd.DataFrame, int, int, int, int]:
+        if canonical_table in self._DEDUP_AFTER_TIMING_TABLES:
+            return dataframe, 0, 0, 0, 0
         rule = self._settings.cleaning.duplicate_resolution.per_table.get(canonical_table)
         before = len(dataframe)
         shard_coalesced_group_n = 0

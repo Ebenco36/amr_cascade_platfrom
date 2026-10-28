@@ -29,6 +29,8 @@ class DemographicsFeatureBuilder:
             "demo_age",
             "demo_gender_female",
             "demo_gender_male",
+            "demo_gender_code_0",
+            "demo_gender_code_1",
             "demo_gender_unknown",
             "demo_gender_category",
             "baseline_adi_available",
@@ -45,7 +47,9 @@ class DemographicsFeatureBuilder:
                 frame["demo_age"] = 0.0
                 frame["demo_gender_female"] = 0
                 frame["demo_gender_male"] = 0
-                frame["demo_gender_unknown"] = 0
+                frame["demo_gender_code_0"] = 0
+                frame["demo_gender_code_1"] = 0
+                frame["demo_gender_unknown"] = 1
                 frame["demo_gender_category"] = "unknown"
             else:
                 table = demographics.loc[:, join_keys + ["age", "gender"]].copy()
@@ -70,10 +74,18 @@ class DemographicsFeatureBuilder:
                 frame["demo_age"] = frame["age"].map(self._parse_age_value).fillna(0.0)
                 frame["demo_gender_female"] = gender.isin(["F", "FEMALE"]).astype(int)
                 frame["demo_gender_male"] = gender.isin(["M", "MALE"]).astype(int)
+                # The ARMD extracts record sex as an undocumented 0/1 code, not F/M. Each code
+                # gets its own numeric indicator: the feature merger coerces every feature
+                # column to numeric, so the text category below would reach the models as a
+                # constant 0, and without these indicators sex would not enter them at all.
+                frame["demo_gender_code_0"] = gender.eq("0").astype(int)
+                frame["demo_gender_code_1"] = gender.eq("1").astype(int)
+                # Unknown = no recognised value: no demographics row, a missing or literal
+                # "Null" gender (set to NA above), or an unrecognised code.
                 frame["demo_gender_unknown"] = (
-                    (frame["baseline_demographics_available"] == 1)
-                    & (frame["demo_gender_female"] == 0)
-                    & (frame["demo_gender_male"] == 0)
+                    frame[["demo_gender_female", "demo_gender_male", "demo_gender_code_0", "demo_gender_code_1"]]
+                    .sum(axis=1)
+                    .eq(0)
                 ).astype(int)
                 frame["demo_gender_category"] = gender.map(self._normalize_gender_category)
 

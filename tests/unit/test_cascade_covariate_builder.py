@@ -76,7 +76,7 @@ def test_cascade_covariate_builder_materializes_priority_covariates(tmp_path: Pa
             {
                 "anon_id": join["anon_id"],
                 "pat_enc_csn_id_coded": join["pat_enc_csn_id_coded"],
-                "order_proc_id_coded": "lab-order-not-culture-order",
+                "order_proc_id_coded": join["order_proc_id_coded"],  # labs are keyed by culture order
                 "source_site": join["source_site"],
                 "median_wbc": 12.0,
                 "median_neutrophils": 8.0,
@@ -92,7 +92,7 @@ def test_cascade_covariate_builder_materializes_priority_covariates(tmp_path: Pa
             {
                 "anon_id": join["anon_id"],
                 "pat_enc_csn_id_coded": join["pat_enc_csn_id_coded"],
-                "order_proc_id_coded": "vital-order-not-culture-order",
+                "order_proc_id_coded": join["order_proc_id_coded"],  # vitals too
                 "source_site": join["source_site"],
                 "median_heartrate": 110,
                 "median_sysbp": 95,
@@ -362,3 +362,22 @@ def test_adi_state_rank_has_its_own_availability(tmp_path: Path) -> None:
     assert tuple(result.loc["ranked", ["cov_adi_available", "cov_adi_state_rank_available", "cov_adi_state_rank"]]) == (1, 1, 9.0)
     # The missing rank is filled with 0 for the model, and its indicator says so.
     assert tuple(result.loc["unranked", ["cov_adi_available", "cov_adi_state_rank_available", "cov_adi_state_rank"]]) == (1, 0, 0.0)
+
+
+def test_labs_and_vitals_are_matched_by_culture_not_borrowed_within_the_encounter(tmp_path: Path) -> None:
+    # Two cultures in one encounter; only o1 has labs and vitals. o2 must not inherit them.
+    project_root = Path(__file__).resolve().parents[2]
+    settings = ConfigLoader(project_root).load("mac")
+    paths = PathManager(tmp_path, settings)
+    site_dir = paths.paths.harmonized / "site_aligned" / "armd"
+    site_dir.mkdir(parents=True, exist_ok=True)
+    base = {"anon_id": "p1", "pat_enc_csn_id_coded": "e1", "order_time_jittered": "2024-03-15T10:00:00Z",
+            "organism": "ESCHERICHIA COLI", "source_site": "armd", "ordering_mode": "Inpatient", "culture_description": "Urine culture"}
+    culture_episodes = pd.DataFrame([{**base, "order_proc_id_coded": "o1"}, {**base, "order_proc_id_coded": "o2"}])
+    keys = {"anon_id": "p1", "pat_enc_csn_id_coded": "e1", "order_proc_id_coded": "o1", "source_site": "armd"}
+    pd.DataFrame([{**keys, "median_wbc": 12.0}]).to_parquet(site_dir / "labs.parquet", index=False)
+    pd.DataFrame([{**keys, "median_heartrate": 110}]).to_parquet(site_dir / "vitals.parquet", index=False)
+
+    result = CascadeCovariateBuilder(settings, paths).build(culture_episodes).set_index("order_proc_id_coded")
+    assert (int(result.loc["o1", "cov_labs_available"]), int(result.loc["o1", "cov_vitals_available"])) == (1, 1)
+    assert (int(result.loc["o2", "cov_labs_available"]), int(result.loc["o2", "cov_vitals_available"])) == (0, 0)

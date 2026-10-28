@@ -45,6 +45,10 @@ With no options, first installs Python packages, then submits:
      - ridge-penalty refit, validated patterns        (after cascade validation merge)
      - supplementary prediction tables and figures    (after training, the report and
                                                        its readiness audit)
+     - masking experiment, Paper 2                    (after the combined cascade;
+                                                       not with --publication paper1)
+     - year-by-year course of validated patterns      (after the report and its
+                                                       readiness audit)
      - supplementary tables and quoted numbers        (after the report job, the site
                                                        cascades, all follow-ups above, and
                                                        the three sensitivity runs' validation)
@@ -81,6 +85,8 @@ Turn individual pieces on/off:
   --skip-patient-cluster       Don't queue the patient-cluster bootstrap.
   --skip-ridge-sensitivity     Don't queue the ridge-penalty refit.
   --skip-supplementary-prediction  Don't queue the prediction tables/figures.
+  --skip-masking               Don't queue Paper 2's masking experiment.
+  --skip-temporal              Don't queue the year-by-year course of the validated patterns.
   --skip-supplementary-tables  Don't queue the supplementary-table job.
   --main-only                  Shorthand: skip all three sensitivities and
                                 every follow-up.
@@ -139,6 +145,8 @@ SKIP_PATIENT_CLUSTER=0
 SKIP_RIDGE=0
 SKIP_PREDICTION=0
 SKIP_SUPPLEMENTARY_TABLES=0
+SKIP_MASKING=0
+SKIP_TEMPORAL=0
 VALIDATION_MERGE_JOB=""
 TRAINING_JOB=""
 REPORT_JOB=""
@@ -159,6 +167,11 @@ PREDICTION_MEM="128G"
 PREDICTION_TIME="12:00:00"
 TABLES_MEM="64G"
 TABLES_TIME="02:00:00"
+MASKING_MEM="256G"
+MASKING_TIME="24:00:00"
+# Reads the pair table in batches: peak 4.2 GB on the full E. coli data (28 October 2026).
+TEMPORAL_MEM="64G"
+TEMPORAL_TIME="02:00:00"
 DRY_RUN=0
 ALLOW_DIRTY_CHECKOUT=0
 PUBLICATION=manuscripts
@@ -194,9 +207,12 @@ while [[ $# -gt 0 ]]; do
     --skip-ridge-sensitivity) SKIP_RIDGE=1; shift ;;
     --skip-supplementary-prediction) SKIP_PREDICTION=1; shift ;;
     --skip-supplementary-tables) SKIP_SUPPLEMENTARY_TABLES=1; shift ;;
+    --skip-masking) SKIP_MASKING=1; shift ;;
+    --skip-temporal) SKIP_TEMPORAL=1; shift ;;
     --main-only)
       SKIP_SUPPORT_SENSITIVITY=1; SKIP_ANNUAL_SENSITIVITY=1; SKIP_JOINT_SENSITIVITY=1
       SKIP_ERA_STRATIFIED=1; SKIP_PATIENT_CLUSTER=1; SKIP_RIDGE=1; SKIP_PREDICTION=1; SKIP_SUPPLEMENTARY_TABLES=1
+      SKIP_MASKING=1; SKIP_TEMPORAL=1
       shift ;;
     --sensitivities-only) SKIP_MAIN=1; shift ;;
     --validation-merge-job|--era-stratified-after) need_value "$@"; VALIDATION_MERGE_JOB="$2"; shift 2 ;;
@@ -390,7 +406,7 @@ else
 fi
 
 echo ""
-if [[ $((SKIP_ERA_STRATIFIED & SKIP_PATIENT_CLUSTER & SKIP_RIDGE & SKIP_PREDICTION & SKIP_SUPPLEMENTARY_TABLES)) -eq 1 ]]; then
+if [[ $((SKIP_ERA_STRATIFIED & SKIP_PATIENT_CLUSTER & SKIP_RIDGE & SKIP_PREDICTION & SKIP_SUPPLEMENTARY_TABLES & SKIP_MASKING & SKIP_TEMPORAL)) -eq 1 ]]; then
   echo "Follow-ups: all skipped."
   echo ""
   echo "All submissions queued. Check status with: squeue -u \$USER"
@@ -517,6 +533,23 @@ if [[ "${SKIP_PREDICTION}" -eq 0 ]]; then
     "\"\${AMR_CASCADE_PYTHON}\" scripts/run_supplementary_prediction.py --env hpc --organism '${organism}' ${presentation_args}")"
   echo "Supplementary prediction tables and figures: ${prediction_job}"
   finished_jobs+=("${prediction_job}")
+fi
+if [[ "${SKIP_MASKING}" -eq 0 && "${PUBLICATION}" != paper1 ]]; then
+  # Paper 2's masking experiment, on the full data; reads the combined cascade's edge report.
+  organism_slug="$(printf '%s' "${organism}" | tr '[:upper:] ' '[:lower:]_')"
+  masking_job="$(follow_up amr_masking_experiment "${main_partition}" "${MASKING_MEM}" "${MASKING_TIME}" "${combined_cascade_job}" \
+    "\"\${AMR_CASCADE_PYTHON}\" scripts/run_masking_experiment.py --env hpc --organism '${organism}' --output-dir outputs/tables/combined/organisms/${organism_slug}/masking_experiment")"
+  echo "Masking experiment (Paper 2): ${masking_job}"
+  finished_jobs+=("${masking_job}")
+fi
+if [[ "${SKIP_TEMPORAL}" -eq 0 ]]; then
+  # Year-by-year course of the validated patterns. After the report and its readiness audit for the
+  # same reason as the prediction: it draws a figure into the report's figure directory.
+  temporal_deps="$(join_ids "${combined_cascade_job}" "${REPORT_JOB}" "${READINESS_JOB}")"
+  temporal_job="$(follow_up amr_temporal_regimes "${main_partition}" "${TEMPORAL_MEM}" "${TEMPORAL_TIME}" "${temporal_deps}" \
+    "\"\${AMR_CASCADE_PYTHON}\" scripts/run_temporal_regimes.py --env hpc --organism '${organism}'")"
+  echo "Year-by-year course of the validated patterns: ${temporal_job}"
+  finished_jobs+=("${temporal_job}")
 fi
 if [[ "${SKIP_SUPPLEMENTARY_TABLES}" -eq 0 ]]; then
   # Also held on the three sensitivity runs' validation merges: the Supplement's availability-sensitivity table compares them with the primary run.

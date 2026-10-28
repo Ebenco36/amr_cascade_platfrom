@@ -5,8 +5,9 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "amr-cascade-platform"
 version = "0.1.0"
-description = "Production-ready platform for AST cascade analysis and cascade-aware feature engineering."
+description = "Denominator-aware detection and validation of directional observation patterns in antimicrobial susceptibility testing data."
 readme = "README.md"
+license = {text = "MIT"}
 requires-python = ">=3.12"
 dependencies = [
   "dask[dataframe]>=2024.8.0,<2026.0",
@@ -19,7 +20,7 @@ dependencies = [
   "pandas>=2.2,<3.0",
   "plotly>=5.24,<6.0",
   "pyarrow>=15,<20",
-  "pycirclize>=1.7,<2.0",
+  "pycirclize>=1.7,<2.0",  # checked by the pipeline preflight (core/utils/pipeline_preflight.py)
   "PyYAML>=6,<7",
   "scikit-learn>=1.4,<2.0",
   "scipy>=1.12,<2.0",

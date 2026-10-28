@@ -13,7 +13,7 @@ from amr_cascade_platform.reporting.manuscript_profile import (
     MANUSCRIPT_FIGURE_GROUPS, MANUSCRIPT_REPORT_FIGURES, PAPER2_REPORT_FIGURES,
     required_exports,
 )
-from amr_cascade_platform.reporting.paper1_profile import PAPER1_PREDICTION_FIGURES, report_ready
+from amr_cascade_platform.reporting.paper1_profile import PAPER1_PREDICTION_FIGURES, PAPER1_TEMPORAL_FIGURES, report_ready
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -25,7 +25,7 @@ def test_both_manuscripts_match_the_named_output_contract():
     citations = [scan_citations(path) for path in folders]
     assert {Path(name).stem for name in citations[1].figures} == set(PAPER2_REPORT_FIGURES)
     assert set.union(*(c.figures for c in citations)) == {
-        f"{stem}.pdf" for stem in MANUSCRIPT_REPORT_FIGURES + PAPER1_PREDICTION_FIGURES
+        f"{stem}.pdf" for stem in MANUSCRIPT_REPORT_FIGURES + PAPER1_PREDICTION_FIGURES + PAPER1_TEMPORAL_FIGURES
     } | {"Cascade_publication.drawio.pdf"}  # paper 1 Fig. 1: the author's drawio figure (2026-10-27)
     assert set.union(*(c.csv_cited | c.csvreader for c in citations)) == set(CSV_SOURCES)
 

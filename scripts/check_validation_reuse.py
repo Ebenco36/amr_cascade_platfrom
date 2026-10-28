@@ -41,7 +41,8 @@ def _display(value: object) -> str:
     return "<not recorded>" if value is _MISSING else json.dumps(value, sort_keys=True)
 
 
-def check(root: Path, settings, paths, sites, organisms, *, include_sites: bool, explain: bool = False) -> list[str]:
+def check(root: Path, settings, paths, sites, organisms, *, include_sites: bool, explain: bool = False,
+          require_results: bool = False) -> list[str]:
     errors = []
     scopes = [("combined", None)] + ([("site", site) for site in sites] if include_sites else [])
     for organism in organisms:
@@ -49,6 +50,8 @@ def check(root: Path, settings, paths, sites, organisms, *, include_sites: bool,
             directory = scoped_output_dir(paths.paths.artifacts / settings.cascade.outputs.result_dir, scope, site=site, organism=organism)
             saved = sorted((directory / "validation_shards").glob("shard_*.parquet"))
             merged = directory / "validation_results.parquet"
+            if require_results and not merged.is_file():
+                errors.append(f"{merged}: merged validation is required for this reuse-only refresh; nothing will be recomputed implicitly.")
             if merged.exists():
                 saved.append(merged)
             if not saved:
@@ -96,11 +99,13 @@ def main() -> int:
     parser.add_argument("--sites", default="armd,armd_ecuh,armd_utsw")
     parser.add_argument("--organisms", default="ESCHERICHIA COLI")
     parser.add_argument("--include-sites", action="store_true")
+    parser.add_argument("--require-results", action="store_true", help="Fail when merged validation is absent in any requested scope (reuse-only refresh).")
     parser.add_argument("--explain", action="store_true", help="Show recorded/current fingerprint differences; read-only, no jobs submitted.")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     settings, paths, _ = build_context(root, args.env)
-    errors = check(root, settings, paths, args.sites.split(","), args.organisms.split(","), include_sites=args.include_sites, explain=args.explain)
+    errors = check(root, settings, paths, args.sites.split(","), args.organisms.split(","), include_sites=args.include_sites,
+                   explain=args.explain, require_results=args.require_results)
     for error in errors:
         print(error, file=sys.stderr)
     if errors:

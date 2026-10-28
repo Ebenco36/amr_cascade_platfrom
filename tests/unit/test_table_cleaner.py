@@ -147,3 +147,22 @@ def test_table_cleaner_coalesces_measurement_shards_for_labs() -> None:
     assert float(collapsed["first_wbc"]) == 10.0
     assert float(collapsed["last_wbc"]) == 12.0
     assert int(collapsed["Period_Day"]) == 14
+
+
+def test_comorbidity_rows_with_different_dates_all_survive_cleaning() -> None:
+    # One condition recorded twice for a culture: once ended before the culture, once still
+    # active. Both rows must reach the covariate builder, which applies the timing rule and
+    # counts each condition once; keeping only the first row here would drop the active one.
+    project_root = Path(__file__).resolve().parents[2]
+    settings = ConfigLoader(project_root).load("mac")
+    cleaner = TableCleaner(settings)
+    base = {"anon_id": "A1", "pat_enc_csn_id_coded": "10", "order_proc_id_coded": "20", "comorbidity_component": "Hypertension", "source_site": "armd_utsw"}
+    dataframe = pd.DataFrame([
+        {**base, "comorbidity_component_start_days_culture": "400", "comorbidity_component_end_days_culture": "100"},
+        {**base, "comorbidity_component_start_days_culture": "30", "comorbidity_component_end_days_culture": None},
+    ])
+
+    result = cleaner.clean(dataframe, "comorbidity")
+    assert result.rows_after == 2
+    assert result.duplicates_removed == 0
+    assert sorted(result.dataframe["comorbidity_component_start_days_culture"].astype(str)) == ["30", "400"]

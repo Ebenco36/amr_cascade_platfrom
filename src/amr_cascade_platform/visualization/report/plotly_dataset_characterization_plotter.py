@@ -19,7 +19,8 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from amr_cascade_platform.core.utils.site_labels import ALL_SITES, scope_order, site_label
-from amr_cascade_platform.visualization.report.plotly_exporter import PlotlyFigureExporter
+from amr_cascade_platform.visualization.report.plotly_exporter import PRINT_FONT_SCALE, PlotlyFigureExporter
+from amr_cascade_platform.visualization.report.print_layout import Geometry, export_both_media
 
 # ── Palette ───────────────────────────────────────────────────────────────────
 _OBS   = "#2C6FAC"   # observed / tested
@@ -38,10 +39,11 @@ _INTRINSIC     = "#7b68b5"
 _FUNNEL        = ["#86b6ef", "#3987e5", "#1c5cab"]  # one hue, darker as the space narrows
 _BLUE_RAMP     = [[0.0, "#cde2fb"], [0.25, "#86b6ef"], [0.5, "#3987e5"], [0.75, "#1c5cab"], [1.0, "#0d366b"]]
 
-# Adjusted-model covariates and what counts as recorded for each (the same
+# Covariate and source-record coverage (not all are primary model inputs), using
 # definitions as Table V): "known" = a category other than unknown; "flag" =
 # the covariate builder's record indicator; "adi" = the ADI record indicator
-# with a positive score (the builder writes 0 where the source lacks it).
+# with a positive score (the builder writes 0 where the source lacks it);
+# "dated" = comorbidity data in which every named condition has a start date.
 _COVARIATE_RECORDS = (
     ("Age", "cov_age_bin", "known"),
     ("Sex", "cov_sex", "known"),
@@ -54,10 +56,26 @@ _COVARIATE_RECORDS = (
     ("Nursing-home record", "cov_nursing_home_available", "flag"),
     ("Procedure record", "cov_prior_procedure_available", "flag"),
     ("Comorbidity data", "cov_comorbidity_available", "flag"),
+    ("Comorbidity data, all starts dated", "cov_comorbidity_available", "dated"),
     ("Area Deprivation Index", "cov_adi_available", "adi"),
+    ("Area Deprivation Index state rank", "cov_adi_state_rank_available", "flag"),
     ("Laboratory values", "cov_labs_available", "flag"),
     ("Vital signs", "cov_vitals_available", "flag"),
 )
+
+_MISSING_CATEGORY_TOKENS = {"", "unknown", "null", "none", "nan", "na", "n/a", "<na>", "nat", "missing", "not recorded"}
+_RECORD_INDICATORS = {
+    "cov_prior_abx_available", "cov_prior_organism_available", "cov_nursing_home_available",
+    "cov_prior_procedure_available", "cov_comorbidity_available", "cov_labs_available", "cov_vitals_available",
+}
+_PROFILE_LABELS = {
+    "Medication record before culture": "Prior antibiotic-exposure record",
+    "Comorbidity data, all starts dated": "Comorbidity: all starts dated",
+    "Area Deprivation Index": "Deprivation index score",
+    "Area Deprivation Index state rank": "Deprivation index state rank",
+    "Laboratory values": "Laboratory record*",
+    "Vital signs": "Vital-sign record*",
+}
 
 
 def _empty(template: str, w: int, h: int, msg: str) -> go.Figure:
@@ -86,11 +104,40 @@ def _recorded(frame: pd.DataFrame, column: str, kind: str) -> pd.Series | None:
     if column not in frame.columns:
         return None
     if kind == "known":
-        return frame[column].astype("string").fillna("unknown").str.lower().ne("unknown")
-    recorded = _flag(frame, column)
-    if kind == "adi" and "cov_adi_score" in frame.columns:
+        values = frame[column].astype("string").fillna("").str.strip().str.lower()
+        return ~values.isin(_MISSING_CATEGORY_TOKENS)
+    recorded = _clean_num(frame[column]).eq(1).fillna(False)
+    if kind == "adi":
+        if "cov_adi_score" not in frame.columns:
+            return None
         recorded &= _clean_num(frame["cov_adi_score"]).gt(0)
+    if kind == "dated":
+        if "cov_comorbidity_start_unrecorded" not in frame.columns:
+            return None
+        recorded &= _clean_num(frame["cov_comorbidity_start_unrecorded"]).eq(0).fillna(False)
     return recorded
+
+
+def _availability_text(recorded: pd.Series | None) -> str:
+    """Cell text that never rounds a gap away: 100% only when nothing is missing,
+    0% only when nothing is recorded, otherwise the share rounded down to one decimal."""
+    if recorded is None or not len(recorded):
+        return "—"
+    missing = int((~recorded.astype(bool)).sum())
+    if missing == 0:
+        return "100%"
+    if missing == len(recorded):
+        return "0%"
+    share = math.floor(1000 * (len(recorded) - missing) / len(recorded)) / 10
+    return "<0.1%" if share == 0 else f"{share:.1f}%"
+
+
+def _availability_hover(recorded: pd.Series | None) -> str:
+    """Exact counts for the hover text: recorded and without the covariate."""
+    if recorded is None or not len(recorded):
+        return "no data"
+    present = int(recorded.astype(bool).sum())
+    return f"{present:,} of {len(recorded):,} episodes; {len(recorded) - present:,} without it"
 
 
 def _scopes(frame: pd.DataFrame) -> list[tuple[str, pd.DataFrame]]:
@@ -1122,12 +1169,10 @@ class DatasetCharacterizationPlotter:
         output_stem: Path,
         formats: tuple[str, ...],
     ) -> dict[str, Path]:
-        """Heatmap: share of culture episodes with each adjusted-model covariate recorded, by site.
+        """Export value/record coverage, with exact counts and explicit unavailable inputs.
 
-        Expects the covariates (CascadeCovariateBuilder) merged onto
-        culture_episodes; "recorded" follows Table V (see _COVARIATE_RECORDS).
-        Rows keep a fixed conceptual order: demographics, care context,
-        history, comorbidity and deprivation, then measurements.
+        Availability flags for history, labs and vitals describe source records,
+        not completeness of every field or confirmed absence of an event.
         """
         if culture_episodes.empty:
             return self._exporter.write(
@@ -1136,45 +1181,93 @@ class DatasetCharacterizationPlotter:
                 output_stem, formats,
             )
         scopes = _scopes(culture_episodes)
-        rows, shares, texts = [], [], []
+        rows, shares, texts, hovers, audit = [], [], [], [], []
         for label, column, kind in _COVARIATE_RECORDS:
-            if column not in culture_episodes.columns:
-                continue
-            row_shares = []
-            for _, part in scopes:
+            row_shares, row_texts, row_hovers = [], [], []
+            for scope, part in scopes:
                 recorded = _recorded(part, column, kind)
-                row_shares.append(float(recorded.mean()) if recorded is not None and len(part) else math.nan)
+                available = recorded is not None and len(part) > 0
+                share = float(recorded.mean()) if available else math.nan
+                present = int(recorded.sum()) if available else None
+                absent = len(part) - present if available else None
+                absence_label = "no record" if column in _RECORD_INDICATORS and kind != "dated" else "not recorded"
+                if kind == "dated":
+                    absence_label = "not fully dated"
+                row_shares.append(share)
+                percentage = _availability_text(recorded) if available else "N/A"
+                cell = f"<b>{percentage}</b>"
+                if available and absent:
+                    cell += f"<br>{absent:,} {absence_label}"
+                elif not available:
+                    cell += "<br>input unavailable"
+                row_texts.append(cell)
+                row_hovers.append(
+                    f"{present:,} / {len(part):,} recorded; {absent:,} {absence_label}"
+                    if available else "Required input was not supplied; coverage cannot be calculated."
+                )
+                audit.append({
+                    "scope": scope, "covariate": label, "source_column": column,
+                    "definition": kind, "episodes": len(part), "recorded_n": present,
+                    "not_recorded_n": absent, "recorded_fraction": share,
+                    "display_percentage": percentage, "absence_label": absence_label,
+                    "evaluable": available,
+                })
             rows.append(label)
             shares.append(row_shares)
-            texts.append([f"{value:.0%}" if not math.isnan(value) else "—" for value in row_shares])
-        if not rows:
-            return self._exporter.write(
-                _empty(self._template, self._width, self._height,
-                       "Missing data profile unavailable — the adjusted model's covariates were not supplied"),
-                output_stem, formats,
-            )
-        columns = [f"{label}<br>n = {len(part):,}" for label, part in scopes]
-        # Every cell prints its share, so no colour bar: the colour only groups
-        # similar cells for the eye.
+            texts.append(row_texts)
+            hovers.append(row_hovers)
+        columns = [f"<b>{label}</b><br>n = {len(part):,}" for label, part in scopes]
+        data = (rows, shares, texts, hovers, columns)
+        outputs = export_both_media(self._exporter, self._missing_data_profile_figure, data, output_stem, formats)
+        audit_path = output_stem.with_name(output_stem.name + "_counts.csv")
+        audit_path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(audit).to_csv(audit_path, index=False)
+        outputs[audit_path.name] = audit_path
+        return outputs
+
+    def _missing_data_profile_figure(self, data: tuple, *, medium: str) -> go.Figure:
+        rows, shares, texts, hovers, columns = data
+        width = max(1060, 350 + 180 * len(columns))
+        g = Geometry.for_medium(medium, screen_width=width, print_width=round(width * PRINT_FONT_SCALE))
+        height = round(g.px(48 * len(rows) + 220))
+        # Pale cells support dark, two-line labels in both HTML and vector exports.
+        # A neutral background cell also makes N/A visibly different from zero.
         fig = go.Figure(go.Heatmap(
-            z=shares, x=columns, y=rows, zmin=0, zmax=1, colorscale=_BLUE_RAMP, showscale=False,
-            text=texts, texttemplate="%{text}", textfont=dict(size=13),
-            xgap=3, ygap=3, hoverongaps=False,
-            hovertemplate="<b>%{y}</b><br>%{x}<br>recorded for %{z:.1%} of episodes<extra></extra>",
+            z=[[value if math.isfinite(value) else -1 for value in row] for row in shares],
+            x=columns, y=rows, zmin=-1, zmax=1,
+            colorscale=[[0, "#eeeeee"], [0.4999, "#eeeeee"], [0.5, "#f3f7fb"], [1, "#9fc5e8"]],
+            showscale=False, text=texts, texttemplate="%{text}",
+            textfont=dict(size=12, color=_TEXT), customdata=hovers,
+            xgap=g.px(3), ygap=g.px(3), hoverongaps=False,
+            hovertemplate="<b>%{y}</b><br>%{x}<br>%{customdata}<extra></extra>",
         ))
         fig.update_layout(
             template=self._template,
-            width=1600,
-            height=max(640, 58 * len(rows) + 260),
+            width=g.width, height=height,
             paper_bgcolor=_BG,
             plot_bgcolor=_BG,
+            font=dict(family="Arial", size=14, color=_TEXT),
+            meta=dict(print_geometry=True, geometry_scale=g.margin_scale, heading_band=48),
             title=dict(
-                text="<b>Covariate availability by site</b><br>"
-                     "<sup>Share of culture episodes with each adjusted-model covariate recorded</sup>",
-                font=dict(size=16, color=_TEXT), x=0.01, xanchor="left",
+                text="<b>Covariate and source-record availability</b>",
+                font=dict(size=20, color=_TEXT), x=0.015, xanchor="left",
+                y=1 - g.px(14) / height, yanchor="top", yref="container",
             ),
-            xaxis=dict(title="", side="top", tickfont=dict(size=11), tickangle=0),
-            yaxis=dict(title="", autorange="reversed", tickfont=dict(size=13)),
-            margin=dict(l=40, r=40, t=110, b=30),
+            xaxis=dict(title="", side="top", tickfont=dict(size=14), tickangle=0,
+                       showgrid=False, zeroline=False, fixedrange=True),
+            yaxis=dict(title="", autorange="reversed", tickfont=dict(size=14),
+                       tickmode="array", tickvals=rows, ticktext=[_PROFILE_LABELS.get(row, row) for row in rows],
+                       showgrid=False, zeroline=False, fixedrange=True),
+            margin=dict(l=320, r=20, t=110, b=110),
         )
-        return self._exporter.write(fig, output_stem, formats)
+        for boundary in (3.5, 5.5, 9.5, 13.5):
+            fig.add_hline(y=boundary, line=dict(color="white", width=g.px(7)))
+        note = (
+            "Percent recorded; second line counts episodes without the value or record. N/A = input unavailable.<br>"
+            "Percentages are rounded down to 0.1%; 100% means complete. No record does not prove no event.<br>"
+            "* Labs/vitals show source-record coverage, not completeness of individual measurements; not primary adjustment inputs.<br>"
+            "Fully dated comorbidity requires a record and no undated starts. All percentages use the full column denominator."
+        )
+        fig.add_annotation(text=note, x=0, y=0, xref="paper", yref="paper", xanchor="left", yanchor="top",
+                           yshift=-g.px(20), align="left", showarrow=False, font=dict(size=10, color="#4b5563"))
+        return fig
