@@ -57,8 +57,11 @@ for arg in "$@"; do
 done
 for name in ${names//,/ }; do
     [[ "$name" != "${MISSING_STAGE:-}" ]] || continue
+    if [[ "${MISSING_DESCENDANTS:-0}" == 1 ]]; then
+        case "$name" in fix_pred_figures|fix_temporal|fix_tables|fix_audit) continue ;; esac
+    fi
     case "$name" in
-      fix_report) value=FAILED ;;
+      fix_report) value=${REPORT_STATE:-FAILED} ;;
       fix_pred_figures|fix_temporal|fix_tables|fix_audit) value=CANCELLED ;;
       *) value=COMPLETED ;;
     esac
@@ -169,3 +172,34 @@ def test_stale_training_reruns_and_propagates(sandbox):
     assert "re-run fix_training (completed, but started before fix_features had finished)" in result.stderr
     assert "kept   fix_threshold (completed)" in result.stderr
     assert len([line for line in result.stderr.splitlines() if line.startswith("sbatch ")]) == 6
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_missing_blocked_descendants_after_failed_report(sandbox, dry_run):
+    root, script, env = sandbox
+    env["MISSING_DESCENDANTS"] = "1"
+    args = ["bash", str(script), "--resume", "--accept-reviewed-eligibility-update"]
+    if dry_run:
+        args.append("--dry-run")
+    result = subprocess.run(args, env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert "kept   fix_training (completed)" in result.stderr
+    if dry_run:
+        assert len([line for line in result.stderr.splitlines() if line.startswith("sbatch ")]) == 5
+        assert not (root / "submissions.jsonl").exists()
+    else:
+        submissions = [json.loads(line) for line in (root / "submissions.jsonl").read_text().splitlines()]
+        assert len(submissions) == 5
+        for args, dep in zip(submissions[1:], ["9001", "9001", "9001:9002:9003", "9004"]):
+            assert f"--dependency=afterok:{dep}" in args
+
+
+def test_missing_descendants_without_failed_report_still_stops(sandbox):
+    root, script, env = sandbox
+    env.update(MISSING_DESCENDANTS="1", REPORT_STATE="COMPLETED")
+    result = subprocess.run(
+        ["bash", str(script), "--resume", "--accept-reviewed-eligibility-update"],
+        env=env, capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert not (root / "submissions.jsonl").exists()

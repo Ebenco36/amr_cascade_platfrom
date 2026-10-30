@@ -108,8 +108,20 @@ if [[ $RESUME -eq 1 ]]; then
     echo "ERROR: Slurm accounting query failed. Nothing submitted." >&2
     exit 1
   fi
+  report_state="$(printf '%s\n' "$ACCOUNTING" | awk -F'|' '$2 == "fix_report" && $1 ~ /^[0-9]+$/ { print }' | sort -t'|' -k1,1n | tail -1 | cut -d'|' -f3)"
   for stage in ${resume_names//,/ }; do
     if ! printf '%s\n' "$ACCOUNTING" | awk -F'|' -v name="$stage" '$2 == name && $1 ~ /^[0-9]+$/ && $3 != "" { found=1 } END { exit !found }'; then
+      # Never-started cancelled descendants may be absent from accounting.
+      # A recorded reporting failure guarantees these four stages will be
+      # resubmitted through explicit dependencies, not inferred as completed.
+      case "$stage:$report_state" in
+        fix_pred_figures:FAILED|fix_temporal:FAILED|fix_tables:FAILED|fix_audit:FAILED|\
+        fix_pred_figures:CANCELLED*|fix_temporal:CANCELLED*|fix_tables:CANCELLED*|fix_audit:CANCELLED*|\
+        fix_pred_figures:OUT_OF_MEMORY|fix_temporal:OUT_OF_MEMORY|fix_tables:OUT_OF_MEMORY|fix_audit:OUT_OF_MEMORY|\
+        fix_pred_figures:TIMEOUT|fix_temporal:TIMEOUT|fix_tables:TIMEOUT|fix_audit:TIMEOUT)
+          echo "  accounting unavailable for $stage; will rebuild after recorded $report_state fix_report." >&2
+          continue ;;
+      esac
       echo "ERROR: no usable accounting record for $stage since $SINCE. Nothing submitted; do not assume completed work is missing." >&2
       exit 1
     fi
