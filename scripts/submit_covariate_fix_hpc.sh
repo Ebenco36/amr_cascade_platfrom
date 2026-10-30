@@ -19,6 +19,9 @@
 #   bash scripts/submit_covariate_fix_hpc.sh --dry-run   # print the sbatch commands only
 #   bash scripts/submit_covariate_fix_hpc.sh             # submit
 #   bash scripts/submit_covariate_fix_hpc.sh --resume    # after a failure: re-run only what did not complete
+#   bash scripts/submit_covariate_fix_hpc.sh --resume --accept-reviewed-eligibility-update --dry-run
+# The explicit exception above permits only the reviewed 9077e93 -> d10dba2 code transition
+# (plus this submit script). It preserves the original marker and records the transition separately.
 #
 # --resume re-submits each stage whose newest job since the first submission did not end COMPLETED or
 # started before a stage it needs had finished (out of order), and every stage that waits for one of
@@ -29,13 +32,28 @@ set -euo pipefail
 
 DRY_RUN=0
 RESUME=0
+ACCEPT_REVIEWED_ELIGIBILITY_UPDATE=0
 for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY_RUN=1 ;;
     --resume) RESUME=1 ;;
-    *) echo "Unknown option: $arg (use --dry-run and/or --resume)" >&2; exit 2 ;;
+    --accept-reviewed-eligibility-update) ACCEPT_REVIEWED_ELIGIBILITY_UPDATE=1 ;;
+    *) echo "Unknown option: $arg (use --dry-run, --resume, --accept-reviewed-eligibility-update)" >&2; exit 2 ;;
   esac
 done
+if [[ $ACCEPT_REVIEWED_ELIGIBILITY_UPDATE -eq 1 && $RESUME -ne 1 ]]; then
+  echo "--accept-reviewed-eligibility-update requires --resume." >&2
+  exit 2
+fi
+
+reviewed_eligibility_transition_allowed() {
+  local original=$1
+  local reviewed="d10dba23baa146709445cf66244c6f731c45fc75"
+  [[ "$original" == "9077e93d9964253eac5fd13d39fb1dc6f86631c3" ]] || return 1
+  git merge-base --is-ancestor "$reviewed" HEAD || return 1
+  git diff --quiet "$reviewed" HEAD -- src scripts configs pyproject.toml requirements-hpc.txt \
+    ':(exclude)scripts/submit_covariate_fix_hpc.sh'
+}
 
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
@@ -65,27 +83,49 @@ if command -v squeue >/dev/null 2>&1; then
 fi
 
 MARKER="logs/covariate_fix_submitted.txt"
+REVIEWED_TRANSITION=0
 if [[ $RESUME -eq 1 ]]; then
   [[ -f "$MARKER" ]] || { echo "--resume: no $MARKER, so the chain was never submitted here; run without --resume." >&2; exit 1; }
   active="$(squeue -h -u "$USER" -o '%j' 2>/dev/null | grep '^fix_' | sort | uniq -c | tr -s ' ' || true)"
   [[ -z "$active" ]] || { echo "--resume: fix_ jobs are still queued or running:$active. Wait for them, or cancel stuck ones, then resume." >&2; exit 1; }
   first_commit="$(sed -n 2p "$MARKER")"
   # Re-run stages must run the same code as the stages that completed.
-  if ! git diff --quiet "$first_commit" HEAD -- src scripts configs pyproject.toml ':(exclude)scripts/submit_covariate_fix_hpc.sh'; then
-    echo "--resume: the code differs from the first submission ($first_commit); resuming would mix code versions. Nothing submitted." >&2
-    exit 1
+  if ! git diff --quiet "$first_commit" HEAD -- src scripts configs pyproject.toml requirements-hpc.txt ':(exclude)scripts/submit_covariate_fix_hpc.sh'; then
+    if [[ $ACCEPT_REVIEWED_ELIGIBILITY_UPDATE -eq 1 ]] && reviewed_eligibility_transition_allowed "$first_commit"; then
+      REVIEWED_TRANSITION=1
+      echo "Accepted explicit reviewed eligibility/provenance transition; saved-input validation checks passed. Original marker is unchanged." >&2
+    else
+      echo "--resume: unapproved code differences from $first_commit. Nothing submitted. The eligibility exception permits only the reviewed d10dba2 source tree." >&2
+      exit 1
+    fi
   fi
   SINCE="$(head -1 "$MARKER" | tr ' ' T)"
   echo "Resuming the chain first submitted $(head -1 "$MARKER") at ${first_commit:0:7}:" >&2
+  # Take one accounting snapshot before submitting anything. Missing/failed accounting
+  # must not turn a resume into an accidental full recomputation.
+  resume_names="fix_reclean,fix_harmonize,fix_site_armd,fix_site_ecuh,fix_site_utsw,fix_cascade,fix_dataset_summary,fix_features,fix_training,fix_threshold,fix_ridge,fix_prev,fix_masking,fix_report,fix_shap_figures,fix_pred_figures,fix_temporal,fix_tables,fix_audit"
+  if ! ACCOUNTING="$(sacct -X -n -P -u "$USER" -S "$SINCE" --name="$resume_names" --format=JobIDRaw,JobName%80,State%40,Start,End)"; then
+    echo "ERROR: Slurm accounting query failed. Nothing submitted." >&2
+    exit 1
+  fi
+  for stage in ${resume_names//,/ }; do
+    if ! printf '%s\n' "$ACCOUNTING" | awk -F'|' -v name="$stage" '$2 == name && $1 ~ /^[0-9]+$/ && $3 != "" { found=1 } END { exit !found }'; then
+      echo "ERROR: no usable accounting record for $stage since $SINCE. Nothing submitted; do not assume completed work is missing." >&2
+      exit 1
+    fi
+  done
 fi
 
 last_job() {  # FIELD of the newest job with this name since the first submission ("" if none)
-  sacct -X -n -P -u "$USER" -S "$SINCE" --name="$1" -o "JobIDRaw,$2" 2>/dev/null | sort -t'|' -k1,1n | tail -1 | cut -d'|' -f2 || true
+  local column
+  case "$2" in State) column=3 ;; Start) column=4 ;; End) column=5 ;; *) return 2 ;; esac
+  printf '%s\n' "$ACCOUNTING" | awk -F'|' -v name="$1" '$2 == name && $1 ~ /^[0-9]+$/ { print }' \
+    | sort -t'|' -k1,1n | tail -1 | cut -d'|' -f"$column"
 }
 
 # Refuse queued jobs if tracked source changed after submission. No validation sidecars are altered.
 EXPECTED_COMMIT="$(git rev-parse HEAD)"
-WRAP="cd '$ROOT' && test \"\$(git rev-parse HEAD)\" = '$EXPECTED_COMMIT' && test -z \"\$(git status --porcelain -- src scripts configs pyproject.toml requirements-hpc.txt)\" && unset PYTHONHOME PYTHONPATH && export PYTHONNOUSERSITE=1 PYTHONUNBUFFERED=1 MPLCONFIGDIR='$ROOT/.cache/matplotlib' OMP_NUM_THREADS=8 OPENBLAS_NUM_THREADS=8 MKL_NUM_THREADS=8 && '$PY'"
+WRAP="cd '$ROOT' && { test \"\$(git rev-parse HEAD)\" = '$EXPECTED_COMMIT' || { echo 'ERROR: checkout commit changed after submission; expected $EXPECTED_COMMIT.' >&2; exit 1; }; } && { test -z \"\$(git status --porcelain -- src scripts configs pyproject.toml requirements-hpc.txt)\" || { echo 'ERROR: pipeline code has uncommitted changes after submission.' >&2; exit 1; }; } && unset PYTHONHOME PYTHONPATH && export PYTHONNOUSERSITE=1 PYTHONUNBUFFERED=1 MPLCONFIGDIR='$ROOT/.cache/matplotlib' OMP_NUM_THREADS=8 OPENBLAS_NUM_THREADS=8 MKL_NUM_THREADS=8 && '$PY'"
 
 submit() {  # submit NAME PARTITION MEM TIME DEPENDENCY COMMAND [UPSTREAM_STAGE_NAMES]
   local name=$1 partition=$2 mem=$3 time=$4 dependency=$5 command=$6 upstream=${7:-}
@@ -98,8 +138,11 @@ submit() {  # submit NAME PARTITION MEM TIME DEPENDENCY COMMAND [UPSTREAM_STAGE_
       local state stale="" started; state="$(last_job "$name" State)"
       if [[ "$state" == COMPLETED ]]; then
         started="$(last_job "$name" Start)"
+        [[ "$started" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T ]] || { echo "ERROR: missing start time for completed $name. Stopping." >&2; return 1; }
         for u in $upstream; do  # ISO timestamps compare as text
-          [[ "$(last_job "$u" End)" > "$started" ]] && stale="$u"
+          local ended; ended="$(last_job "$u" End)"
+          [[ "$ended" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T ]] || { echo "ERROR: missing end time for upstream $u. Stopping." >&2; return 1; }
+          [[ "$ended" > "$started" ]] && stale="$u"
         done
         if [[ -z "$stale" ]]; then
           echo "  kept   $name (completed)" >&2
@@ -129,6 +172,11 @@ submit() {  # submit NAME PARTITION MEM TIME DEPENDENCY COMMAND [UPSTREAM_STAGE_
 
 # Submission time: archive_export_artifacts.sh checks that the outputs it packs are newer than this.
 [[ $DRY_RUN -eq 0 && $RESUME -eq 0 ]] && { date '+%Y-%m-%d %H:%M:%S'; git rev-parse HEAD; } > "$MARKER"
+if [[ $DRY_RUN -eq 0 && $REVIEWED_TRANSITION -eq 1 ]]; then
+  printf '%s\t%s\t%s\t%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$first_commit" "$EXPECTED_COMMIT" \
+    "accepted reviewed eligibility/provenance update; completed stages retained by accounting; original marker preserved" \
+    >> logs/covariate_fix_resume_transitions.tsv
+fi
 
 # Comorbidity: re-clean UT Southwestern's table only, then re-harmonise comorbidity for all three sites
 # (the combined table is built from all three; the other tables and the gold layer are not touched).
