@@ -21,7 +21,8 @@
 #   bash scripts/submit_covariate_fix_hpc.sh --resume    # after a failure: re-run only what did not complete
 #   bash scripts/submit_covariate_fix_hpc.sh --resume --accept-reviewed-eligibility-update --dry-run
 # The explicit exception above permits only the reviewed 9077e93 -> d10dba2 code transition
-# (plus this submit script). It preserves the original marker and records the transition separately.
+# (plus this submit script, plotly_exporter.py's image watchdog of 1 November, which changes how
+# images are saved, not any result, and archive_export_artifacts.sh, which runs after the jobs). It preserves the original marker and records the transition separately.
 #
 # --resume re-submits each stage whose newest job since the first submission did not end COMPLETED or
 # started before a stage it needs had finished (out of order), and every stage that waits for one of
@@ -52,7 +53,7 @@ reviewed_eligibility_transition_allowed() {
   [[ "$original" == "9077e93d9964253eac5fd13d39fb1dc6f86631c3" ]] || return 1
   git merge-base --is-ancestor "$reviewed" HEAD || return 1
   git diff --quiet "$reviewed" HEAD -- src scripts configs pyproject.toml requirements-hpc.txt \
-    ':(exclude)scripts/submit_covariate_fix_hpc.sh'
+    ':(exclude)scripts/submit_covariate_fix_hpc.sh' ':(exclude)src/amr_cascade_platform/visualization/report/plotly_exporter.py' ':(exclude)scripts/archive_export_artifacts.sh'
 }
 
 cd "$(dirname "$0")/.."
@@ -90,7 +91,7 @@ if [[ $RESUME -eq 1 ]]; then
   [[ -z "$active" ]] || { echo "--resume: fix_ jobs are still queued or running:$active. Wait for them, or cancel stuck ones, then resume." >&2; exit 1; }
   first_commit="$(sed -n 2p "$MARKER")"
   # Re-run stages must run the same code as the stages that completed.
-  if ! git diff --quiet "$first_commit" HEAD -- src scripts configs pyproject.toml requirements-hpc.txt ':(exclude)scripts/submit_covariate_fix_hpc.sh'; then
+  if ! git diff --quiet "$first_commit" HEAD -- src scripts configs pyproject.toml requirements-hpc.txt ':(exclude)scripts/submit_covariate_fix_hpc.sh' ':(exclude)src/amr_cascade_platform/visualization/report/plotly_exporter.py' ':(exclude)scripts/archive_export_artifacts.sh'; then
     if [[ $ACCEPT_REVIEWED_ELIGIBILITY_UPDATE -eq 1 ]] && reviewed_eligibility_transition_allowed "$first_commit"; then
       REVIEWED_TRANSITION=1
       echo "Accepted explicit reviewed eligibility/provenance transition; saved-input validation checks passed. Original marker is unchanged." >&2
@@ -141,8 +142,10 @@ WRAP="cd '$ROOT' && { test \"\$(git rev-parse HEAD)\" = '$EXPECTED_COMMIT' || { 
 
 submit() {  # submit NAME PARTITION MEM TIME DEPENDENCY COMMAND [UPSTREAM_STAGE_NAMES]
   local name=$1 partition=$2 mem=$3 time=$4 dependency=$5 command=$6 upstream=${7:-}
+  # --kill-on-invalid-dep: when an upstream job fails, Slurm cancels the jobs waiting for it at once,
+  # instead of leaving them pending forever with reason DependencyNeverSatisfied.
   local args=(--parsable --cpus-per-task=8 --partition="$partition" --job-name="$name" --mem="$mem" --time="$time"
-              --output="logs/${name}_%j.out")
+              --kill-on-invalid-dep=yes --output="logs/${name}_%j.out")
   # Kept stages contribute an empty id: drop it, so a job waits only for jobs submitted now.
   dependency="$(echo "$dependency" | tr -s ':' | sed 's/^://; s/:$//')"
   if [[ $RESUME -eq 1 ]]; then
@@ -182,6 +185,16 @@ submit() {  # submit NAME PARTITION MEM TIME DEPENDENCY COMMAND [UPSTREAM_STAGE_
   fi
 }
 
+# Kaleido 0.2 (Plotly's image engine) can hang for ever on a single image: on 30 October the report froze
+# 17 minutes in, on the PDF of a figure it had written in seconds on 27 October, and sat until its 8-hour
+# limit. The two jobs that write Plotly images therefore run under a watchdog: an attempt still running
+# after LIMIT is stopped (timeout signals its whole process group, so the image process goes too) and
+# started again from the beginning, up to TRIES times. Any other failure stops at once.
+with_retries() {  # LIMIT TRIES COMMAND
+  local limit=$1 tries=$2 command=$3
+  printf '%s' "{ for attempt in \$(seq 1 $tries); do timeout --kill-after=120 $limit $command; status=\$?; [ \$status -eq 0 ] && exit 0; if [ \$status -ne 124 ] && [ \$status -ne 137 ]; then exit \$status; fi; echo \"attempt \$attempt of $tries stopped after $limit (status \$status)\" >&2; done; exit 124; }"
+}
+
 # Submission time: archive_export_artifacts.sh checks that the outputs it packs are newer than this.
 [[ $DRY_RUN -eq 0 && $RESUME -eq 0 ]] && { date '+%Y-%m-%d %H:%M:%S'; git rev-parse HEAD; } > "$MARKER"
 if [[ $DRY_RUN -eq 0 && $REVIEWED_TRANSITION -eq 1 ]]; then
@@ -208,13 +221,16 @@ thr=$(submit fix_threshold main 1024G 20:00:00 "$feat" "scripts/run_threshold_st
 ridge=$(submit fix_ridge long 512G 24:00:00 "$casc" "scripts/run_ridge_penalty_sensitivity.py --env hpc --gold-scope combined $ORG --penalties 1,10,100" "fix_cascade")
 prev=$(submit fix_prev main 256G 16:00:00 "$casc" "scripts/run_prevalence_analysis.py --env hpc --scope combined $ORG --figure-format html --figure-format png --figure-format svg --figure-format pdf" "fix_cascade")
 mask=$(submit fix_masking main 256G 24:00:00 "$casc" "scripts/run_masking_experiment.py --env hpc $ORG --output-dir outputs/tables/combined/organisms/escherichia_coli/masking_experiment" "fix_cascade")
-rep=$(submit fix_report main 384G 08:00:00 "$prev:$train:$thr:$site_armd:$site_ecuh:$site_utsw" "scripts/check_publication_renderer.py && '$PY' scripts/run_reporting.py --env hpc --scope combined $ORG --figure-format html --figure-format png --figure-format svg --figure-format pdf --publication manuscripts --fail-on-missing-figures --hide-figure-titles" "fix_prev fix_training fix_threshold fix_site_armd fix_site_ecuh fix_site_utsw")
+# Normally 17 minutes; three attempts of at most 2 hours fit the 8-hour limit.
+rep=$(submit fix_report main 384G 08:00:00 "$prev:$train:$thr:$site_armd:$site_ecuh:$site_utsw" "scripts/check_publication_renderer.py && $(with_retries 2h 3 "'$PY' scripts/run_reporting.py --env hpc --scope combined $ORG --figure-format html --figure-format png --figure-format svg --figure-format pdf --publication manuscripts --fail-on-missing-figures --hide-figure-titles")" "fix_prev fix_training fix_threshold fix_site_armd fix_site_ecuh fix_site_utsw")
 # 64G ran out of memory on 27 October (peak about 67 GB).
 shap=$(submit fix_shap_figures main 256G 04:00:00 "$casc" "scripts/export_shap_figures.py --env hpc $ORG --hide-figure-titles" "fix_cascade")
 # Draws the six prediction figures and three prediction tables from the re-trained models' predictions.
 # It waits for the report: the report moves every figure already in the folder to _stale_figure_archive/
 # before drawing (on 27 October it moved these six), and the audit requires them to be newer than the report.
-pred=$(submit fix_pred_figures main 64G 02:00:00 "$rep:$train:$thr" "scripts/run_supplementary_prediction.py --env hpc $ORG --hide-figure-titles" "fix_report fix_training fix_threshold")
+# Normally about 2 minutes; three attempts of at most 30 minutes fit the 2-hour limit.
+# 128G as in submit_everything_hpc.sh, where this job completed on 17 October; 64G was never tried.
+pred=$(submit fix_pred_figures main 128G 02:00:00 "$rep:$train:$thr" "scripts/check_publication_renderer.py && $(with_retries 30m 3 "'$PY' scripts/run_supplementary_prediction.py --env hpc $ORG --hide-figure-titles")" "fix_report fix_training fix_threshold")
 # Year-by-year course of the validated patterns (tables, numbers and one figure); after the report for the
 # same reason as the prediction figures. Reads the gold pair table in batches (peak 4.2 GB, under a minute on the Mac).
 temp=$(submit fix_temporal main 64G 02:00:00 "$rep" "scripts/run_temporal_regimes.py --env hpc $ORG" "fix_report")

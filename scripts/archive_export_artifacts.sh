@@ -193,7 +193,7 @@ fi
 
 eskape="$(find data/artifacts/eskape_validation -name _SUCCESS.json 2>/dev/null | wc -l | tr -d ' ' || true)"
 if [[ "${eskape}" -ge "${ESKAPE_EXPECTED}" ]]; then pass "ESKAPE: ${eskape} finished targets"
-else fail "ESKAPE: ${eskape} of ${ESKAPE_EXPECTED} targets finished"; fi
+else fail "ESKAPE: ${eskape} of ${ESKAPE_EXPECTED} targets finished (paper 1's ESKAPE section needs all of them: run scripts/submit_pipeline_dag_hpc.sh --run-eskape, or pass --eskape-expected N for a different set)"; fi
 
 if [[ -f "${MARKER}" ]]; then
   pass "covariate re-run submitted $(head -1 "${MARKER}")"
@@ -379,7 +379,8 @@ markers="$(grep -c '^data/artifacts/eskape_validation/.*_SUCCESS.json$' "${manif
 if [[ "${markers}" -ge "${ESKAPE_EXPECTED}" ]]; then printf '  in archive  ESKAPE results (%s completion markers)\n' "${markers}"
 else printf '  MISSING     ESKAPE results (%s of %s completion markers)\n' "${markers}" "${ESKAPE_EXPECTED}" >&2; missing=1; fi
 if grep -q '^outputs/shap_explainability/.' "${manifest_path}"; then printf '  in archive  SHAP figures\n'
-else printf '  MISSING     SHAP figures\n' >&2; missing=1; fi
+elif [[ -f "${MARKER}" ]]; then printf '  MISSING     SHAP figures\n' >&2; missing=1
+else printf '  (no SHAP figures: not drawn by a full manuscripts run, and neither paper cites them)\n'; fi
 if [[ "${missing}" -eq 1 && "${ALLOW_INCOMPLETE}" -eq 0 ]]; then
   die "The archive lacks key files; do not use it."
 fi

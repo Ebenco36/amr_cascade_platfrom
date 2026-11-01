@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 import re
 import tempfile
+import threading
 from pathlib import Path
 from typing import Callable
 
@@ -19,6 +21,49 @@ from matplotlib import pyplot as plt
 # PRINT_FONT_SCALE is re-exported: print-geometry plotters size their marks with it.
 from amr_cascade_platform.visualization.report.plotly_print import PRINT_FONT_SCALE, prepare_for_print  # noqa: F401
 from amr_cascade_platform.visualization.report.figure_presentation import save_matplotlib, title_policy, without_plotly_headings
+
+logger = logging.getLogger(__name__)
+
+# Kaleido 0.2, the image engine on the cluster, keeps one browser process alive and waits for its
+# reply without a time limit. On 30 October 2026 one PDF never came back (the same figure had been
+# written in seconds three days earlier) and the report sat idle until its 8-hour job limit. One
+# image takes seconds, so an image still unwritten after IMAGE_TIMEOUT_SECONDS is stuck: the process
+# is killed, which ends the wait with an error, Kaleido starts a fresh one on the next call, and the
+# image is tried again. Kaleido 1 keeps no such process; images are then written as before.
+IMAGE_TIMEOUT_SECONDS = 600
+IMAGE_ATTEMPTS = 3
+
+
+def write_image_with_watchdog(figure: go.Figure, path: Path, **kwargs) -> None:
+    scope = pio.kaleido.scope
+    if scope is None or not hasattr(scope, "_proc"):
+        figure.write_image(path, **kwargs)
+        return
+    for attempt in range(1, IMAGE_ATTEMPTS + 1):
+        stalled = threading.Event()
+
+        def stop_stuck_process() -> None:
+            process = getattr(scope, "_proc", None)
+            if process is not None and process.poll() is None:
+                stalled.set()
+                process.kill()
+
+        timer = threading.Timer(IMAGE_TIMEOUT_SECONDS, stop_stuck_process)
+        timer.daemon = True
+        timer.start()
+        try:
+            figure.write_image(path, **kwargs)
+            return
+        except Exception:
+            if not stalled.is_set():
+                raise
+            logger.warning(
+                "Image export of %s made no progress for %d s (attempt %d of %d); Kaleido restarted.",
+                path, IMAGE_TIMEOUT_SECONDS, attempt, IMAGE_ATTEMPTS,
+            )
+        finally:
+            timer.cancel()
+    raise TimeoutError(f"Image export of {path} stalled {IMAGE_ATTEMPTS} times ({IMAGE_TIMEOUT_SECONDS} s each).")
 
 
 class PlotlyFigureExporter:
@@ -49,8 +94,8 @@ class PlotlyFigureExporter:
         if disable_mathjax:
             scope.mathjax = None
         try:
-            figure.write_image(
-                path, format=fmt, width=int(figure.layout.width),
+            write_image_with_watchdog(
+                figure, path, format=fmt, width=int(figure.layout.width),
                 height=int(figure.layout.height), scale=2,
             )
         finally:
