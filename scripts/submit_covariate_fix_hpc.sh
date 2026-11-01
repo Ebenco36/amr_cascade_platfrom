@@ -53,7 +53,7 @@ reviewed_eligibility_transition_allowed() {
   [[ "$original" == "9077e93d9964253eac5fd13d39fb1dc6f86631c3" ]] || return 1
   git merge-base --is-ancestor "$reviewed" HEAD || return 1
   git diff --quiet "$reviewed" HEAD -- src scripts configs pyproject.toml requirements-hpc.txt \
-    ':(exclude)scripts/submit_covariate_fix_hpc.sh' ':(exclude)src/amr_cascade_platform/visualization/report/plotly_exporter.py' ':(exclude)scripts/archive_export_artifacts.sh'
+    ':(exclude)scripts/submit_covariate_fix_hpc.sh' ':(exclude)src/amr_cascade_platform/visualization/report/plotly_exporter.py' ':(exclude)scripts/archive_export_artifacts.sh' ':(exclude)src/amr_cascade_platform/reporting/builders/temporal_regimes.py'
 }
 
 cd "$(dirname "$0")/.."
@@ -90,8 +90,10 @@ if [[ $RESUME -eq 1 ]]; then
   active="$(squeue -h -u "$USER" -o '%j' 2>/dev/null | grep '^fix_' | sort | uniq -c | tr -s ' ' || true)"
   [[ -z "$active" ]] || { echo "--resume: fix_ jobs are still queued or running:$active. Wait for them, or cancel stuck ones, then resume." >&2; exit 1; }
   first_commit="$(sed -n 2p "$MARKER")"
-  # Re-run stages must run the same code as the stages that completed.
-  if ! git diff --quiet "$first_commit" HEAD -- src scripts configs pyproject.toml requirements-hpc.txt ':(exclude)scripts/submit_covariate_fix_hpc.sh' ':(exclude)src/amr_cascade_platform/visualization/report/plotly_exporter.py' ':(exclude)scripts/archive_export_artifacts.sh'; then
+  # Re-run stages must run the same code as the stages that completed. Excepted: this script, the export,
+  # the image watchdog, and temporal_regimes.py (statsmodels import replaced by SciPy's identical BH on
+  # 1 November; it feeds only fix_temporal, which had never completed).
+  if ! git diff --quiet "$first_commit" HEAD -- src scripts configs pyproject.toml requirements-hpc.txt ':(exclude)scripts/submit_covariate_fix_hpc.sh' ':(exclude)src/amr_cascade_platform/visualization/report/plotly_exporter.py' ':(exclude)scripts/archive_export_artifacts.sh' ':(exclude)src/amr_cascade_platform/reporting/builders/temporal_regimes.py'; then
     if [[ $ACCEPT_REVIEWED_ELIGIBILITY_UPDATE -eq 1 ]] && reviewed_eligibility_transition_allowed "$first_commit"; then
       REVIEWED_TRANSITION=1
       echo "Accepted explicit reviewed eligibility/provenance transition; saved-input validation checks passed. Original marker is unchanged." >&2
@@ -109,20 +111,28 @@ if [[ $RESUME -eq 1 ]]; then
     echo "ERROR: Slurm accounting query failed. Nothing submitted." >&2
     exit 1
   fi
-  report_state="$(printf '%s\n' "$ACCOUNTING" | awk -F'|' '$2 == "fix_report" && $1 ~ /^[0-9]+$/ { print }' | sort -t'|' -k1,1n | tail -1 | cut -d'|' -f3)"
+  newest_state() {  # STAGE: state of its newest recorded job ("" if none)
+    printf '%s\n' "$ACCOUNTING" | awk -F'|' -v name="$1" '$2 == name && $1 ~ /^[0-9]+$/ { print }' | sort -t'|' -k1,1n | tail -1 | cut -d'|' -f3
+  }
   for stage in ${resume_names//,/ }; do
     if ! printf '%s\n' "$ACCOUNTING" | awk -F'|' -v name="$stage" '$2 == name && $1 ~ /^[0-9]+$/ && $3 != "" { found=1 } END { exit !found }'; then
-      # Never-started cancelled descendants may be absent from accounting.
-      # A recorded reporting failure guarantees these four stages will be
-      # resubmitted through explicit dependencies, not inferred as completed.
-      case "$stage:$report_state" in
-        fix_pred_figures:FAILED|fix_temporal:FAILED|fix_tables:FAILED|fix_audit:FAILED|\
-        fix_pred_figures:CANCELLED*|fix_temporal:CANCELLED*|fix_tables:CANCELLED*|fix_audit:CANCELLED*|\
-        fix_pred_figures:OUT_OF_MEMORY|fix_temporal:OUT_OF_MEMORY|fix_tables:OUT_OF_MEMORY|fix_audit:OUT_OF_MEMORY|\
-        fix_pred_figures:TIMEOUT|fix_temporal:TIMEOUT|fix_tables:TIMEOUT|fix_audit:TIMEOUT)
-          echo "  accounting unavailable for $stage; will rebuild after recorded $report_state fix_report." >&2
-          continue ;;
+      # Never-started cancelled descendants may be absent from accounting. A recorded failure of a
+      # reporting stage they wait for guarantees they are resubmitted through explicit dependencies,
+      # not inferred as completed.
+      case "$stage" in
+        fix_pred_figures|fix_temporal) waits_for="fix_report" ;;
+        fix_tables) waits_for="fix_report fix_pred_figures fix_temporal" ;;
+        fix_audit) waits_for="fix_report fix_pred_figures fix_temporal fix_tables" ;;
+        *) waits_for="" ;;
       esac
+      blocked=""
+      for u in $waits_for; do
+        case "$(newest_state "$u")" in FAILED|CANCELLED*|OUT_OF_MEMORY|TIMEOUT) blocked="$u $(newest_state "$u")"; break ;; esac
+      done
+      if [[ -n "$blocked" ]]; then
+        echo "  accounting unavailable for $stage; will rebuild after recorded ${blocked#* } ${blocked%% *}." >&2
+        continue
+      fi
       echo "ERROR: no usable accounting record for $stage since $SINCE. Nothing submitted; do not assume completed work is missing." >&2
       exit 1
     fi

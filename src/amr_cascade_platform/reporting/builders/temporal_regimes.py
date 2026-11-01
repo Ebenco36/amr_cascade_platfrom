@@ -23,8 +23,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pyarrow.dataset as ds
-from scipy.stats import chi2
-from statsmodels.stats.multitest import multipletests
+from scipy.stats import chi2, false_discovery_control
 
 MIN_BRANCH = 10        # episode-pair rows per upstream branch for an evaluable site-year
 MIN_OBSERVED = 10      # rows with the downstream antibiotic observed (both branches) for an evaluable site-year
@@ -158,8 +157,8 @@ def summarise(years: pd.DataFrame) -> pd.DataFrame:
     followed = summary["evaluable_years"].ge(MIN_YEARS) & summary["year_heterogeneity_p"].notna()
     summary["year_heterogeneity_q_value"] = np.nan
     if followed.any():
-        summary.loc[followed, "year_heterogeneity_q_value"] = multipletests(
-            summary.loc[followed, "year_heterogeneity_p"], method="fdr_bh")[1]
+        summary.loc[followed, "year_heterogeneity_q_value"] = false_discovery_control(
+            summary.loc[followed, "year_heterogeneity_p"].to_numpy(dtype=float), method="bh")
     summary["varies_beyond_sampling"] = summary["year_heterogeneity_q_value"].lt(FDR)
     return summary
 

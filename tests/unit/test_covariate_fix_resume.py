@@ -57,12 +57,15 @@ for arg in "$@"; do
 done
 for name in ${names//,/ }; do
     [[ "$name" != "${MISSING_STAGE:-}" ]] || continue
+    [[ " ${MISSING_STAGES:-} " != *" $name "* ]] || continue
     if [[ "${MISSING_DESCENDANTS:-0}" == 1 ]]; then
         case "$name" in fix_pred_figures|fix_temporal|fix_tables|fix_audit) continue ;; esac
     fi
     case "$name" in
       fix_report) value=${REPORT_STATE:-FAILED} ;;
-      fix_pred_figures|fix_temporal|fix_tables|fix_audit) value=CANCELLED ;;
+      fix_pred_figures) value=${PRED_STATE:-CANCELLED} ;;
+      fix_temporal) value=${TEMPORAL_STATE:-CANCELLED} ;;
+      fix_tables|fix_audit) value=CANCELLED ;;
       *) value=COMPLETED ;;
     esac
     start=2026-10-29T09:00:00
@@ -203,3 +206,26 @@ def test_missing_descendants_without_failed_report_still_stops(sandbox):
     )
     assert result.returncode != 0
     assert not (root / "submissions.jsonl").exists()
+
+
+def test_missing_descendants_after_failed_temporal_rebuild_only_the_failed_branch(sandbox):
+    # 1 November: report and prediction figures completed, fix_temporal failed (missing module),
+    # Slurm cancelled fix_tables and fix_audit before they started, so accounting has no record of them.
+    root, script, env = sandbox
+    env.update(REPORT_STATE="COMPLETED", PRED_STATE="COMPLETED", TEMPORAL_STATE="FAILED",
+               MISSING_STAGES="fix_tables fix_audit")
+    result = subprocess.run(
+        ["bash", str(script), "--resume", "--accept-reviewed-eligibility-update"],
+        env=env, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "accounting unavailable for fix_tables; will rebuild after recorded FAILED fix_temporal." in result.stderr
+    assert "kept   fix_report (completed)" in result.stderr
+    assert "kept   fix_pred_figures (completed)" in result.stderr
+    assert "re-run fix_temporal (last job: FAILED)" in result.stderr
+    submissions = [json.loads(line) for line in (root / "submissions.jsonl").read_text().splitlines()]
+    assert [next(a for a in args if a.startswith("--job-name=")) for args in submissions] == [
+        "--job-name=fix_temporal", "--job-name=fix_tables", "--job-name=fix_audit"]
+    assert not any(a.startswith("--dependency") for a in submissions[0])
+    assert "--dependency=afterok:9001" in submissions[1]
+    assert "--dependency=afterok:9002" in submissions[2]
