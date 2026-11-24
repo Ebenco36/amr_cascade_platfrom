@@ -2,20 +2,7 @@
 # Covariate-adjusted models for the patterns validated in blood cultures (paper 1, Supplementary Note "Blood-culture analysis").
 # Fits the primary analysis's pair-specific adjusted logistic models to the 188 blood-validated pairs, reusing the blood
 # validation run made on the Mac (copied to this checkout, see below), with the final run's harmonised covariate tables.
-#
-# Before submitting:
-#   1. On the Mac, copy the blood run into this checkout (manuscript_edit_log is not in git):
-#        rsync -av data/blood_check/blood_run/ \
-#          <cluster>:<checkout>/data/blood_check/blood_run/
-#   2. Commit and push scripts/run_blood_culture_validation.py and this script; git pull on the cluster
-#      (only when no other job of this checkout is queued or running).
-#
-#   bash scripts/submit_blood_adjustment_hpc.sh --dry-run   # checks + print the sbatch command
-#   bash scripts/submit_blood_adjustment_hpc.sh             # checks + submit
-#
-# Output: data/blood_check/blood_adjusted/ (adjusted_results.parquet,
-# adjusted_direction_summary.json, opposite_direction_adjusted.csv, the comparison CSV); log in logs/blood_adjustment_<job>.out.
-# Copy that folder back to the Mac.
+
 set -euo pipefail
 DRY_RUN=0
 for arg in "$@"; do
