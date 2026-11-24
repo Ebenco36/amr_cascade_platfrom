@@ -5,15 +5,15 @@
 #
 # Before submitting:
 #   1. On the Mac, copy the blood run into this checkout (manuscript_edit_log is not in git):
-#        rsync -av manuscript_edit_log/2026-11-20/blood_check/blood_run/ \
-#          <cluster>:<checkout>/manuscript_edit_log/2026-11-20/blood_check/blood_run/
+#        rsync -av data/blood_check/blood_run/ \
+#          <cluster>:<checkout>/data/blood_check/blood_run/
 #   2. Commit and push scripts/run_blood_culture_validation.py and this script; git pull on the cluster
 #      (only when no other job of this checkout is queued or running).
 #
 #   bash scripts/submit_blood_adjustment_hpc.sh --dry-run   # checks + print the sbatch command
 #   bash scripts/submit_blood_adjustment_hpc.sh             # checks + submit
 #
-# Output: manuscript_edit_log/2026-11-20/blood_check/blood_adjusted/ (adjusted_results.parquet,
+# Output: data/blood_check/blood_adjusted/ (adjusted_results.parquet,
 # adjusted_direction_summary.json, opposite_direction_adjusted.csv, the comparison CSV); log in logs/blood_adjustment_<job>.out.
 # Copy that folder back to the Mac.
 set -euo pipefail
@@ -27,8 +27,8 @@ done
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
 PY="$ROOT/.venv/bin/python"
-BLOOD_RUN="manuscript_edit_log/2026-11-20/blood_check/blood_run"
-OUT="manuscript_edit_log/2026-11-20/blood_check/blood_adjusted"
+BLOOD_RUN="data/blood_check/blood_run"
+OUT="data/blood_check/blood_adjusted"
 mkdir -p logs
 
 # The job must use exactly the data of the final run (archive 20261101_164213): check before submitting.

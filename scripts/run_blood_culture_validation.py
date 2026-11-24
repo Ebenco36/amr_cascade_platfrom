@@ -30,7 +30,7 @@ The script stops if any site's harmonised covariate tables are missing.
 
 Usage (about 3.5 hours with 12 workers on an Apple M-series laptop):
     .venv/bin/python scripts/run_blood_culture_validation.py --run-root export_archives/hpc_final \\
-        --out-dir manuscript_edit_log/2026-11-20/blood_check/blood_run --workers 12
+        --out-dir data/blood_check/blood_run --workers 12
 Validation results are seeded per pair, so they do not depend on the number of workers. ``--max-pairs N`` validates only
 the first N retained pairs, for a quick check of the set-up (its Benjamini-Hochberg step then covers those N pairs only).
 """
