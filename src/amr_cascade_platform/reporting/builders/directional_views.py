@@ -212,6 +212,56 @@ def coverage_summary(links: pd.DataFrame, all_edges: pd.DataFrame, direction: st
     }
 
 
+def observation_probability_rows(edges: pd.DataFrame, direction: str) -> pd.DataFrame:
+    """All validated pairs, ranked by absolute *raw* observation difference.
+
+    Counts, not continuity-corrected probabilities, define the plotted dots.
+    ER and its interval remain the stored estimates. Invalid counts or stale
+    stored raw probabilities fail rather than being drawn as zero observations.
+    Input drug names should already be canonicalised by the caller.
+    """
+    _require_direction(direction)
+    pool = validated_edges(edges)
+    pool = pool.loc[pool.direction == direction].copy()
+    count_columns = [f"{branch}_{suffix}" for branch in ("resistant", "susceptible")
+                     for suffix in ("tested_n", "support_n")]
+    if not pool.empty:
+        missing = set(count_columns) - set(pool.columns)
+        if missing:
+            raise ValueError(f"Observation probability plot needs saved branch counts: {sorted(missing)}")
+    for column in count_columns:
+        if column not in pool:
+            pool[column] = pd.Series(dtype=float)
+        pool[column] = pd.to_numeric(pool[column], errors="coerce")
+        values = pool[column]
+        if (~np.isfinite(values) | (values < 0) | (values != np.floor(values))).any():
+            raise ValueError(f"Invalid episode counts in {column}")
+    for branch in ("resistant", "susceptible"):
+        tested, support = pool[f"{branch}_tested_n"], pool[f"{branch}_support_n"]
+        if ((support <= 0) | (tested > support)).any():
+            raise ValueError(f"Invalid {branch} branch: require 0 <= tested <= support and support > 0")
+        probability = tested / support
+        saved = f"{branch}_downstream_test_probability"
+        if saved in pool and not pool.empty:
+            original = pd.to_numeric(pool[saved], errors="coerce")
+            if not np.isclose(original, probability, atol=1e-8, rtol=1e-6).all():
+                raise ValueError(f"Saved {saved} does not match its episode counts")
+        pool[f"{branch}_observed_pct"] = 100 * probability
+    pool["difference_pp"] = pool.resistant_observed_pct - pool.susceptible_observed_pct
+    pool["absolute_difference_pp"] = pool.difference_pp.abs()
+    pool["raw_direction_agrees_with_er"] = np.where(
+        direction == ESCALATION, pool.difference_pp > 0, pool.difference_pp < 0,
+    )
+    for column in ("er_ci_lower", "er_ci_upper"):
+        if column not in pool:
+            pool[column] = np.nan
+    pool = pool.sort_values(
+        ["absolute_difference_pp"] + PAIR_KEY, ascending=[False, True, True], kind="mergesort",
+    ).reset_index(drop=True)
+    pool["rank_by_absolute_difference"] = np.arange(1, len(pool) + 1)
+    return pool
+
+
 def matrix_frame(edges: pd.DataFrame, direction: str, order: list[str]) -> pd.DataFrame:
     """Long table of the cells of one direction's upstream x downstream matrix.
 

@@ -131,6 +131,7 @@ paper1_detection_validation/
 paper2_prevalence_surveillance/
 manuscript_edit_log/
 export_archives/
+export_archives_old/
 
 data_availability_annual_sensitivity/
 data_availability_joint_sensitivity/
@@ -155,3 +156,10 @@ eskape_only_20261023_101341.tar.gz.sha256
 
 Thanksgiving.md
 tuttt.ipynb
+
+abstract_figures.ipynb
+donut_51_1.pdf
+donut_51_1.svg
+figures/
+testing.ipynb
+scripts/observation_probabilities_README.md

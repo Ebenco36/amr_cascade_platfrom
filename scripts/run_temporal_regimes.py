@@ -25,6 +25,7 @@ matplotlib.use("Agg")
 import pandas as pd  # noqa: E402
 from matplotlib import pyplot as plt  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
+from matplotlib.patches import Patch  # noqa: E402
 
 from amr_cascade_platform.cli.main import build_context  # noqa: E402
 from amr_cascade_platform.core.utils.scopes import scoped_output_dir  # noqa: E402
@@ -36,6 +37,7 @@ from amr_cascade_platform.visualization.report.figure_presentation import save_m
 FIGURE_PATTERNS = tr.EXAMPLE_PATTERNS
 FIGURE_STEM = "figure_temporal_regimes"
 RESISTANT, SUSCEPTIBLE, GRID = "#2a78d6", "#eb6834", "#e6e9ee"  # validated categorical slots 1 and 2
+GAP, INK, MUTED = "#dfe4ea", "#1f2933", "#52606d"  # neutral gap fill: the line colours show which share is higher
 
 
 def _display(resolver: AntibioticClassificationResolver, label: str) -> str:
@@ -50,36 +52,46 @@ def draw(years: pd.DataFrame, sites: list[str], resolver: AntibioticClassificati
         raise SystemExit(f"Figure patterns not among the validated patterns: {missing}")
     evaluable = years.loc[years["evaluable"]]
     span = range(int(evaluable["year"].min()), int(evaluable["year"].max()) + 1)
-    fig, axes = plt.subplots(len(FIGURE_PATTERNS), len(sites), figsize=(7.2, 1.55 * len(FIGURE_PATTERNS) + 0.9),
-                             sharex=True, sharey=True, squeeze=False)
+    # Patterns in rows, sites in columns, one shared scale. The two shares are thin lines and the gap between them,
+    # is shaded: wide where the pattern is present, closed where it is absent.
+    fig, axes = plt.subplots(len(FIGURE_PATTERNS), len(sites), figsize=(7.2, 1.5 * len(FIGURE_PATTERNS) + 0.7),
+                             sharex=True, sharey=True, squeeze=False, gridspec_kw={"hspace": 0.62, "wspace": 0.12})
+    fig.subplots_adjust(left=0.08, right=0.99, top=0.92, bottom=0.08)
     for row, (up, down) in enumerate(FIGURE_PATTERNS):
         for col, site in enumerate(sites):
             ax = axes[row][col]
             cells = evaluable.loc[evaluable["upstream_antibiotic"].eq(up) & evaluable["downstream_antibiotic"].eq(down)
                                   & evaluable["source_site"].eq(site)].set_index("year").reindex(span)
-            ax.plot(cells.index, cells["pR"], color=RESISTANT, lw=1.6, marker="o", ms=3.2)
-            ax.plot(cells.index, cells["pS"], color=SUSCEPTIBLE, lw=1.6, ls="--", marker="o", ms=3.2, mfc="white")
-            ax.set_ylim(-0.04, 1.04)
-            ax.set_yticks([0, 0.5, 1])
-            ax.set_yticklabels(["0%", "50%", "100%"], fontsize=7.5)
+            if row == 0:
+                ax.set_title(site_label(site), fontsize=9, fontweight="bold", color=INK, pad=24)
+            if col == 0:
+                ax.text(0.0, 1.07, f"{_display(resolver, up)} → {_display(resolver, down)}", transform=ax.transAxes,
+                        ha="left", va="bottom", fontsize=8.5, color=INK)
+            if cells["pR"].isna().all():  # no evaluable year: a note in place of an empty frame
+                ax.text(0.5, 0.5, "No year with enough episodes", transform=ax.transAxes, ha="center", va="center",
+                        fontsize=7.5, color=MUTED)
+                for spine in ax.spines.values():
+                    spine.set_visible(False)
+                ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=row == len(FIGURE_PATTERNS) - 1)
+                continue
+            ax.fill_between(cells.index, cells["pR"], cells["pS"], color=GAP, lw=0)
+            ax.plot(cells.index, cells["pR"], color=RESISTANT, lw=1.5)
+            ax.plot(cells.index, cells["pS"], color=SUSCEPTIBLE, lw=1.5)
             ax.grid(axis="y", color=GRID, lw=0.6)
-            ax.tick_params(axis="x", labelsize=7.5)
+            ax.set_axisbelow(True)
             for spine in ("top", "right"):
                 ax.spines[spine].set_visible(False)
-            if row == 0:
-                ax.text(0.5, 1.30, site_label(site), transform=ax.transAxes, ha="center", fontsize=9, fontweight="bold")
-            if col == 0:
-                ax.text(0.0, 1.06, f"{_display(resolver, up)} → {_display(resolver, down)}", transform=ax.transAxes,
-                        ha="left", fontsize=8.5)
-            if cells["pR"].isna().all():
-                ax.text(0.5, 0.5, "no evaluable year", transform=ax.transAxes, ha="center", va="center", fontsize=7.5, color="#6b7280")
-    for ax in axes[-1]:
-        ax.set_xticks([y for y in span if y % 5 == 0])
-    fig.supylabel("Share of episodes with the downstream antibiotic observed", fontsize=8.5)
-    fig.legend(handles=[Line2D([], [], color=RESISTANT, lw=1.6, marker="o", ms=3.2, label="Upstream result resistant"),
-                        Line2D([], [], color=SUSCEPTIBLE, lw=1.6, ls="--", marker="o", ms=3.2, mfc="white", label="Upstream result susceptible")],
-               loc="lower center", ncol=2, frameon=False, fontsize=8.5, bbox_to_anchor=(0.5, -0.01))
-    fig.tight_layout(rect=(0.02, 0.04, 1, 0.96), h_pad=2.0)
+            for spine in ("left", "bottom"):
+                ax.spines[spine].set_color(MUTED)
+            ax.tick_params(length=0, labelsize=7.5, colors=MUTED)
+    axes[0][0].set_ylim(-0.04, 1.04)
+    axes[0][0].set_yticks([0, 1], ["0%", "100%"])
+    axes[0][0].set_xticks([y for y in span if y % 10 == 0])
+    fig.supylabel("Share of episodes with the downstream antibiotic observed", fontsize=8.5, color=INK, x=0.012)
+    fig.legend(handles=[Line2D([], [], color=RESISTANT, lw=1.5, label="After a resistant upstream result"),
+                        Line2D([], [], color=SUSCEPTIBLE, lw=1.5, label="After a susceptible upstream result"),
+                        Patch(color=GAP, label="Difference between the two shares")],
+               loc="lower center", ncol=3, frameon=False, fontsize=8, bbox_to_anchor=(0.53, -0.005), handlelength=1.6)
     paths = []
     for fmt in ("pdf", "png", "svg"):
         path = stem.with_suffix(f".{fmt}")

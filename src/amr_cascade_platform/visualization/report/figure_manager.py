@@ -10,6 +10,7 @@ from amr_cascade_platform.core.config.config_models import Settings
 from amr_cascade_platform.core.paths.path_manager import PathManager
 from amr_cascade_platform.visualization.report.antibiotic_classification import AntibioticClassificationResolver
 from amr_cascade_platform.visualization.report.plotly_exporter import PlotlyFigureExporter
+from amr_cascade_platform.visualization.report.paired_observation_plotter import PairedObservationPlotter
 from amr_cascade_platform.reporting.builders import directional_views as dv
 from amr_cascade_platform.visualization.report.directional_plotters import (
     AdjustmentConcordancePlotter,
@@ -72,6 +73,7 @@ class FigureManager:
             path_manager.project_root / "data" / "antibiotic_classification_complete.csv"
         )
         self._classification = classification
+        self._paired_observation_plotter = PairedObservationPlotter(exporter, settings.reporting.plotly_template)
         self._directional_sankey_plotter = DirectionalSankeyPlotter(
             exporter=exporter, template=settings.reporting.plotly_template, width=settings.reporting.image_width,
             classification=classification,
@@ -312,13 +314,15 @@ class FigureManager:
         sankey_top_n: int = 30,
         network_top_n: int = 60,
         forest_top_n: int = 20,
+        probability_top_n: int = 10,
     ) -> dict[str, Path]:
         """Escalation and suppression cascade figures, always as separate files, never pooled.
 
         Produces, for each of ``escalation``/``suppression``: a Sankey, an
         upstream x downstream matrix, a directed network, a forest of the
-        strongest CI-bearing effects, and an AWaRe-tier heatmap -- ten files
-        per tier. See `reporting.builders.directional_views` for why pooling
+        strongest CI-bearing effects, an AWaRe-tier heatmap and a paired
+        observation-probability plot with a full ranked CSV per direction.
+        See `reporting.builders.directional_views` for why pooling
         the two directions into one figure is never done here.
         """
         outputs: dict[str, Path] = {}
@@ -332,6 +336,11 @@ class FigureManager:
         for direction in dv.DIRECTIONS:
             n_direction = int((validated.direction == direction).sum())
             displayed = dv.display_selection(validated, direction, min_fold)
+
+            outputs.update(self._paired_observation_plotter.export(
+                validated, direction, output_dir / f"figure_{direction}_observation_probabilities_{tier}",
+                formats, top_n=probability_top_n,
+            ))
 
             links = dv.bipartite_links(displayed, direction, top_n=sankey_top_n)
             coverage = dv.coverage_summary(links, displayed, direction)

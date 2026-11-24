@@ -48,15 +48,17 @@ def figure_manager() -> FigureManager:
     return FigureManager(settings, path_manager)
 
 
-def test_directional_suite_produces_exactly_five_file_types_per_direction(figure_manager, tmp_path):
+def test_directional_suite_produces_six_figures_and_probability_data_per_direction(figure_manager, tmp_path):
     outputs = figure_manager.export_directional_suite(_edge_report(), tmp_path, ("png",), tier="validated")
-    kinds = {"sankey", "matrix", "network", "forest", "aware"}
+    kinds = {"sankey", "matrix", "network", "forest", "aware", "observation_probabilities"}
     for direction in ("escalation", "suppression"):
         for kind in kinds:
             expected = f"figure_{direction}_{kind}_validated.png"
             assert expected in outputs, f"missing {expected}; got {sorted(outputs)}"
             assert outputs[expected].exists() and outputs[expected].stat().st_size > 0
-    assert len(outputs) == 10
+    assert len(outputs) == 14
+    for direction in ("escalation", "suppression"):
+        assert f"figure_{direction}_observation_probabilities_validated.csv" in outputs
 
 
 def test_directional_suite_is_empty_safe(figure_manager, tmp_path):
@@ -88,21 +90,21 @@ def test_empty_directional_matrix_has_no_collapsed_axes(figure_manager, monkeypa
 
 def test_directional_suite_handles_one_direction_only(figure_manager, tmp_path):
     # Matches the codebase's existing convention (see _empty_figure() in the older
-    # pooled plotters): a direction with zero validated edges still gets all five
+    # pooled plotters): a direction with zero validated edges still gets all six
     # files, each a real, non-empty "no data" placeholder -- never silently
     # missing, so a downstream \includegraphics never hits a nonexistent file.
     escalation_only = _edge_report(n_escalation=4, n_suppression=0)
     outputs = figure_manager.export_directional_suite(escalation_only, tmp_path, ("png",), tier="validated")
-    assert len(outputs) == 10
-    assert sum(name.startswith("figure_escalation_") for name in outputs) == 5
-    assert sum(name.startswith("figure_suppression_") for name in outputs) == 5
+    assert len(outputs) == 14
+    assert sum(name.startswith("figure_escalation_") for name in outputs) == 7
+    assert sum(name.startswith("figure_suppression_") for name in outputs) == 7
     assert all(path.exists() and path.stat().st_size > 0 for path in outputs.values())
 
 
 def test_directional_suite_robust_tier_only_keeps_robust_edges(figure_manager, tmp_path):
     edges = _edge_report(n_escalation=4, n_suppression=0)  # two robust, two supported
     outputs = figure_manager.export_directional_suite(edges, tmp_path, ("png",), tier="robust")
-    assert len(outputs) == 10  # placeholders for suppression and for the supported-only escalation slice
+    assert len(outputs) == 14  # includes CSVs and empty-direction placeholders
     assert all(path.exists() and path.stat().st_size > 0 for path in outputs.values())
 
 

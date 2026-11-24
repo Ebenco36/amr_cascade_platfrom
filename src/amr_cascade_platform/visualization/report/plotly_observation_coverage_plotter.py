@@ -298,8 +298,8 @@ class PlotlyObservationCoveragePlotter:
                          showgrid=True, gridcolor=_GRID, gridwidth=g.px(1.0), zeroline=False,
                          tickfont={"size": _FONT_LABEL, "color": _MUTED})
         fig.update_xaxes(title={"text": X_TITLE, "font": {"size": _FONT_LABEL, "color": _TEXT}}, row=2, col=1)
-        for text, yref in (("<b>A</b>  All antibiotics", "y domain"),
-                           ("<b>B</b>  By antibiotic, grouped by WHO AWaRe category", "y2 domain")):
+        for text, yref in (("<b>a</b>  All antibiotics", "y domain"),  # npj: lower-case bold panel labels
+                           ("<b>b</b>  By antibiotic, grouped by WHO AWaRe category", "y2 domain")):
             fig.add_annotation(x=0, xref="paper", y=1.0, yref=yref, yanchor="bottom", xanchor="left", yshift=g.px(8),
                                showarrow=False, text=text, font={"size": _FONT_HEADING, "color": _TEXT, "family": _FONT})
         self._frame(fig, g, height, TITLE, self._MARGIN, legends)
