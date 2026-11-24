@@ -176,3 +176,8 @@ scripts/build_supplementary_tables.py
 scripts/audit_paper1_outputs.py
 scripts/run_publication_readiness_audit.py
 scripts/run_supplementary_prediction.py
+# Blood-culture working files: only the blood run's results (input of scripts/submit_blood_adjustment_hpc.sh) are pushed.
+data/blood_check/*
+!data/blood_check/blood_run/
+data/blood_check/blood_run/*
+!data/blood_check/blood_run/*.parquet
