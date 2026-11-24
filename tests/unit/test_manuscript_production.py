@@ -1,3 +1,7 @@
+import pathlib as _pathlib
+import pytest as _pytest
+if not (_pathlib.Path(__file__).resolve().parents[2] / "scripts" / "audit_paper1_outputs.py").exists():
+    _pytest.skip("manuscript tooling (scripts/audit_paper1_outputs.py) is not in this checkout", allow_module_level=True)
 import importlib.util
 import json
 import os

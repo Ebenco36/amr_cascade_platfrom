@@ -240,12 +240,21 @@ shap=$(submit fix_shap_figures main 256G 04:00:00 "$casc" "scripts/export_shap_f
 # before drawing (on 27 October it moved these six), and the audit requires them to be newer than the report.
 # Normally about 2 minutes; three attempts of at most 30 minutes fit the 2-hour limit.
 # 128G as in submit_everything_hpc.sh, where this job completed on 17 October; 64G was never tried.
-pred=$(submit fix_pred_figures main 128G 02:00:00 "$rep:$train:$thr" "scripts/check_publication_renderer.py && $(with_retries 30m 3 "'$PY' scripts/run_supplementary_prediction.py --env hpc $ORG --hide-figure-titles")" "fix_report fix_training fix_threshold")
+pred=""; pred_name=""
+if [[ -f scripts/run_supplementary_prediction.py ]]; then
+  pred_name="fix_pred_figures"
+  pred=$(submit fix_pred_figures main 128G 02:00:00 "$rep:$train:$thr" "scripts/check_publication_renderer.py && $(with_retries 30m 3 "'$PY' scripts/run_supplementary_prediction.py --env hpc $ORG --hide-figure-titles")" "fix_report fix_training fix_threshold")
+else echo "  skipped fix_pred_figures (scripts/run_supplementary_prediction.py is not in this checkout)" >&2; fi
 # Year-by-year course of the validated patterns (tables, numbers and one figure); after the report for the
 # same reason as the prediction figures. Reads the gold pair table in batches (peak 4.2 GB, under a minute on the Mac).
 temp=$(submit fix_temporal main 64G 02:00:00 "$rep" "scripts/run_temporal_regimes.py --env hpc $ORG" "fix_report")
-tabs=$(submit fix_tables main 64G 02:00:00 "$rep:$ridge:$shap:$pred:$mask:$temp" "scripts/build_supplementary_tables.py --env hpc $ORG --publication manuscripts" "fix_report fix_ridge fix_shap_figures fix_pred_figures fix_masking fix_temporal")
-audit=$(submit fix_audit main 8G 00:30:00 "$tabs:$dsum" "scripts/audit_paper1_outputs.py --env hpc $ORG --publication manuscripts --refresh-marker '$ROOT/$MARKER'" "fix_tables fix_dataset_summary")
+tabs=""; audit=""
+if [[ -f scripts/build_supplementary_tables.py ]]; then
+  tabs=$(submit fix_tables main 64G 02:00:00 "$rep:$ridge:$shap:$pred:$mask:$temp" "scripts/build_supplementary_tables.py --env hpc $ORG --publication manuscripts" "fix_report fix_ridge fix_shap_figures $pred_name fix_masking fix_temporal")
+else echo "  skipped fix_tables (scripts/build_supplementary_tables.py is not in this checkout)" >&2; fi
+if [[ -f scripts/audit_paper1_outputs.py && -f scripts/build_supplementary_tables.py ]]; then
+  audit=$(submit fix_audit main 8G 00:30:00 "$tabs:$dsum" "scripts/audit_paper1_outputs.py --env hpc $ORG --publication manuscripts --refresh-marker '$ROOT/$MARKER'" "fix_tables fix_dataset_summary")
+else echo "  skipped fix_audit (manuscript tooling is not in this checkout)" >&2; fi
 
 echo "Submitted (empty = kept): re-clean $reclean, harmonise $harm, site cascades $site_armd/$site_ecuh/$site_utsw, dataset summary $dsum, features $feat, training $train, threshold $thr, cascade $casc, ridge $ridge, prevalence $prev, masking $mask, report $rep, SHAP figures $shap, prediction figures $pred, year-by-year $temp, tables $tabs, audit $audit"
 echo "Watch with: squeue -u \$USER    Logs: logs/fix_*_<jobid>.out"

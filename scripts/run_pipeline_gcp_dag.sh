@@ -533,7 +533,9 @@ for raw_organism in "${ORGANISMS[@]}"; do
   fi
 
   # Stage 11: Supplementary prediction figures/tables ─────────────────────────
-  if [[ "${RUN_SUPP}" -eq 1 ]]; then
+  if [[ "${RUN_SUPP}" -eq 1 && ! -f scripts/run_supplementary_prediction.py ]]; then
+    log "SKIP supplementary prediction ${organism}: scripts/run_supplementary_prediction.py is not in this checkout"
+  elif [[ "${RUN_SUPP}" -eq 1 ]]; then
     if should_run "${training_dirty}" supp_prediction_ready "${organism}"; then
       run_task "supplementary prediction ${organism}" \
         "${PYTHON}" scripts/run_supplementary_prediction.py \

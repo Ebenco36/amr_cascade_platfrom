@@ -11,6 +11,7 @@ import pytest
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts/submit_covariate_fix_hpc.sh"
 ORIGINAL = "9077e93d9964253eac5fd13d39fb1dc6f86631c3"
 REVIEWED = "d10dba23baa146709445cf66244c6f731c45fc75"
+MANUSCRIPT_TOOLING = ("run_supplementary_prediction.py", "build_supplementary_tables.py", "audit_paper1_outputs.py")
 
 
 def executable(path, text):
@@ -24,6 +25,10 @@ def sandbox(tmp_path):
     script = tmp_path / "scripts/submit_covariate_fix_hpc.sh"
     script.parent.mkdir()
     script.write_text(SCRIPT.read_text())
+    # The manuscript tooling is local only (not in the repository); its stages run only where the scripts exist.
+    # Present here, so the full decision graph is exercised; see test_manuscript_stages_skipped_without_tooling.
+    for name in MANUSCRIPT_TOOLING:
+        (script.parent / name).write_text("")
     logs = tmp_path / "logs"
     logs.mkdir()
     (logs / "covariate_fix_submitted.txt").write_text(f"2026-10-28 16:34:06\n{ORIGINAL}\n")
@@ -229,3 +234,21 @@ def test_missing_descendants_after_failed_temporal_rebuild_only_the_failed_branc
     assert not any(a.startswith("--dependency") for a in submissions[0])
     assert "--dependency=afterok:9001" in submissions[1]
     assert "--dependency=afterok:9002" in submissions[2]
+
+
+def test_manuscript_stages_skipped_without_tooling(sandbox):
+    """Without the local manuscript scripts the re-run still submits every pipeline stage and skips only theirs."""
+    root, script, env = sandbox
+    for name in MANUSCRIPT_TOOLING:
+        (script.parent / name).unlink()
+    result = subprocess.run(
+        ["bash", str(script), "--resume", "--accept-reviewed-eligibility-update", "--dry-run"],
+        env=env, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    submitted = [line for line in result.stderr.splitlines() if line.startswith("sbatch ")]
+    assert [n for n in ("fix_report", "fix_temporal") if any(f"--job-name={n} " in line for line in submitted)] == ["fix_report", "fix_temporal"]
+    for name in ("fix_pred_figures", "fix_tables", "fix_audit"):
+        assert not any(f"--job-name={name} " in line for line in submitted)
+        assert f"skipped {name}" in result.stderr
+

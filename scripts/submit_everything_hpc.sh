@@ -501,6 +501,15 @@ if [[ -z "${VALIDATION_MERGE_JOB}" && $((SKIP_ERA_STRATIFIED & SKIP_PATIENT_CLUS
 fi
 
 echo "=== Queuing follow-ups for ${organism} ==="
+# Manuscript tooling is not part of the public repository: skip its stages when the scripts are absent.
+if [[ "${SKIP_PREDICTION}" -eq 0 && ! -f scripts/run_supplementary_prediction.py ]]; then
+  echo "Supplementary prediction tables and figures: skipped (scripts/run_supplementary_prediction.py is not in this checkout)"
+  SKIP_PREDICTION=1
+fi
+if [[ "${SKIP_SUPPLEMENTARY_TABLES}" -eq 0 && ! -f scripts/build_supplementary_tables.py ]]; then
+  echo "Supplementary tables and quoted numbers: skipped (scripts/build_supplementary_tables.py is not in this checkout)"
+  SKIP_SUPPLEMENTARY_TABLES=1
+fi
 finished_jobs=()
 if [[ "${SKIP_ERA_STRATIFIED}" -eq 0 ]]; then
   era_job="$(sharded_follow_up era_stratified era-stratified "${ERA_STRATIFIED_SHARDS}" "${ERA_STRATIFIED_MEM}" "${ERA_STRATIFIED_TIME}")"
@@ -557,7 +566,7 @@ if [[ "${SKIP_SUPPLEMENTARY_TABLES}" -eq 0 ]]; then
   tables_job="$(follow_up amr_supplementary_tables "${main_partition}" "${TABLES_MEM}" "${TABLES_TIME}" "${table_deps}" \
     "\"\${AMR_CASCADE_PYTHON}\" scripts/build_supplementary_tables.py --env hpc --organism '${organism}' --publication '${PUBLICATION}'")"
   echo "Supplementary tables and quoted numbers: ${tables_job}${table_deps:+ (after ${table_deps})}"
-  if [[ "${PUBLICATION}" != all ]]; then
+  if [[ "${PUBLICATION}" != all && -f scripts/audit_paper1_outputs.py ]]; then
     audit_job="$(follow_up "amr_${PUBLICATION}_artifact_audit" "${main_partition}" "8G" "00:30:00" "${tables_job}" \
       "\"\${AMR_CASCADE_PYTHON}\" scripts/audit_paper1_outputs.py --env hpc --organism '${organism}' --publication '${PUBLICATION}'")"
     echo "Manuscript artifact audit (${PUBLICATION}): ${audit_job}"
@@ -570,5 +579,7 @@ if [[ "${DRY_RUN}" -eq 1 ]]; then
 else
   echo "All submissions queued. Check status with: squeue -u \$USER"
 fi
-echo "When everything has finished, export the outputs and run"
-echo "scripts/build_manuscript_package.py where the paper folders are."
+if [[ -f scripts/build_manuscript_package.py ]]; then
+  echo "When everything has finished, export the outputs and run"
+  echo "scripts/build_manuscript_package.py where the paper folders are."
+fi

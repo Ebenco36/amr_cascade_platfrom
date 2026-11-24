@@ -163,3 +163,16 @@ donut_51_1.svg
 figures/
 testing.ipynb
 scripts/observation_probabilities_README.md
+# Scripts outside the pipeline: kept local, not pushed (author's decision, 24 Nov 2026)
+scripts/build_identifiability_panel.py
+scripts/create_synthetic_armd_walkthrough_dataset.py
+scripts/run_sampling.py
+scripts/export_observation_probabilities.py
+scripts/observation_probabilities_README.md
+# Manuscript and supplementary tooling: kept local, not pushed (author's decision, 24 Nov 2026).
+# The pipeline runners skip these stages when the scripts are absent.
+scripts/build_manuscript_package.py
+scripts/build_supplementary_tables.py
+scripts/audit_paper1_outputs.py
+scripts/run_publication_readiness_audit.py
+scripts/run_supplementary_prediction.py

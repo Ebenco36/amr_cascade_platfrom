@@ -1419,6 +1419,12 @@ echo "ESKAPE: ${RUN_ESKAPE}"
 echo "All report figures: ${RUN_ALL_FIGURES}"
 echo "Site-comparison figures: ${RUN_SITE_COMPARISON_FIGURES}"
 echo "Scientific audit: ${RUN_AUDIT}"
+# Manuscript tooling (paper-facing audits, supplementary tables, packaging) is not part of the public repository:
+# its stages run only where those scripts exist, so the pipeline itself never depends on them.
+if [[ "${RUN_READINESS_AUDIT}" -eq 1 && ! -f scripts/run_publication_readiness_audit.py ]]; then
+  echo "Publication readiness audit: skipped (scripts/run_publication_readiness_audit.py is not in this checkout)"
+  RUN_READINESS_AUDIT=0
+fi
 echo "Publication readiness audit: ${RUN_READINESS_AUDIT}"
 echo "Reuse existing outputs: ${REUSE_EXISTING}"
 echo "Wait for completion: ${WAIT_FOR_JOBS}"

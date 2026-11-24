@@ -1,4 +1,8 @@
 """Threshold charts preserve saved results while using readable common scales."""
+import pathlib as _pathlib
+import pytest as _pytest
+if not (_pathlib.Path(__file__).resolve().parents[2] / "scripts" / "run_supplementary_prediction.py").exists():
+    _pytest.skip("manuscript tooling (scripts/run_supplementary_prediction.py) is not in this checkout", allow_module_level=True)
 import importlib.util
 from pathlib import Path
 import sys

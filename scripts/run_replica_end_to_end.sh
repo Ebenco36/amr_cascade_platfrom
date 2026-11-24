@@ -305,6 +305,7 @@ if should_run report; then
   run report "${PY[@]}" scripts/run_reporting.py --env "${ENV_NAME}" --scope combined --organism "${O}"     --figure-format html --figure-format png --figure-format svg --figure-format pdf --fail-on-missing-figures "${figure_args[@]}"
 fi
 readiness_audit() {
+  [[ -f scripts/run_publication_readiness_audit.py ]] || { echo "skip readiness_audit: script not in this checkout"; return 0; }
   run readiness_audit "${PY[@]}" scripts/run_publication_readiness_audit.py --env "${ENV_NAME}" --scope combined --organism "${O}" --require-training
 }
 scientific_audit() { run scientific_audit "${PY[@]}" scripts/run_scientific_audit.py --env "${ENV_NAME}" --scope combined --organism "${O}"; }
@@ -351,15 +352,15 @@ sensitivities() {
 ridge() {
   run ridge_penalty "${PY[@]}" scripts/run_ridge_penalty_sensitivity.py --env "${ENV_NAME}" --gold-scope combined --organism "${O}" --penalties 1,10,100
 }
-prediction() { run supplementary_prediction "${PY[@]}" scripts/run_supplementary_prediction.py --env "${ENV_NAME}" --organism "${O}"; }
+prediction() { [[ -f scripts/run_supplementary_prediction.py ]] || { echo "skip supplementary_prediction: script not in this checkout"; return 0; }; run supplementary_prediction "${PY[@]}" scripts/run_supplementary_prediction.py --env "${ENV_NAME}" --organism "${O}"; }
 if should_run follow_ups; then
   concurrently sensitivities "follow_up era-stratified era_stratified" "follow_up patient-cluster patient_cluster" ridge prediction
 fi
-if should_run supplementary_tables; then
+if should_run supplementary_tables && [[ -f scripts/build_supplementary_tables.py ]]; then
   run supplementary_tables "${PY[@]}" scripts/build_supplementary_tables.py --env "${ENV_NAME}" --organism "${O}"
 fi
 PACKAGE_STATUS=0
-if should_run package_dry_run; then
+if should_run package_dry_run && [[ -f scripts/build_manuscript_package.py ]]; then
   # Reported, not fatal: the inventory below still runs so every produced
   # table is listed; the run's exit status carries the packaging result.
   run package_dry_run "${PY[@]}" scripts/build_manuscript_package.py --env "${ENV_NAME}" --organism "${O}" --dry-run || PACKAGE_STATUS=$?

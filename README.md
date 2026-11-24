@@ -170,7 +170,7 @@ bash scripts/archive_export_artifacts.sh --dry-run
 
 Remove `--dry-run` to create the archive, manifest and checksum in `export_archives/`.
 The script first checks that the run is finished and current (no jobs running, all ESKAPE
-targets finished, masking on the full data, the manuscripts audit passed and, after the
+targets finished, masking on the full data, the manuscripts audit passed where that tool is present and, after the
 28 October 2026 covariate re-run, its outputs newer than its submission) and refuses to export
 otherwise (`--allow-incomplete` overrides). The default
 includes `data/artifacts`, `data/gold`, `data/features`, `data/metadata`, `data/reference`,
@@ -178,10 +178,11 @@ includes `data/artifacts`, `data/gold`, `data/features`, `data/metadata`, `data/
 into `logs/` and verifies the archive's checksum and key files. `--include-path` adds to these
 defaults. Archiving is non-destructive.
 
-The paper folders are not in this repository. Where they are, extract the archive into a
-git-ignored folder and copy every figure and table the manuscripts cite into place with
-`.venv/bin/python scripts/build_manuscript_package.py --env hpc --publication manuscripts --run-root <extracted folder>`
-(add `--dry-run` first).
+The paper folders and the manuscript tooling (supplementary tables and quoted numbers, the
+supplementary prediction figures, paper-facing audits and packaging) are not in this repository.
+The runners skip those stages when their scripts are absent, so the full pipeline runs from a
+fresh clone: every analysis stage (ingestion to cascade validation, the sensitivity analyses,
+training, prevalence, masking, year-by-year course and the report) is unaffected.
 
 ## Repository Guide
 

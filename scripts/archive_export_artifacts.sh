@@ -252,7 +252,8 @@ else fail "missing: ${T}/masking_experiment/masking_run.json"; fi
 
 if [[ -f "${MARKER}" ]]; then audit_log="$(ls -t logs/fix_audit_*.out 2>/dev/null | head -1 || true)"
 else audit_log="$(ls -t logs/amr_*_artifact_audit_*.out 2>/dev/null | head -1 || true)"; fi
-if [[ -n "${audit_log}" ]] && grep -q "artifact audit: PASS" "${audit_log}"; then pass "audit PASS (${audit_log})"
+if [[ ! -f scripts/audit_paper1_outputs.py ]]; then warn "manuscripts audit not checked (scripts/audit_paper1_outputs.py is not in this checkout)"
+elif [[ -n "${audit_log}" ]] && grep -q "artifact audit: PASS" "${audit_log}"; then pass "audit PASS (${audit_log})"
 else fail "manuscripts audit did not pass (${audit_log:-no audit log in logs/})"; fi
 
 if [[ ${#problems[@]} -gt 0 ]]; then
